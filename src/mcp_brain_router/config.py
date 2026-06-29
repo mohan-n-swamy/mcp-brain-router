@@ -94,14 +94,26 @@ class Config:
 
         content = "\n".join(lines)
 
-        # Write with secure temp file + rename
-        temp_file = CONFIG_FILE.with_suffix(".tmp")
-        with open(temp_file, "w") as f:
-            f.write(content)
-
-        # Set permissions to 0600 before moving
-        temp_file.chmod(0o600)
-        temp_file.replace(CONFIG_FILE)
+        # Atomic 0600 write: create the temp file with 0600 BEFORE writing the
+        # secret (os.open with O_CREAT|O_EXCL|O_WRONLY + mode), so the key is
+        # never on disk world-readable — closes the chmod-after-write race.
+        # Unique per-pid name + O_EXCL defeats the predictable-name/symlink attack.
+        temp_file = CONFIG_FILE.with_suffix(f".tmp.{os.getpid()}")
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        fd = os.open(temp_file, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            # Belt-and-suspenders: enforce 0600 even if umask altered creation.
+            os.chmod(temp_file, 0o600)
+            os.replace(temp_file, CONFIG_FILE)
+        except BaseException:
+            # Never leave a stray temp file holding the key on any failure.
+            try:
+                os.unlink(temp_file)
+            except FileNotFoundError:
+                pass
+            raise
 
     @staticmethod
     def _escape_toml(value: str) -> str:

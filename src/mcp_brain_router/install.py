@@ -30,6 +30,8 @@ from mcp_brain_router.config import (
     Config,
     ConfigError,
     ensure_config_dir,
+    CONFIG_FILE,
+    CONFIG_DIR,
 )
 
 
@@ -214,7 +216,7 @@ def write_config(
         Path to the written config file
     """
     ensure_config_dir()
-    config_file = Path.home() / ".config" / "mcp-brain-router" / "config.toml"
+    config_file = CONFIG_FILE
 
     # Build Config object
     model_overrides = None
@@ -259,10 +261,11 @@ def register_in_claude_code() -> bool:
     Self-register the MCP in Claude Code.
 
     Computes the exact 'claude mcp add' command and attempts to run it.
+    After registration, verifies the entry appears in 'claude mcp list'.
     If 'claude' is not on PATH, prints the command for manual execution.
 
     Returns:
-        True if successfully registered, False otherwise
+        True if successfully registered and verified, False otherwise
     """
     python_exe = sys.executable
     command = ["claude", "mcp", "add", "brain-router", "--", python_exe, "-m", "mcp_brain_router.server"]
@@ -285,8 +288,20 @@ def register_in_claude_code() -> bool:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            print(f"{Color.GREEN}✓{Color.RESET} MCP registered successfully in Claude Code")
-            return True
+            # Verify registration by checking 'claude mcp list'
+            verify_result = subprocess.run(
+                ["claude", "mcp", "list"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if verify_result.returncode == 0 and "brain-router" in verify_result.stdout:
+                print(f"{Color.GREEN}✓{Color.RESET} MCP registered and verified in Claude Code")
+                return True
+            else:
+                print(f"{Color.YELLOW}Warning:{Color.RESET} Registration succeeded but verification failed.")
+                print(f"Run 'claude mcp list' to confirm manual registration if needed.\n")
+                return False
         else:
             print(f"{Color.YELLOW}Warning:{Color.RESET} Registration may have failed.")
             print(f"If needed, run manually:\n  {Color.BOLD}{command_str}{Color.RESET}\n")
@@ -340,7 +355,7 @@ def _test_backend_glm(api_key: str, headroom_url: Optional[str]) -> bool:
     try:
         import httpx
     except ImportError:
-        print(f"  {Color.YELLOW}⊘{Color.RESET} GLM: httpx not available (install mcp-brain-router[smoke])")
+        print(f"  {Color.YELLOW}⊘{Color.RESET} GLM: httpx not available")
         return False
 
     try:
@@ -351,10 +366,11 @@ def _test_backend_glm(api_key: str, headroom_url: Optional[str]) -> bool:
             "content-type": "application/json",
         }
 
-        url = "https://api.z.ai/api/anthropic/v1/messages"
+        # Use headroom proxy if configured
         if headroom_url:
-            # Route through headroom proxy (concept; actual proxy logic in adapter)
-            pass
+            url = f"{headroom_url}/anthropic/v1/messages"
+        else:
+            url = "https://api.z.ai/api/anthropic/v1/messages"
 
         payload = {
             "model": "glm-5.2",
@@ -382,7 +398,7 @@ def _test_backend_deepseek(api_key: str, headroom_url: Optional[str]) -> bool:
     try:
         import httpx
     except ImportError:
-        print(f"  {Color.YELLOW}⊘{Color.RESET} DeepSeek: httpx not available (install mcp-brain-router[smoke])")
+        print(f"  {Color.YELLOW}⊘{Color.RESET} DeepSeek: httpx not available")
         return False
 
     try:
@@ -393,10 +409,11 @@ def _test_backend_deepseek(api_key: str, headroom_url: Optional[str]) -> bool:
             "content-type": "application/json",
         }
 
-        url = "https://api.deepseek.com/anthropic/v1/messages"
+        # Use headroom proxy if configured
         if headroom_url:
-            # Route through headroom proxy (concept)
-            pass
+            url = f"{headroom_url}/anthropic/v1/messages"
+        else:
+            url = "https://api.deepseek.com/anthropic/v1/messages"
 
         payload = {
             "model": "deepseek-v4-flash",

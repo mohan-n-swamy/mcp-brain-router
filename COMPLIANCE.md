@@ -6,7 +6,9 @@
 
 ## TL;DR (BLUF)
 
-This tool does not access Anthropic's Services by bot, script, or automated means. The orchestrator is Claude Code—a native, first-party Anthropic client—which never passes through any proxy or third-party software. The MCP itself only delegates to other LLM providers (DeepSeek, GLM, Codex) using their own API keys; that traffic never reaches Anthropic's infrastructure. The tool shares no Anthropic credentials and introduces no automated access patterns. Therefore, it falls outside the scope of Anthropic's Consumer Terms clause prohibiting automated access. We make no claim that Anthropic reviewed or approved this tool.
+**PRODUCTION CAUTION:** Until Anthropic explicitly confirms, treat this tool as personal/testing use only. It is not market-facing and carries no endorsement from Anthropic.
+
+This tool does not access Anthropic's Services by bot, script, or automated means. The orchestrator is Claude Code—a native, first-party Anthropic client—which never passes through any proxy or third-party software. The MCP itself only delegates to other LLM providers (DeepSeek, GLM, Codex) using their own API keys; that traffic never reaches Anthropic's infrastructure. The tool shares no Anthropic credentials and introduces no automated access patterns. Therefore, it falls outside the scope of Anthropic's Consumer Terms clause prohibiting automated access. Anthropic has not reviewed or approved this tool.
 
 ---
 
@@ -80,9 +82,16 @@ The tool **does not bypass Anthropic's protective measures**. It uses MCP, an An
 
 ## What we could NOT verify (the "Fin" support-agent assertion)
 
-In June 2026, an Anthropic support agent ("Fin") asserted in a chat that Anthropic's Terms contain a clause addressing *"third-party tools that misrepresent identity or route third-party traffic against subscription limits,"* with three footnotes `[1][2][3]`.
+In June 2026, an Anthropic support agent ("Fin") asserted in a chat that Anthropic's Terms contain a clause addressing *"third-party tools that misrepresent identity or route third-party traffic against subscription limits."*
 
-**We could not independently verify this claim.** The exact language does not appear in the public Consumer Terms (Source A) or the Acceptable Use Policy (https://www.anthropic.com/legal/aup, accessed 2026-06-29). The support-agent statement is included here for transparency, but we treat it as an **unverified assertion**, not as the governing legal text.
+**We could not independently verify this claim.** The exact language does not appear in the public Consumer Terms (Source A) or the Acceptable Use Policy (https://www.anthropic.com/legal/aup, accessed 2026-06-29). The support-agent statement is included here for transparency, but we treat it as an **unverified assertion from a support agent**, not as the governing legal text or definitive policy.
+
+**Critical distinction:** When an individual support agent makes a statement, it is not the same as Anthropic's official policy. Official policy lives in:
+1. The published legal terms (Consumer Terms, Commercial Terms, AUP)
+2. Direct communication from Anthropic's legal or policy team
+3. Official documentation (support articles, help center)
+
+An individual support agent's ad-hoc assertion ≠ official policy. If Anthropic's legal team has a concern, it must appear in one of the sources above to be binding.
 
 **What "Fin" may have intended:** Anthropic may have concerns about a *different* pattern—one where a proxy or agent software **wraps the Anthropic subscription token** and routes it through third-party infrastructure, making it appear to Anthropic that the traffic is legitimate when it is actually being intercepted and modified. That pattern *would* be closer to "misrepresenting identity" and "bypassing protective measures."
 

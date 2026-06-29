@@ -26,6 +26,7 @@ from mcp_brain_router.router import (
     BackendUnavailableError,
 )
 from mcp_brain_router.config import Config, ConfigError, ensure_config_dir
+from mcp_brain_router import backends
 
 
 class TestRouteFunction:
@@ -335,3 +336,96 @@ class TestIntegrationSmoke:
             assert hasattr(result, "complexity")
             assert hasattr(result, "headroom_used")
             assert hasattr(result, "usage")
+
+
+# ============================================================================
+# Model Validation & Security Tests
+# ============================================================================
+
+class TestModelValidation:
+    """Test model name validation against argument injection."""
+
+    def test_valid_model_names(self):
+        """Test that valid model names pass validation."""
+        valid_models = [
+            "gpt-5.5",
+            "deepseek-v4-flash",
+            "glm-5.2",
+            "gpt_5_5",
+            "model.v1",
+        ]
+        for model in valid_models:
+            backends._validate_model_name(model)  # Should not raise
+
+    def test_invalid_model_names_raise_error(self):
+        """Test that models with shell metacharacters are rejected."""
+        invalid_models = [
+            "gpt-5.5; rm -rf",
+            "gpt-5.5 || whoami",
+            "gpt-5.5`whoami`",
+            "gpt-5.5$(whoami)",
+            "gpt-5.5 --flag",
+            "gpt-5.5@special",
+            "gpt-5.5&whoami",
+        ]
+        for model in invalid_models:
+            with pytest.raises(backends.BackendError) as exc_info:
+                backends._validate_model_name(model)
+            assert "Invalid model name" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_codex_model_injection_rejected(self):
+        """Test that Codex rejects injected model args."""
+        config = Config(
+            deepseek_key="test_ds",
+            glm_key="test_glm",
+            codex_enabled=True,
+        )
+
+        # Try to inject a flag via model name
+        with pytest.raises(backends.BackendError) as exc_info:
+            backends.call_codex("test prompt", "gpt-5.5; rm -rf /")
+
+        assert "Invalid model name" in str(exc_info.value)
+
+
+class TestHttpxUsage:
+    """Test that backends use httpx, not aiohttp."""
+
+    def test_httpx_imported_in_backends(self):
+        """Verify httpx is imported at module level in backends."""
+        import sys
+        # backends module must import httpx successfully
+        import mcp_brain_router.backends
+        assert "httpx" in dir(mcp_brain_router.backends)
+
+    def test_no_aiohttp_in_backends(self):
+        """Verify backends.py does NOT use aiohttp."""
+        with open("/Users/mohannarayanswamy/code workshop/claude projects/Personal/mcp-brain-router/src/mcp_brain_router/backends.py") as f:
+            content = f.read()
+            # Should not import aiohttp anywhere
+            assert "import aiohttp" not in content
+            assert "from aiohttp" not in content
+            # Should import httpx
+            assert "import httpx" in content or "httpx.AsyncClient" in content
+
+
+class TestHeadroomUrlSubstitution:
+    """Test that headroom URL substitution works correctly."""
+
+    def test_deepseek_via_headroom_url_construction(self):
+        """Verify DeepSeek via headroom constructs the correct URL."""
+        # This is a code inspection test: verify the function builds the URL correctly
+        import inspect
+        source = inspect.getsource(backends.call_deepseek_via_headroom)
+        # Should construct URL as {headroom_url}/anthropic/v1/messages
+        assert "f\"{headroom_url}/anthropic/v1/messages\"" in source or \
+               "f'{headroom_url}/anthropic/v1/messages'" in source
+
+    def test_glm_via_headroom_url_construction(self):
+        """Verify GLM via headroom constructs the correct URL."""
+        import inspect
+        source = inspect.getsource(backends.call_glm_via_headroom)
+        # Should construct URL as {headroom_url}/anthropic/v1/messages
+        assert "f\"{headroom_url}/anthropic/v1/messages\"" in source or \
+               "f'{headroom_url}/anthropic/v1/messages'" in source
