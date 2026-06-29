@@ -108,14 +108,37 @@ async def _delegate_impl(
             "source": "external-untrusted",
         }
 
+        # Quota-exhaustion signal: every backend in the tier's chain was
+        # rate-limited. This is NOT an answer — it tells the orchestrator
+        # (Claude) to HANDLE THE TASK NATIVELY. Surface it explicitly so the
+        # caller never mistakes the "sorry, can't" content for a real result.
+        if result.exhausted:
+            response["exhausted"] = True
+            response["tried"] = result.tried or []
+            response["reset_at"] = result.reset_at
+            response["action_required"] = (
+                "All delegated backends are quota-exhausted. Do NOT treat "
+                "'answer' as a result — handle this task natively yourself."
+            )
+            logger.warning(
+                f"delegate() EXHAUSTED: tried={result.tried} reset_at={result.reset_at}"
+            )
+            return response
+
         # Add usage info if available
         if result.usage:
             response["tokens_in"] = result.usage.get("input_tokens", 0)
             response["tokens_out"] = result.usage.get("output_tokens", 0)
 
+        # Record any fallback that occurred (primary was exhausted, a later
+        # backend in the chain answered) so the caller can see it wasn't primary.
+        if result.tried and len(result.tried) > 1:
+            response["fell_back"] = True
+            response["tried"] = result.tried
+
         logger.info(
             f"delegate() success: backend={result.backend}, "
-            f"tokens={result.usage or 'n/a'}"
+            f"tried={result.tried}, tokens={result.usage or 'n/a'}"
         )
         return response
 
@@ -180,6 +203,17 @@ def create_server():
                 - complexity: The tier (cheap, code, adversarial).
                 - tokens_in: Input tokens (if trackable).
                 - tokens_out: Output tokens (if trackable).
+                - fell_back (optional): true if the primary backend was quota-
+                  exhausted and a fallback in the chain answered instead.
+
+            QUOTA-EXHAUSTION — when EVERY backend in the tier is rate-limited,
+            the dict instead contains:
+                - exhausted: true
+                - action_required: instruction to HANDLE THE TASK NATIVELY
+                  (do NOT use 'answer' as a result — it's a placeholder).
+                - tried: backends attempted, in order.
+                - reset_at: earliest provider reset time, if known.
+            On exhausted=true you (the orchestrator) must do the task yourself.
                 - headroom_used: True if request went through local headroom proxy.
                 - source: Always 'external-untrusted'.
 
@@ -222,6 +256,17 @@ def create_server():
                 - complexity: The tier (cheap, code, adversarial).
                 - tokens_in: Input tokens (if trackable).
                 - tokens_out: Output tokens (if trackable).
+                - fell_back (optional): true if the primary backend was quota-
+                  exhausted and a fallback in the chain answered instead.
+
+            QUOTA-EXHAUSTION — when EVERY backend in the tier is rate-limited,
+            the dict instead contains:
+                - exhausted: true
+                - action_required: instruction to HANDLE THE TASK NATIVELY
+                  (do NOT use 'answer' as a result — it's a placeholder).
+                - tried: backends attempted, in order.
+                - reset_at: earliest provider reset time, if known.
+            On exhausted=true you (the orchestrator) must do the task yourself.
                 - headroom_used: True if request went through local headroom proxy.
                 - source: Always 'external-untrusted'.
 

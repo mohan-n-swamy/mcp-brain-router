@@ -14,6 +14,66 @@ class BackendError(Exception):
     pass
 
 
+class BackendQuotaError(BackendError):
+    """Raised when a backend rejects the call for a transient/quota reason
+    (HTTP 429 rate limit, or 5xx server error) — i.e. a DIFFERENT backend
+    might succeed, so the router should fall through to the next in the chain.
+
+    Carries the HTTP status and a sanitized message. For rate-limit bodies the
+    provider message (e.g. GLM "Usage limit reached for 5 hour … reset at …")
+    holds NO secret — only the reset time — so it is safe to surface and is
+    what lets the orchestrator decide whether to wait.
+    """
+    def __init__(self, provider: str, status_code: int, message: str = "",
+                 reset_at: Optional[str] = None):
+        self.provider = provider
+        self.status_code = status_code
+        self.message = message
+        self.reset_at = reset_at
+        detail = f" — {message}" if message else ""
+        super().__init__(f"{provider} quota/transient error {status_code}{detail}")
+
+
+# HTTP status codes that mean "try a different backend" rather than "fix config".
+# 429 = rate limit / quota; 5xx = provider-side transient failure.
+# 4xx (auth, bad request) are NOT here — those are config errors, no fallback.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _classify_http_error(provider: str, status_code: int, body: str) -> BackendError:
+    """Map a non-200 HTTP response to the right exception type.
+
+    Retryable (429/5xx) -> BackendQuotaError (router falls through).
+    Anything else        -> BackendError (hard stop, surfaces to caller).
+
+    The body is parsed ONLY to lift a rate-limit message + reset time, which
+    carry no secret. The raw body is never echoed wholesale.
+    """
+    message = ""
+    reset_at = None
+    try:
+        import json as _json
+        data = _json.loads(body)
+        err = data.get("error", data) if isinstance(data, dict) else {}
+        if isinstance(err, dict):
+            message = str(err.get("message", ""))[:300]
+    except Exception:
+        message = ""
+    # Best-effort reset-time lift from common "reset at YYYY-MM-DD HH:MM:SS" shape.
+    if message:
+        import re as _re
+        m = _re.search(r"reset(?:s)?\s+at\s+([0-9:\- ]+)", message)
+        if m:
+            reset_at = m.group(1).strip()
+
+    if status_code in _RETRYABLE_STATUS:
+        return BackendQuotaError(provider, status_code, message, reset_at)
+    # Non-retryable: do NOT echo the body (may carry request echoes); message
+    # from the parsed error field is safe and useful.
+    safe = f": {message}" if message else " (body withheld)"
+    return BackendError(f"{provider} API error {status_code}{safe}")
+
+
 def _extract_text(data: Dict[str, Any], provider: str) -> str:
     """Pull the assistant text from an Anthropic-shape response.
 
@@ -77,9 +137,8 @@ async def call_deepseek(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise BackendError(
-                    f"DeepSeek API error {response.status_code}: "
-                    f"(body hidden for security)"
+                raise _classify_http_error(
+                    "DeepSeek", response.status_code, response.text
                 )
 
             data = response.json()
@@ -127,9 +186,8 @@ async def call_deepseek_via_headroom(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise BackendError(
-                    f"DeepSeek via headroom error {response.status_code}: "
-                    f"(body hidden for security)"
+                raise _classify_http_error(
+                    "DeepSeek-headroom", response.status_code, response.text
                 )
 
             data = response.json()
@@ -185,9 +243,8 @@ async def call_glm(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise BackendError(
-                    f"GLM API error {response.status_code}: "
-                    f"(body hidden for security)"
+                raise _classify_http_error(
+                    "GLM", response.status_code, response.text
                 )
 
             data = response.json()
@@ -234,9 +291,8 @@ async def call_glm_via_headroom(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise BackendError(
-                    f"GLM via headroom error {response.status_code}: "
-                    f"(body hidden for security)"
+                raise _classify_http_error(
+                    "GLM-headroom", response.status_code, response.text
                 )
 
             data = response.json()

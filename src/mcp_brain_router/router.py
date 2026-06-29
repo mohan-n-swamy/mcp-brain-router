@@ -11,6 +11,7 @@ from typing import Any, Dict, Literal, Optional
 from dataclasses import dataclass
 
 from . import backends
+from .backends import BackendQuotaError
 from .config import Config
 
 
@@ -19,6 +20,21 @@ class Complexity(str, Enum):
     CHEAP = "cheap"
     CODE = "code"
     ADVERSARIAL = "adversarial"
+
+
+# Per-tier fallback chain. chain[0] is the tier's primary backend; the rest are
+# fallbacks tried (in order) when the primary is quota-exhausted (429/5xx).
+# NO Anthropic backend appears here by design — when the whole chain is
+# exhausted, route() returns exhausted=True and the orchestrator (Claude)
+# handles the task natively (COMPLIANCE.md: the MCP never calls Anthropic).
+#   - cheap:       DeepSeek -> GLM        (both cheap-ish chat backends)
+#   - code:        GLM      -> DeepSeek   (GLM best for code; DeepSeek still capable)
+#   - adversarial: Codex                  (local subprocess, no remote quota to exhaust)
+_FALLBACK_CHAINS = {
+    Complexity.CHEAP: ["deepseek", "glm"],
+    Complexity.CODE: ["glm", "deepseek"],
+    Complexity.ADVERSARIAL: ["codex"],
+}
 
 
 @dataclass
@@ -30,6 +46,13 @@ class RouteResult:
     complexity: Complexity
     headroom_used: bool
     usage: Optional[Dict[str, int]] = None  # token counts if available
+    # Quota-exhaustion signal. When every backend in the tier's fallback chain
+    # is quota-exhausted, route() returns a RouteResult with exhausted=True
+    # instead of raising — a clean "sorry, can't" the orchestrator (Claude)
+    # reads to decide to handle the task NATIVELY. The MCP never calls Anthropic.
+    exhausted: bool = False
+    tried: Optional[list] = None        # backends attempted, in order
+    reset_at: Optional[str] = None      # earliest provider reset time, if known
 
 
 class BackendError(Exception):
@@ -81,29 +104,78 @@ async def route(
     if config is None:
         config = Config.load()
 
-    # Resolve target backend and model
-    backend_name, model = _resolve_backend_and_model(
-        complexity, model_override, config
+    # Walk the tier's fallback chain. Each entry is a non-Anthropic backend;
+    # on quota exhaustion (429/5xx) we fall through to the next. The chain is
+    # ordered "best-fit first" — see _FALLBACK_CHAINS. A model_override only
+    # applies to the PRIMARY backend (the one the tier maps to); fallbacks use
+    # their own defaults, since an override model id is provider-specific.
+    chain = _FALLBACK_CHAINS[complexity]
+    primary = chain[0]
+
+    tried = []
+    last_quota_err = None
+    known_reset = None  # earliest reset time seen across quota errors, if any
+    for backend_name in chain:
+        # Skip a fallback backend that lacks credentials / isn't enabled —
+        # it's not a failure, just unavailable. (The PRIMARY still surfaces a
+        # missing-credential error so misconfiguration is loud, not silent.)
+        try:
+            _validate_credentials(backend_name, config)
+        except (MissingCredentialError, BackendUnavailableError):
+            if backend_name == primary:
+                raise
+            continue
+
+        model = _resolve_model_for_backend(
+            backend_name,
+            model_override if backend_name == primary else None,
+            config,
+        )
+        tried.append(backend_name)
+        try:
+            if backend_name == "deepseek":
+                result = await _route_deepseek(prompt, model, config)
+            elif backend_name == "glm":
+                result = await _route_glm(prompt, model, config)
+            elif backend_name == "codex":
+                result = await _route_codex(prompt, model, config)
+            else:
+                raise ValueError(f"Unknown backend: {backend_name}")
+        except BackendQuotaError as e:
+            # Quota / transient — try the next backend in the chain.
+            last_quota_err = e
+            # Keep the earliest reset time any backend reported (string compare
+            # is fine for the "YYYY-MM-DD HH:MM:SS" shape we lift).
+            if e.reset_at and (known_reset is None or e.reset_at < known_reset):
+                known_reset = e.reset_at
+            continue
+
+        # Success — augment with routing metadata and return.
+        result.complexity = complexity
+        result.backend = backend_name
+        result.exhausted = False
+        result.tried = tried
+        return result
+
+    # Every backend in the chain was quota-exhausted (or unavailable). Return a
+    # structured "sorry, can't" signal — NOT an exception — so the orchestrator
+    # handles the task natively. The MCP never falls back to Anthropic itself.
+    reset_at = known_reset
+    return RouteResult(
+        content=(
+            f"All {complexity.value if hasattr(complexity, 'value') else complexity} "
+            f"backends exhausted ({', '.join(tried) or 'none available'}). "
+            f"Handle this task natively. {('Earliest reset: ' + reset_at) if reset_at else ''}".strip()
+        ),
+        model="",
+        backend="none",
+        complexity=complexity,
+        headroom_used=False,
+        usage=None,
+        exhausted=True,
+        tried=tried,
+        reset_at=reset_at,
     )
-
-    # Validate credentials
-    _validate_credentials(backend_name, config)
-
-    # Route to backend
-    if backend_name == "deepseek":
-        result = await _route_deepseek(prompt, model, config)
-    elif backend_name == "glm":
-        result = await _route_glm(prompt, model, config)
-    elif backend_name == "codex":
-        result = await _route_codex(prompt, model, config)
-    else:
-        raise ValueError(f"Unknown backend: {backend_name}")
-
-    # Augment with routing metadata
-    result.complexity = complexity
-    result.backend = backend_name
-
-    return result
 
 
 def _resolve_backend_and_model(
@@ -154,6 +226,24 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         "codex": "gpt-5.5",
     }
     return defaults.get(backend_name, "unknown")
+
+
+def _resolve_model_for_backend(
+    backend_name: str, model_override: Optional[str], config: Config
+) -> str:
+    """Resolve the model id for a specific backend in the fallback chain.
+
+    A caller-supplied model_override is provider-specific, so it is honored
+    ONLY for the primary backend (the chain caller passes None for fallbacks).
+    Otherwise: a matching [model_overrides] config entry, else the backend
+    default.
+    """
+    if model_override:
+        return model_override
+    overrides = config.model_overrides or {}
+    if backend_name in overrides:
+        return overrides[backend_name]
+    return _get_backend_default_model(backend_name, config)
 
 
 def _validate_credentials(backend_name: str, config: Config) -> None:

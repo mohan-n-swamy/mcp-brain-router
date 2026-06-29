@@ -429,3 +429,122 @@ class TestHeadroomUrlSubstitution:
         # Should construct URL as {headroom_url}/anthropic/v1/messages
         assert "f\"{headroom_url}/anthropic/v1/messages\"" in source or \
                "f'{headroom_url}/anthropic/v1/messages'" in source
+
+
+class TestFallbackChain:
+    """Quota-fallback chain: on 429/5xx a tier falls through to the next
+    non-Anthropic backend; all-exhausted returns a structured signal."""
+
+    def _cfg(self):
+        return Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True)
+
+    @pytest.mark.asyncio
+    async def test_code_glm_429_falls_to_deepseek(self):
+        """CODE primary GLM hits 429 -> chain falls to DeepSeek, returns it."""
+        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm, \
+             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds:
+            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit reached")
+            mds.return_value = {"content": "PONG", "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+            result = await route(Complexity.CODE, "p", config=self._cfg())
+
+            assert result.backend == "deepseek"
+            assert result.content == "PONG"
+            assert result.exhausted is False
+            assert result.tried == ["glm", "deepseek"]
+            assert mglm.called and mds.called
+
+    @pytest.mark.asyncio
+    async def test_all_backends_exhausted_returns_signal(self):
+        """Both backends 429 -> exhausted=True signal (NOT an exception),
+        carrying reset_at so the orchestrator can decide to handle natively."""
+        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm, \
+             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds:
+            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "reset at 2026-06-29 15:56:33", reset_at="2026-06-29 15:56:33")
+            mds.side_effect = backends.BackendQuotaError("DeepSeek", 429, "rate limited")
+
+            result = await route(Complexity.CODE, "p", config=self._cfg())
+
+            assert result.exhausted is True
+            assert result.backend == "none"
+            assert result.tried == ["glm", "deepseek"]
+            assert result.reset_at == "2026-06-29 15:56:33"
+            # The content is a human/agent-readable "handle natively" hint.
+            assert "natively" in result.content.lower()
+
+    @pytest.mark.asyncio
+    async def test_hard_error_does_not_silently_fallback(self):
+        """A non-retryable BackendError (e.g. auth/4xx) must propagate, NOT
+        get masked by a fallback — config errors should be loud."""
+        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm, \
+             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds:
+            mglm.side_effect = backends.BackendError("GLM API error 401: bad key")
+            mds.return_value = {"content": "should-not-be-used", "usage": {}}
+
+            with pytest.raises(backends.BackendError):
+                await route(Complexity.CODE, "p", config=self._cfg())
+            assert not mds.called  # never fell through on a hard error
+
+    @pytest.mark.asyncio
+    async def test_cheap_chain_is_deepseek_then_glm(self):
+        """CHEAP primary DeepSeek 429 -> falls to GLM."""
+        with patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds, \
+             patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
+            mds.side_effect = backends.BackendQuotaError("DeepSeek", 429, "limit")
+            mglm.return_value = {"content": "PONG", "usage": {}}
+
+            result = await route(Complexity.CHEAP, "p", config=self._cfg())
+
+            assert result.backend == "glm"
+            assert result.tried == ["deepseek", "glm"]
+
+    @pytest.mark.asyncio
+    async def test_adversarial_single_entry_chain(self):
+        """ADVERSARIAL chain is codex-only; success returns codex."""
+        with patch("mcp_brain_router.router.backends.call_codex") as mcx:
+            mcx.return_value = {"content": "PONG", "usage": {}}
+            result = await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
+            assert result.backend == "codex"
+            assert result.tried == ["codex"]
+            assert result.exhausted is False
+
+    @pytest.mark.asyncio
+    async def test_missing_fallback_credential_is_skipped_not_fatal(self):
+        """If a FALLBACK backend lacks credentials, it is skipped (unavailable),
+        and if the primary was exhausted with no usable fallback -> signal."""
+        cfg = Config(deepseek_key=None, glm_key="glm-k", codex_enabled=True)
+        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
+            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit")
+            # CODE chain = [glm, deepseek]; deepseek has no key -> skipped.
+            result = await route(Complexity.CODE, "p", config=cfg)
+            assert result.exhausted is True
+            assert result.tried == ["glm"]  # deepseek skipped (no key)
+
+
+class TestErrorClassification:
+    """_classify_http_error maps statuses to the right exception type."""
+
+    def test_429_is_quota_error(self):
+        err = backends._classify_http_error(
+            "GLM", 429,
+            '{"error":{"message":"Usage limit reached for 5 hour. reset at 2026-06-29 15:56:33"}}',
+        )
+        assert isinstance(err, backends.BackendQuotaError)
+        assert err.status_code == 429
+        assert err.reset_at == "2026-06-29 15:56:33"
+
+    def test_5xx_is_quota_error(self):
+        err = backends._classify_http_error("DeepSeek", 503, "{}")
+        assert isinstance(err, backends.BackendQuotaError)
+
+    def test_4xx_auth_is_hard_error(self):
+        err = backends._classify_http_error(
+            "GLM", 401, '{"error":{"message":"invalid api key"}}',
+        )
+        assert isinstance(err, backends.BackendError)
+        assert not isinstance(err, backends.BackendQuotaError)
+
+    def test_hard_error_does_not_leak_raw_body(self):
+        err = backends._classify_http_error("GLM", 400, "raw-secret-echo-body")
+        # Unparseable body -> withheld, not echoed.
+        assert "raw-secret-echo-body" not in str(err)
