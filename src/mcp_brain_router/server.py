@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 try:
@@ -48,6 +50,33 @@ def _load_config() -> Config | None:
             logger.warning(f"Config load failed: {e}")
             _config = None
     return _config
+
+
+# Durable, append-only delegation audit log. One JSONL line per delegate()
+# call so routing is verifiable across sessions (the MCP keeps no other trail).
+# Fail-OPEN: a logging error must never break a delegation.
+_DELEGATION_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
+
+
+def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
+    """Append one audit line for a completed delegate() call. Never raises."""
+    try:
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "complexity": response.get("complexity"),
+            "backend": response.get("backend"),
+            "model": response.get("model"),
+            "exhausted": bool(response.get("exhausted", False)),
+            "fell_back": bool(response.get("fell_back", False)),
+            "tried": response.get("tried") or [],
+            "tokens_out": response.get("tokens_out", 0),
+            "prompt_len": prompt_len,
+        }
+        _DELEGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _DELEGATION_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception as e:  # noqa: BLE001 — audit log must never break delegate()
+        logger.warning(f"delegation-log write failed (non-fatal): {e}")
 
 
 async def _delegate_impl(
@@ -123,6 +152,7 @@ async def _delegate_impl(
             logger.warning(
                 f"delegate() EXHAUSTED: tried={result.tried} reset_at={result.reset_at}"
             )
+            _log_delegation(response, len(prompt))
             return response
 
         # Add usage info if available
@@ -140,6 +170,7 @@ async def _delegate_impl(
             f"delegate() success: backend={result.backend}, "
             f"tried={result.tried}, tokens={result.usage or 'n/a'}"
         )
+        _log_delegation(response, len(prompt))
         return response
 
     except (MissingCredentialError, BackendUnavailableError) as e:
