@@ -1,0 +1,29 @@
+# mcp-brain-router Configuration Example
+#
+# DO NOT COMMIT YOUR REAL CONFIG.
+# The installer creates ~/.config/mcp-brain-router/config.toml with chmod 0600.
+#
+# API keys are stored securely (user-read-only, 0600 permissions).
+# Never check real keys into git — only this example template.
+
+# DeepSeek API key (for "cheap" complexity tier)
+deepseek_key = "sk-xxxxxxxxxxxxx"
+
+# GLM (Zhipu) API key (for "code" complexity tier)
+glm_key = "sk-xxxxxxxxxxxxx"
+
+# Codex CLI availability (for "adversarial" complexity tier)
+# Set to true only if 'codex' binary is installed and on PATH
+codex_enabled = false
+
+# Headroom proxy base URL (optional)
+# If set, routes DeepSeek and GLM through this proxy for token caching/compression
+# Leave commented to use direct API calls
+# headroom_base_url = "http://localhost:8282"
+
+# Model overrides per complexity tier (optional)
+# Overrides the default model for each tier
+[model_overrides]
+# cheap = "deepseek-v4-flash"   # default
+# code = "glm-5.2"               # default
+# adversarial = "gpt-5.5"        # default
