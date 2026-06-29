@@ -14,6 +14,31 @@ class BackendError(Exception):
     pass
 
 
+def _extract_text(data: Dict[str, Any], provider: str) -> str:
+    """Pull the assistant text from an Anthropic-shape response.
+
+    Robust to reasoning models: scans content[] for the FIRST block whose
+    type == 'text' (skipping 'thinking'/'redacted_thinking' blocks that
+    DeepSeek/GLM reasoning models emit). Raises a clear BackendError if the
+    response carried no text block (e.g. max_tokens exhausted while thinking).
+    """
+    blocks = data.get("content")
+    if not isinstance(blocks, list) or not blocks:
+        raise BackendError(f"{provider} response had no content blocks")
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
+            return block["text"]
+    # No text block — most commonly a reasoning model that spent the whole
+    # token budget on 'thinking'. Surface it actionably.
+    types = [b.get("type") for b in blocks if isinstance(b, dict)]
+    stop = data.get("stop_reason")
+    raise BackendError(
+        f"{provider} returned no text block (block types={types}, "
+        f"stop_reason={stop}). If a reasoning model hit max_tokens while "
+        f"thinking, raise max_tokens or use a non-reasoning model."
+    )
+
+
 # ============================================================================
 # DeepSeek (HTTP, Anthropic-compatible endpoint)
 # ============================================================================
@@ -59,8 +84,8 @@ async def call_deepseek(
 
             data = response.json()
 
-        # Extract content and usage
-        content = data["content"][0]["text"]
+        # Extract content (robust to reasoning 'thinking' blocks) and usage
+        content = _extract_text(data, data.get("model", "backend"))
         usage = data.get("usage", {})
 
         return {

@@ -274,12 +274,18 @@ def create_server():
     return server
 
 
-async def main():
-    """Run the MCP stdio server."""
+def main():
+    """Run the MCP stdio server (console-script entry point).
+
+    FastMCP.run() owns the event loop and selects the stdio transport, so this
+    stays a plain sync function — matches the pyproject `server:main` script and
+    avoids an asyncio.run wrapper. (mcp SDK 1.28: run_stdio() does not exist;
+    the public surface is run(transport=...) / run_stdio_async().)
+    """
     server = create_server()
     logger.info("Starting mcp-brain-router MCP server (stdio transport)...")
-    await server.run_stdio()
+    server.run(transport="stdio")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
