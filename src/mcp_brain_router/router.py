@@ -55,8 +55,13 @@ class RouteResult:
     reset_at: Optional[str] = None      # earliest provider reset time, if known
 
 
-class BackendError(Exception):
-    """Base exception for backend errors (credential/availability issues)."""
+class BackendError(backends.BackendError):
+    """Base exception for backend errors (credential/availability issues).
+
+    Subclasses backends.BackendError so `except backends.BackendError`
+    catches the WHOLE family — before 2026-07-02 these were two unrelated
+    classes and codex call errors slipped past server.py's handler into
+    the generic "Unexpected error" branch."""
     def __init__(self, backend: str, reason: str):
         self.backend = backend
         self.reason = reason
