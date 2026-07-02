@@ -440,11 +440,14 @@ def _test_backend_codex() -> bool:
     """Test Codex CLI availability."""
     try:
         start = time.time()
+        from .backends import CODEX_EXEC_BASE
         result = subprocess.run(
-            ["codex", "exec", "-m", "gpt-5.5", "reply: OK"],
+            CODEX_EXEC_BASE + ["-m", "gpt-5.5", "--", "reply: OK"],
             capture_output=True,
             text=True,
-            timeout=10,
+            # codex answers in ~20-30s even with MCP boot skipped; 10s was
+            # guaranteed-fail once startup included any model round-trip.
+            timeout=45,
         )
         elapsed = time.time() - start
 

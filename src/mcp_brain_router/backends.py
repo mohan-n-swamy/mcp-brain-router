@@ -34,6 +34,17 @@ class BackendQuotaError(BackendError):
         super().__init__(f"{provider} quota/transient error {status_code}{detail}")
 
 
+# Canonical codex CLI invocation prefix — shared with install.py's smoke test
+# so the two can never drift. mcp_servers={} skips booting every MCP server in
+# ~/.codex/config.toml (12+, incl. auth-blocked ones) which otherwise stalls
+# startup past the subprocess timeout; delegated prompts never need MCP.
+CODEX_EXEC_BASE = [
+    "codex", "exec",
+    "--skip-git-repo-check",
+    "-c", "mcp_servers={}",
+]
+
+
 class BackendTransientError(BackendError):
     """Raised on a transient hard failure with no HTTP status — subprocess
     timeout or death (Codex CLI). Like BackendQuotaError, a DIFFERENT backend
@@ -364,16 +375,10 @@ def call_codex(
 
     try:
         result = subprocess.run(
-            # mcp_servers={} — codex otherwise boots every MCP server in
-            # ~/.codex/config.toml (12+, incl. auth-blocked ones) and blows
-            # the timeout before answering. Delegated prompts never need MCP.
-            [
-                "codex", "exec",
-                "--skip-git-repo-check",
-                "-c", "mcp_servers={}",
-                "-m", model,
-                prompt,
-            ],
+            # "--" ends option parsing so a prompt starting with "-" can't be
+            # read as a codex flag (live-verified: without it, prompt="-h"
+            # prints CLI help instead of delegating).
+            CODEX_EXEC_BASE + ["-m", model, "--", prompt],
             capture_output=True,
             text=True,
             timeout=90,

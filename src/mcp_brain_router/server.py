@@ -23,7 +23,8 @@ except ImportError:
     _USE_FASTMCP = False
 
 from .config import Config, ConfigError, ensure_config_dir
-from .router import route, Complexity, BackendError, MissingCredentialError, BackendUnavailableError
+from .backends import BackendError  # base of the whole error family (router's subclass it)
+from .router import route, Complexity, MissingCredentialError, BackendUnavailableError
 
 # Configure logging to stderr so it doesn't pollute stdout (used by stdio transport).
 logging.basicConfig(
@@ -69,6 +70,7 @@ def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
             "exhausted": bool(response.get("exhausted", False)),
             "fell_back": bool(response.get("fell_back", False)),
             "tried": response.get("tried") or [],
+            "reset_at": response.get("reset_at"),
             "tokens_out": response.get("tokens_out", 0),
             "prompt_len": prompt_len,
         }

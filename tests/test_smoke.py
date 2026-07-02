@@ -567,3 +567,47 @@ class TestErrorClassification:
         err = backends._classify_http_error("GLM", 400, "raw-secret-echo-body")
         # Unparseable body -> withheld, not echoed.
         assert "raw-secret-echo-body" not in str(err)
+
+
+class TestCodexArgvSafety:
+    """G-guards from the 2026-07-02 adversarial pass (PR #1 review)."""
+
+    def test_codex_argv_has_end_of_options_separator(self):
+        """A prompt starting with "-" must reach codex as the PROMPT, not be
+        parsed as a CLI flag (prompt="-h" printed codex help pre-fix). The
+        "--" separator must sit between options and the prompt."""
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            mrun.return_value = MagicMock(returncode=0, stdout="ok")
+            backends.call_codex("-h --evil-flag", "gpt-5.5")
+            argv = mrun.call_args[0][0]
+        sep = argv.index("--")
+        assert argv[sep + 1] == "-h --evil-flag"  # prompt is positional, after --
+        assert argv[-1] == "-h --evil-flag"
+
+    def test_codex_argv_skips_mcp_boot(self):
+        """mcp_servers={} must be present — codex otherwise boots every MCP
+        server in ~/.codex/config.toml and blows the subprocess timeout."""
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            mrun.return_value = MagicMock(returncode=0, stdout="ok")
+            backends.call_codex("p", "gpt-5.5")
+            argv = mrun.call_args[0][0]
+        assert "-c" in argv and "mcp_servers={}" in argv
+        assert "--skip-git-repo-check" in argv
+
+    def test_install_smoke_test_uses_same_codex_base(self):
+        """install.py's codex smoke test must share CODEX_EXEC_BASE so the
+        two invocations can never drift (found drifted in adversarial pass)."""
+        import inspect
+        from mcp_brain_router import install
+        src = inspect.getsource(install._test_backend_codex)
+        assert "CODEX_EXEC_BASE" in src
+
+    def test_error_family_is_unified(self):
+        """router's credential/availability errors must subclass
+        backends.BackendError, so server.py's `except BackendError` (imported
+        from backends) catches the WHOLE family — pre-fix these were two
+        unrelated classes and codex errors fell into the generic handler."""
+        import mcp_brain_router.router as router_mod
+        assert issubclass(router_mod.BackendError, backends.BackendError)
+        assert issubclass(router_mod.MissingCredentialError, backends.BackendError)
+        assert issubclass(backends.BackendTransientError, backends.BackendError)
