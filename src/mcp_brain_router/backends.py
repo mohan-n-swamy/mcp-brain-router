@@ -34,6 +34,14 @@ class BackendQuotaError(BackendError):
         super().__init__(f"{provider} quota/transient error {status_code}{detail}")
 
 
+class BackendTransientError(BackendError):
+    """Raised on a transient hard failure with no HTTP status — subprocess
+    timeout or death (Codex CLI). Like BackendQuotaError, a DIFFERENT backend
+    might succeed, so the router falls through the chain; unlike config
+    errors (401/bad model), it must NOT propagate loud."""
+    pass
+
+
 # HTTP status codes that mean "try a different backend" rather than "fix config".
 # 429 = rate limit / quota; 5xx = provider-side transient failure.
 # 4xx (auth, bad request) are NOT here — those are config errors, no fallback.
@@ -356,10 +364,19 @@ def call_codex(
 
     try:
         result = subprocess.run(
-            ["codex", "exec", "-m", model, prompt],
+            # mcp_servers={} — codex otherwise boots every MCP server in
+            # ~/.codex/config.toml (12+, incl. auth-blocked ones) and blows
+            # the timeout before answering. Delegated prompts never need MCP.
+            [
+                "codex", "exec",
+                "--skip-git-repo-check",
+                "-c", "mcp_servers={}",
+                "-m", model,
+                prompt,
+            ],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=90,
             check=False,
         )
 
@@ -372,6 +389,8 @@ def call_codex(
         }
 
     except subprocess.TimeoutExpired:
-        raise BackendError("Codex subprocess timed out (60s)")
+        # Transient (slow model / cold start), not config — router may fall
+        # through the chain or return exhausted=True instead of a raw error.
+        raise BackendTransientError("Codex subprocess timed out (90s)")
     except FileNotFoundError:
         raise BackendError("Codex binary not found on PATH")

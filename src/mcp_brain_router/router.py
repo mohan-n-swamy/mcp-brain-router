@@ -149,6 +149,13 @@ async def route(
             if e.reset_at and (known_reset is None or e.reset_at < known_reset):
                 known_reset = e.reset_at
             continue
+        except backends.BackendTransientError:
+            # Transient hard failure (subprocess timeout/death) — degrade the
+            # same way as quota: try the next backend; a dead chain returns
+            # exhausted=True ("handle natively") instead of leaking a raw
+            # error dict. Config errors (401, bad model) are plain
+            # BackendError and stay LOUD — they raise through.
+            continue
 
         # Success — augment with routing metadata and return.
         result.complexity = complexity
