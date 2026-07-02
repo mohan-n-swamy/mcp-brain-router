@@ -486,6 +486,25 @@ class TestFallbackChain:
             assert not mds.called  # never fell through on a hard error
 
     @pytest.mark.asyncio
+    async def test_codex_timeout_returns_exhausted_not_raw_error(self):
+        """ADVERSARIAL primary (codex) subprocess timeout is TRANSIENT — the
+        single-backend chain ends with exhausted=True ("handle natively"),
+        never a raw error dict / exception leaking to the orchestrator.
+        Regression guard for the 2026-07-02 live failure (codex MCP-boot
+        stall -> 60s timeout -> {"error": ...} with backend "unknown")."""
+        with patch("mcp_brain_router.router.backends.call_codex") as mcx:
+            mcx.side_effect = backends.BackendTransientError(
+                "Codex subprocess timed out (90s)"
+            )
+
+            result = await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
+
+            assert result.exhausted is True
+            assert result.backend == "none"
+            assert result.tried == ["codex"]
+            assert "natively" in result.content.lower()
+
+    @pytest.mark.asyncio
     async def test_cheap_chain_is_deepseek_then_glm(self):
         """CHEAP primary DeepSeek 429 -> falls to GLM."""
         with patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds, \
