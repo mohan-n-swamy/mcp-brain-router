@@ -581,8 +581,11 @@ class TestCodexArgvSafety:
             backends.call_codex("-h --evil-flag", "gpt-5.5")
             argv = mrun.call_args[0][0]
         sep = argv.index("--")
-        assert argv[sep + 1] == "-h --evil-flag"  # prompt is positional, after --
-        assert argv[-1] == "-h --evil-flag"
+        # Prompt is ONE positional arg after "--" (caveman system directive is
+        # prepended inside that same arg — still not parsed as a CLI flag).
+        assert sep == len(argv) - 2  # exactly one positional after the separator
+        assert argv[-1].endswith("-h --evil-flag")  # untrusted input reaches codex verbatim
+        assert "--evil-flag" not in argv[:-1]  # never leaks out as its own argv token
 
     def test_codex_argv_skips_mcp_boot(self):
         """mcp_servers={} must be present — codex otherwise boots every MCP
@@ -611,3 +614,21 @@ class TestCodexArgvSafety:
         assert issubclass(router_mod.BackendError, backends.BackendError)
         assert issubclass(router_mod.MissingCredentialError, backends.BackendError)
         assert issubclass(backends.BackendTransientError, backends.BackendError)
+
+
+class TestCavemanSystemDirective:
+    """Every delegated backend must carry the caveman-ultra reply directive so
+    backend REPLIES stay terse (cuts output tokens on every delegate). One
+    source of truth: backends.CAVEMAN_SYSTEM. G-guard for the 2026-07-05 change."""
+
+    def test_constant_exists_and_terse_intent(self):
+        assert backends.CAVEMAN_SYSTEM
+        assert "caveman" in backends.CAVEMAN_SYSTEM.lower()
+
+    def test_codex_prompt_prepends_caveman(self):
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            mrun.return_value = MagicMock(returncode=0, stdout="ok")
+            backends.call_codex("do X", "gpt-5.5")
+            argv = mrun.call_args[0][0]
+        assert argv[-1].startswith(backends.CAVEMAN_SYSTEM)  # directive leads
+        assert argv[-1].endswith("do X")                     # task preserved verbatim

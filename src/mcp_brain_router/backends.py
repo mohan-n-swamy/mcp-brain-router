@@ -45,6 +45,19 @@ CODEX_EXEC_BASE = [
 ]
 
 
+# Caveman-ultra system directive prepended to EVERY delegated backend call
+# (DeepSeek/GLM via the `system` field; Codex prepended to the prompt). Shapes
+# how backends REPLY (terse, no filler) — cuts output tokens on every delegate
+# without touching the task instruction itself, so answer quality is unaffected.
+# One constant, all backends: DRY single source of truth.
+CAVEMAN_SYSTEM = (
+    "Reply caveman ultra: drop articles, filler, pleasantries, hedging. "
+    "Fragments OK. Keep ALL technical substance exact — code, numbers, error "
+    "strings, identifiers unchanged. Answer only what was asked; no preamble, "
+    "no restating the question, no meta-commentary. Terse."
+)
+
+
 class BackendTransientError(BackendError):
     """Raised on a transient hard failure with no HTTP status — subprocess
     timeout or death (Codex CLI). Like BackendQuotaError, a DIFFERENT backend
@@ -148,6 +161,7 @@ async def call_deepseek(
     payload = {
         "model": model,
         "max_tokens": 4096,
+        "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
 
@@ -197,6 +211,7 @@ async def call_deepseek_via_headroom(
     payload = {
         "model": model,
         "max_tokens": 4096,
+        "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
 
@@ -254,6 +269,7 @@ async def call_glm(
     payload = {
         "model": model,
         "max_tokens": 4096,
+        "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
 
@@ -302,6 +318,7 @@ async def call_glm_via_headroom(
     payload = {
         "model": model,
         "max_tokens": 4096,
+        "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
 
@@ -378,7 +395,7 @@ def call_codex(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (live-verified: without it, prompt="-h"
             # prints CLI help instead of delegating).
-            CODEX_EXEC_BASE + ["-m", model, "--", prompt],
+            CODEX_EXEC_BASE + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
             capture_output=True,
             text=True,
             timeout=90,
