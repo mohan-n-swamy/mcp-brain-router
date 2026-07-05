@@ -4,6 +4,8 @@ Each backend is isolated; router.py calls these functions.
 """
 
 import asyncio
+import os
+import shutil
 import subprocess
 from typing import Any, Dict, Optional
 import httpx
@@ -34,15 +36,67 @@ class BackendQuotaError(BackendError):
         super().__init__(f"{provider} quota/transient error {status_code}{detail}")
 
 
+# Resolve the codex binary to an ABSOLUTE path at import time. The MCP server
+# is spawned by Claude Code with a minimal/empty env (`"env": {}`), so the
+# subprocess PATH does NOT include `~/.npm-global/bin` where codex lives —
+# bare "codex" → FileNotFoundError → adversarial tier fails instantly
+# (root-caused 2026-07-05: 4/4 adversarial calls exhausted, 0 tokens).
+# shutil.which honors PATH when present; the ~/.npm-global fallback covers the
+# empty-PATH MCP case. Falls back to bare "codex" so a missing binary still
+# raises the explicit "not found on PATH" BackendError, not an opaque one.
+_CODEX_BIN = (
+    shutil.which("codex")
+    or (
+        os.path.expanduser("~/.npm-global/bin/codex")
+        if os.path.exists(os.path.expanduser("~/.npm-global/bin/codex"))
+        else "codex"
+    )
+)
+
 # Canonical codex CLI invocation prefix — shared with install.py's smoke test
 # so the two can never drift. mcp_servers={} skips booting every MCP server in
 # ~/.codex/config.toml (12+, incl. auth-blocked ones) which otherwise stalls
 # startup past the subprocess timeout; delegated prompts never need MCP.
 CODEX_EXEC_BASE = [
-    "codex", "exec",
+    _CODEX_BIN, "exec",
     "--skip-git-repo-check",
     "-c", "mcp_servers={}",
 ]
+
+
+def _find_mise_node() -> str:
+    """Locate the mise-managed node binary when PATH is empty (MCP-process
+    case). Prefer the `lts` alias; fall back to any installed version. Returns
+    "" if none found (caller then relies on whatever PATH provides)."""
+    import glob
+    base = os.path.expanduser("~/.local/share/mise/installs/node")
+    for cand in [os.path.join(base, "lts", "bin", "node")] + sorted(
+        glob.glob(os.path.join(base, "*", "bin", "node")), reverse=True
+    ):
+        if os.path.exists(cand):
+            return cand
+    return ""
+
+
+def _codex_env() -> Dict[str, str]:
+    """Env for the codex subprocess with a PATH that resolves BOTH codex and
+    its `#!/usr/bin/env node` shebang's `node`. The MCP server runs with an
+    empty env (`"env": {}`), so codex's bin dir AND the node bin dir must be
+    prepended — otherwise the shim fails with `env: node: No such file` and
+    codex exits non-zero (root-caused 2026-07-05, second half of the same
+    PATH bug). Existing PATH entries are preserved; only prepended, never
+    replaced, so a normal shell launch is unaffected."""
+    extra = []
+    node_path = shutil.which("node") or _find_mise_node()
+    node_bin = os.path.dirname(node_path) if node_path else ""
+    codex_bin = os.path.dirname(_CODEX_BIN) if os.path.sep in _CODEX_BIN else ""
+    for d in (codex_bin, node_bin):
+        if d and d not in extra:
+            extra.append(d)
+    env = dict(os.environ)
+    current = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
+    return env
 
 
 # Caveman-ultra system directive prepended to EVERY delegated backend call
@@ -400,6 +454,7 @@ def call_codex(
             text=True,
             timeout=90,
             check=False,
+            env=_codex_env(),
         )
 
         if result.returncode != 0:

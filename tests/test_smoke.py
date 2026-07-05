@@ -258,7 +258,14 @@ class TestCodexSubprocessArgs:
 
             # Args should be a list, not a string
             assert isinstance(args_list, (list, tuple))
-            assert args_list[0] == "codex"
+            # First arg is the codex binary — now resolved to an ABSOLUTE path
+            # (2026-07-05 PATH fix: MCP process has empty env, bare "codex"
+            # wasn't found). Accept the resolved path or the bare fallback.
+            assert args_list[0] == "codex" or args_list[0].endswith("/codex")
+            # subprocess.run must receive an env carrying an augmented PATH so
+            # codex + its `env node` shebang both resolve under the empty MCP env
+            passed_env = mock_run.call_args.kwargs.get("env")
+            assert passed_env is not None and "PATH" in passed_env
 
     @pytest.mark.asyncio
     async def test_codex_shell_injection_protection(self):
