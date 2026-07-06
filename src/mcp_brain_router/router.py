@@ -351,11 +351,19 @@ async def _route_codex(
     model: str,
     config: Config,
 ) -> RouteResult:
-    """Route to Codex backend (subprocess-based, no async wrapper needed)."""
-    # Codex does not use headroom (it's not HTTP-based)
-    result = backends.call_codex(
-        prompt=prompt,
-        model=model,
+    """Route to Codex backend (subprocess-based)."""
+    # Codex does not use headroom (it's not HTTP-based).
+    # call_codex uses BLOCKING subprocess.run (~15-19s). Under the async MCP
+    # stdio server this would freeze the event loop for the whole codex run →
+    # the transport can't answer keepalive pings → client kills the connection
+    # ("-32000 Connection closed"). Offload to a worker thread so the loop stays
+    # responsive. (Root-caused 2026-07-06: this, not quota, was the real
+    # "exhausted"/crash on the adversarial tier. DeepSeek/GLM are async-HTTP so
+    # never hit it; only Codex is subprocess-based.)
+    result = await asyncio.to_thread(
+        backends.call_codex,
+        prompt,
+        model,
     )
 
     return RouteResult(
