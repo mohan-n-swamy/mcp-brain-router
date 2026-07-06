@@ -57,10 +57,16 @@ _CODEX_BIN = (
 # so the two can never drift. mcp_servers={} skips booting every MCP server in
 # ~/.codex/config.toml (12+, incl. auth-blocked ones) which otherwise stalls
 # startup past the subprocess timeout; delegated prompts never need MCP.
+# model_reasoning_effort=low: the user's ~/.codex default is xhigh, which pushes
+# a real code-sized delegated prompt past the 90s→180s subprocess timeout →
+# spurious "exhausted". Delegated code-write/refute tasks don't need xhigh;
+# low keeps latency inside the timeout (root-caused 2026-07-06: xhigh + big
+# payload was timing out and mislabeling a FULL Codex quota as exhausted).
 CODEX_EXEC_BASE = [
     _CODEX_BIN, "exec",
     "--skip-git-repo-check",
     "-c", "mcp_servers={}",
+    "-c", 'model_reasoning_effort="low"',
 ]
 
 
@@ -452,7 +458,7 @@ def call_codex(
             CODEX_EXEC_BASE + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=180,
             check=False,
             env=_codex_env(),
         )
