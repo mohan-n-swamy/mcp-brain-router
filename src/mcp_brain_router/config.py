@@ -7,7 +7,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 try:
     import tomllib
@@ -38,6 +38,7 @@ class Config:
     codex_enabled: bool = False
     headroom_base_url: Optional[str] = None
     model_overrides: Optional[Dict[str, str]] = None
+    roles: Optional[Dict[str, List[str]]] = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -69,6 +70,7 @@ class Config:
             codex_enabled=data.get("codex_enabled", False),
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
+            roles=data.get("roles") or {},
         )
 
     def save(self) -> None:
@@ -91,6 +93,13 @@ class Config:
             lines.append("[model_overrides]")
             for complexity, model in self.model_overrides.items():
                 lines.append(f'{complexity} = "{self._escape_toml(model)}"')
+        if self.roles:
+            lines.append("[roles]")
+            for role, models in self.roles.items():
+                encoded = ", ".join(
+                    f'"{self._escape_toml(model)}"' for model in models
+                )
+                lines.append(f"{role} = [{encoded}]")
 
         content = "\n".join(lines)
 

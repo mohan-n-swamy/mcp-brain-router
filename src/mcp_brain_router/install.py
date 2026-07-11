@@ -29,6 +29,7 @@ from typing import Dict, Optional
 from mcp_brain_router.config import (
     CONFIG_FILE,
     Config,
+    ConfigError,
     ensure_config_dir,
 )
 
@@ -221,12 +222,20 @@ def write_config(
     if codex_enabled and codex_model:
         model_overrides = {"adversarial": codex_model}
 
+    existing_roles = None
+    if config_file.exists():
+        try:
+            existing_roles = Config.load().roles
+        except ConfigError:
+            existing_roles = None
+
     config = Config(
         deepseek_key=deepseek_key,
         glm_key=glm_key,
         codex_enabled=codex_enabled,
         headroom_base_url=headroom_url,
         model_overrides=model_overrides,
+        roles=existing_roles,
     )
 
     # Use Config.save() (handles TOML format + 0600 permissions)
