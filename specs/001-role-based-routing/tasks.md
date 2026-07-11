@@ -25,5 +25,5 @@ Each task = ONE surface. Fit-check before + after (§9.3). Commit per task.
   - §9.6 adversarial pass (differ-from-orchestrator is the load-bearing invariant).
   - G-guard: a test that fails if any adversary resolution shares the orchestrator's provider.
 
-- [ ] **T6 — Branch, PR** (never direct-to-main per global rule)
+- [x] **T6 — Branch, PR** (never direct-to-main per global rule)
   - Combined change (refactor + role-routing) → branch → PR. Mohan fills config ids before merge.
