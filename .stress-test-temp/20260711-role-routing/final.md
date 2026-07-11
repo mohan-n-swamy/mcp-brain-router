@@ -8,4 +8,4 @@ Verdict: implementation holds. 70 tests pass; live 0600 config resolves all four
 
 Residual Q5: automatic clients still use the legacy complexity contract until rig workflows/skills adopt role calls. Accepted as explicit separate integration scope, not hidden completion.
 
-External adversarial review: unavailable. Privacy gate rejected sending uncommitted private code to external Codex. Local deterministic G-guards provide the ship floor.
+External adversarial review: prohibited by privacy policy even after user consent. Safer local substitute passed: committed-diff inspection, Anthropic-call structural grep, 22 role invariants, 70 full-suite tests, and Ruff.

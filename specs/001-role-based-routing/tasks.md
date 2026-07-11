@@ -20,7 +20,7 @@ Each task = ONE surface. Fit-check before + after (§9.3). Commit per task.
   - role given → resolve_role → assignment stub OR route() the backend. complexity path unchanged.
   - Verify: SC-4 all 47 existing tests green; new role path returns correct stub/result.
 
-- [ ] **T5 — Full suite + adversarial verify + G-guard**
+- [x] **T5 — Full suite + adversarial verify + G-guard**
   - Verify: SC-5 (grep: no hardcoded ids in router logic), SC-6 (cascade/exhausted tests green).
   - §9.6 adversarial pass (differ-from-orchestrator is the load-bearing invariant).
   - G-guard: a test that fails if any adversary resolution shares the orchestrator's provider.

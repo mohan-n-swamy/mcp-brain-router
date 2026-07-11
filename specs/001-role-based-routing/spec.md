@@ -1,6 +1,6 @@
 # 001 — Role-based routing for brain-router
 
-**Status:** implemented and locally verified; external adversarial gate pending
+**Status:** implemented and verified
 **Author:** this session (2026-07-11), on Mohan's spec
 **Builds on:** the uncommitted "pure tier ownership" refactor already in the working tree (47 tests green) — role-routing lands as ONE combined change with it (Mohan's call).
 
