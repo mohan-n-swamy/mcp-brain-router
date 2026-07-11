@@ -140,6 +140,10 @@ class TestConfigPersistence:
             glm_key="test_glm_key",
             codex_enabled=True,
             headroom_base_url="http://localhost:8000",
+            roles={
+                "worker": ["glm-5.2", "gpt-5.5", "sonnet-worker"],
+                "simple": ["glm-4.7", "luna-simple", "haiku-simple"],
+            },
         )
         original.save()
 
@@ -150,6 +154,15 @@ class TestConfigPersistence:
         assert loaded.glm_key == original.glm_key
         assert loaded.codex_enabled == original.codex_enabled
         assert loaded.headroom_base_url == original.headroom_base_url
+        assert loaded.roles == original.roles
+
+    def test_config_without_roles_loads_empty(self, temp_config_dir, monkeypatch):
+        config_file = temp_config_dir / "config.toml"
+        config_file.write_text('glm_key = "test"\n')
+        config_file.chmod(0o600)
+        monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", config_file)
+
+        assert Config.load().roles == {}
 
 
 class TestMissingKeyErrors:

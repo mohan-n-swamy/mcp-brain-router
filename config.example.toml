@@ -27,3 +27,12 @@ codex_enabled = false
 # cheap = "deepseek-v4-flash"   # default
 # code = "glm-5.2"               # default
 # adversarial = "gpt-5.5"        # default
+
+# Ordered candidates for role-based routing. Replace Codex/Anthropic placeholder
+# IDs with model IDs accepted by your native clients. The router never calls
+# Anthropic; Anthropic candidates return execute_natively=true assignments.
+[roles]
+thinker = ["sol-model-id", "fable-model-id"]
+adversary = ["terra-model-id", "opus-model-id"]
+worker = ["glm-5.2", "gpt-5.5", "sonnet-model-id"]
+simple = ["glm-4.7", "luna-model-id", "haiku-model-id"]

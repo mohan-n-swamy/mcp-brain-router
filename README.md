@@ -75,6 +75,22 @@ answer = delegate(
 )
 ```
 
+### Role-based routing
+
+Configure ordered candidates in `~/.config/mcp-brain-router/config.toml`, then call:
+
+```python
+delegate(role="worker", orchestrator="opus", prompt="Implement this isolated task")
+delegate(role="adversary", orchestrator="codex", prompt="Refute this design")
+```
+
+Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
+router-selected. Candidate order comes only from `[roles]`. Genuine quota
+exhaustion advances to the next provider. Anthropic candidates return an
+`execute_natively=true` assignment stub; this MCP never calls Anthropic.
+
+Legacy `delegate(complexity=..., prompt=...)` remains supported and single-tier.
+
 ## Tier Map
 
 | Tier | Backend | Model | Use Case | Cost | Speed |

@@ -7,7 +7,7 @@ credentials, and returns unified result dicts. Framework-free, unit-testable.
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 from . import backends
 from .backends import BackendQuotaError
@@ -58,6 +58,8 @@ _MODEL_PROVIDER_PREFIXES = (
     ("haiku", Provider.ANTHROPIC),
     ("fable", Provider.ANTHROPIC),
     ("claude", Provider.ANTHROPIC),   # any claude-* id
+    ("anthropic", Provider.ANTHROPIC),
+    ("codex", Provider.CODEX),
     ("gpt-", Provider.CODEX),
     ("sol", Provider.CODEX),
     ("terra", Provider.CODEX),
@@ -82,6 +84,97 @@ def provider_for_model(model_id: str) -> Provider:
         if low.startswith(prefix) or prefix in low:
             return provider
     raise ValueError(f"unknown model id (no provider prefix match): {model_id!r}")
+
+
+@dataclass(frozen=True)
+class Assignment:
+    """Resolved execution target for one orchestration role."""
+
+    role: Role
+    model: str
+    provider: Provider
+    backend: Optional[str]
+    execute_natively: bool
+    reason: str
+
+
+_PROVIDER_TARGETS = {
+    Provider.DEEPSEEK: ("deepseek", Complexity.CHEAP),
+    Provider.ZHIPU: ("glm", Complexity.CODE),
+    Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
+}
+
+
+def orchestrator_provider(value: str | Provider) -> Provider:
+    """Resolve an orchestrator provider name or model id."""
+    if isinstance(value, Provider):
+        return value
+    normalized = value.strip().lower()
+    try:
+        return Provider(normalized)
+    except ValueError:
+        return provider_for_model(normalized)
+
+
+def resolve_role(
+    role: Role,
+    orchestrator: str | Provider,
+    config: Config,
+    exhausted_providers: Iterable[Provider] = (),
+) -> Assignment:
+    """Resolve one configured role without calling any backend."""
+    if role is Role.ORCHESTRATOR:
+        raise ValueError("orchestrator is selected by the human, not the router")
+
+    candidates = (config.roles or {}).get(role.value, [])
+    if not candidates:
+        raise ValueError(f"no configured candidates for role: {role.value}")
+
+    orchestrator_owner = orchestrator_provider(orchestrator)
+    exhausted = set(exhausted_providers)
+    for model in candidates:
+        provider = provider_for_model(model)
+        if provider in exhausted:
+            continue
+        if role is Role.ADVERSARY and provider is orchestrator_owner:
+            continue
+        if provider is Provider.ANTHROPIC:
+            # floor: the MCP never calls Anthropic. Native orchestrator executes it.
+            return Assignment(
+                role=role,
+                model=model,
+                provider=provider,
+                backend=None,
+                execute_natively=True,
+                reason="Anthropic candidate must execute in the native orchestrator",
+            )
+        backend, _ = _PROVIDER_TARGETS[provider]
+        return Assignment(
+            role=role,
+            model=model,
+            provider=provider,
+            backend=backend,
+            execute_natively=False,
+            reason="first eligible configured candidate",
+        )
+
+    if role is Role.ADVERSARY:
+        raise ValueError(
+            "no eligible adversary differs from the orchestrator provider"
+        )
+    raise ValueError(f"all configured providers exhausted for role: {role.value}")
+
+
+async def route_assignment(
+    assignment: Assignment,
+    prompt: str,
+    config: Config,
+) -> "RouteResult":
+    """Execute a non-native assignment through existing tier machinery."""
+    if assignment.execute_natively or assignment.backend is None:
+        raise ValueError("native assignment cannot be executed by the router")
+    _, complexity = _PROVIDER_TARGETS[assignment.provider]
+    return await route(complexity, prompt, assignment.model, config)
 
 
 # Pure tier ownership. The router selects exactly one backend and never crosses
