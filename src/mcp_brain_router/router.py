@@ -5,10 +5,9 @@ credentials, and returns unified result dicts. Framework-free, unit-testable.
 """
 
 import asyncio
-import os
-from enum import Enum
-from typing import Any, Dict, Literal, Optional
 from dataclasses import dataclass
+from enum import Enum
+from typing import Dict, Optional
 
 from . import backends
 from .backends import BackendQuotaError
@@ -16,43 +15,103 @@ from .config import Config
 
 
 class Complexity(str, Enum):
-    """Routing complexity tiers."""
+    """Routing complexity tiers (legacy axis; kept as a back-compat alias)."""
+
     CHEAP = "cheap"
     CODE = "code"
     ADVERSARIAL = "adversarial"
 
 
-# Per-tier fallback chain. chain[0] is the tier's primary backend; the rest are
-# fallbacks tried (in order) when the primary is quota-exhausted (429/5xx).
-# NO Anthropic backend appears here by design — when the whole chain is
-# exhausted, route() returns exhausted=True and the orchestrator (Claude)
-# handles the task natively (COMPLIANCE.md: the MCP never calls Anthropic).
-#   - cheap:       DeepSeek -> GLM        (both cheap-ish chat backends)
-#   - code:        GLM      -> DeepSeek   (GLM best for code; DeepSeek still capable)
-#   - adversarial: Codex                  (local subprocess, no remote quota to exhaust)
-_FALLBACK_CHAINS = {
-    Complexity.CHEAP: ["deepseek", "glm"],
-    Complexity.CODE: ["glm", "deepseek"],
-    Complexity.ADVERSARIAL: ["codex"],
+class Role(str, Enum):
+    """The five orchestration roles (spec 001-role-based-routing).
+
+    Each role is a distinct job in an orchestrated build loop, filled from a
+    config-ordered candidate list. ORCHESTRATOR is NOT resolved by the router —
+    it is whoever the human launched (an input), used to enforce the
+    adversary-differs-in-provider rule.
+    """
+
+    ORCHESTRATOR = "orchestrator"
+    THINKER = "thinker"
+    ADVERSARY = "adversary"
+    WORKER = "worker"
+    SIMPLE = "simple"
+
+
+class Provider(str, Enum):
+    """Model provider — used to enforce 'adversary differs from orchestrator'
+    and to decide whether a resolved role is handed back for native (Anthropic)
+    execution vs called directly by the router."""
+
+    ANTHROPIC = "anthropic"   # opus / sonnet / haiku / fable — NEVER called by the router
+    CODEX = "codex"           # every gpt-* / sol / terra / luna id (OpenAI Codex CLI)
+    ZHIPU = "zhipu"           # glm-4.7 / glm-5.2
+    DEEPSEEK = "deepseek"
+
+
+# Prefix → Provider. First matching prefix wins; order matters only where one
+# prefix could shadow another (none currently do). Extend here when a new model
+# family appears — this is the single source of truth for id→provider.
+_MODEL_PROVIDER_PREFIXES = (
+    ("opus", Provider.ANTHROPIC),
+    ("sonnet", Provider.ANTHROPIC),
+    ("haiku", Provider.ANTHROPIC),
+    ("fable", Provider.ANTHROPIC),
+    ("claude", Provider.ANTHROPIC),   # any claude-* id
+    ("gpt-", Provider.CODEX),
+    ("sol", Provider.CODEX),
+    ("terra", Provider.CODEX),
+    ("luna", Provider.CODEX),
+    ("o3", Provider.CODEX),
+    ("glm", Provider.ZHIPU),
+    ("deepseek", Provider.DEEPSEEK),
+)
+
+
+def provider_for_model(model_id: str) -> Provider:
+    """Map a model-id string to its Provider via the prefix table.
+
+    Case-insensitive, prefix-anywhere (so 'gpt-5.6-sol-terra' matches 'sol'
+    and 'terra' both → CODEX; the first table hit wins). Raises ValueError on
+    an unknown id so a typo is loud, not silently misrouted.
+    """
+    if not model_id:
+        raise ValueError("empty model id")
+    low = model_id.lower()
+    for prefix, provider in _MODEL_PROVIDER_PREFIXES:
+        if low.startswith(prefix) or prefix in low:
+            return provider
+    raise ValueError(f"unknown model id (no provider prefix match): {model_id!r}")
+
+
+# Pure tier ownership. The router selects exactly one backend and never crosses
+# tiers. The calling orchestrator owns any cascade (for example GLM -> Codex ->
+# native Claude). This keeps caller-specific fallback policy out of the MCP.
+_TIER_BACKENDS = {
+    Complexity.CHEAP: "deepseek",
+    Complexity.CODE: "glm",
+    Complexity.ADVERSARIAL: "codex",
 }
 
 
 @dataclass
 class RouteResult:
     """Unified result from any backend."""
+
     content: str
     model: str
     backend: str
     complexity: Complexity
     headroom_used: bool
     usage: Optional[Dict[str, int]] = None  # token counts if available
-    # Quota-exhaustion signal. When every backend in the tier's fallback chain
-    # is quota-exhausted, route() returns a RouteResult with exhausted=True
-    # instead of raising — a clean "sorry, can't" the orchestrator (Claude)
-    # reads to decide to handle the task NATIVELY. The MCP never calls Anthropic.
+    # Only a genuine provider quota response sets exhausted=True. Timeouts,
+    # provider 5xx responses, and hard errors raise so the server can return a
+    # distinct error result instead of mislabelling them as quota exhaustion.
     exhausted: bool = False
-    tried: Optional[list] = None        # backends attempted, in order
-    reset_at: Optional[str] = None      # earliest provider reset time, if known
+    tried: Optional[list] = None
+    reset_at: Optional[str] = None
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
 
 class BackendError(backends.BackendError):
@@ -62,14 +121,20 @@ class BackendError(backends.BackendError):
     catches the WHOLE family — before 2026-07-02 these were two unrelated
     classes and codex call errors slipped past server.py's handler into
     the generic "Unexpected error" branch."""
+
     def __init__(self, backend: str, reason: str):
         self.backend = backend
         self.reason = reason
-        super().__init__(f"Backend {backend}: {reason}")
+        super().__init__(
+            f"Backend {backend}: {reason}",
+            backend=backend,
+            failure_kind="configuration_error",
+        )
 
 
 class MissingCredentialError(BackendError):
     """Raised when a required credential is missing."""
+
     def __init__(self, key_name: str, backend: str):
         self.key_name = key_name
         super().__init__(backend, f"Missing credential: {key_name}")
@@ -77,6 +142,7 @@ class MissingCredentialError(BackendError):
 
 class BackendUnavailableError(BackendError):
     """Raised when a backend is not available."""
+
     def __init__(self, backend: str, reason: str):
         super().__init__(backend, f"Unavailable: {reason}")
 
@@ -109,85 +175,42 @@ async def route(
     if config is None:
         config = Config.load()
 
-    # Walk the tier's fallback chain. Each entry is a non-Anthropic backend;
-    # on quota exhaustion (429/5xx) we fall through to the next. The chain is
-    # ordered "best-fit first" — see _FALLBACK_CHAINS. A model_override only
-    # applies to the PRIMARY backend (the one the tier maps to); fallbacks use
-    # their own defaults, since an override model id is provider-specific.
-    chain = _FALLBACK_CHAINS[complexity]
-    primary = chain[0]
+    backend_name, model = _resolve_backend_and_model(complexity, model_override, config)
+    _validate_credentials(backend_name, config)
 
-    tried = []
-    last_quota_err = None
-    known_reset = None  # earliest reset time seen across quota errors, if any
-    for backend_name in chain:
-        # Skip a fallback backend that lacks credentials / isn't enabled —
-        # it's not a failure, just unavailable. (The PRIMARY still surfaces a
-        # missing-credential error so misconfiguration is loud, not silent.)
-        try:
-            _validate_credentials(backend_name, config)
-        except (MissingCredentialError, BackendUnavailableError):
-            if backend_name == primary:
-                raise
-            continue
-
-        model = _resolve_model_for_backend(
-            backend_name,
-            model_override if backend_name == primary else None,
-            config,
+    try:
+        if backend_name == "deepseek":
+            result = await _route_deepseek(prompt, model, config)
+        elif backend_name == "glm":
+            result = await _route_glm(prompt, model, config)
+        elif backend_name == "codex":
+            result = await _route_codex(prompt, model, config)
+        else:  # pragma: no cover - _TIER_BACKENDS is the closed set
+            raise ValueError(f"Unknown backend: {backend_name}")
+    except BackendQuotaError as e:
+        reset_hint = f" Earliest reset: {e.reset_at}" if e.reset_at else ""
+        return RouteResult(
+            content=(
+                f"{backend_name} quota exhausted for tier {complexity.value}. "
+                f"Call another tier or handle this task natively.{reset_hint}"
+            ),
+            model="",
+            backend="none",
+            complexity=complexity,
+            headroom_used=False,
+            usage=None,
+            exhausted=True,
+            tried=[backend_name],
+            reset_at=e.reset_at,
+            failure_kind="quota_exhausted",
+            failure_reason=str(e),
         )
-        tried.append(backend_name)
-        try:
-            if backend_name == "deepseek":
-                result = await _route_deepseek(prompt, model, config)
-            elif backend_name == "glm":
-                result = await _route_glm(prompt, model, config)
-            elif backend_name == "codex":
-                result = await _route_codex(prompt, model, config)
-            else:
-                raise ValueError(f"Unknown backend: {backend_name}")
-        except BackendQuotaError as e:
-            # Quota / transient — try the next backend in the chain.
-            last_quota_err = e
-            # Keep the earliest reset time any backend reported (string compare
-            # is fine for the "YYYY-MM-DD HH:MM:SS" shape we lift).
-            if e.reset_at and (known_reset is None or e.reset_at < known_reset):
-                known_reset = e.reset_at
-            continue
-        except backends.BackendTransientError:
-            # Transient hard failure (subprocess timeout/death) — degrade the
-            # same way as quota: try the next backend; a dead chain returns
-            # exhausted=True ("handle natively") instead of leaking a raw
-            # error dict. Config errors (401, bad model) are plain
-            # BackendError and stay LOUD — they raise through.
-            continue
 
-        # Success — augment with routing metadata and return.
-        result.complexity = complexity
-        result.backend = backend_name
-        result.exhausted = False
-        result.tried = tried
-        return result
-
-    # Every backend in the chain was quota-exhausted (or unavailable). Return a
-    # structured "sorry, can't" signal — NOT an exception — so the orchestrator
-    # handles the task natively. The MCP never falls back to Anthropic itself.
-    reset_at = known_reset
-    return RouteResult(
-        content=(
-            f"All {complexity.value if hasattr(complexity, 'value') else complexity} "
-            f"backends exhausted ({', '.join(tried) or 'none available'}). "
-            f"Handle this task natively. {('Earliest reset: ' + reset_at) if reset_at else ''}".strip()
-        ),
-        model="",
-        backend="none",
-        complexity=complexity,
-        headroom_used=False,
-        usage=None,
-        exhausted=True,
-        tried=tried,
-        reset_at=reset_at,
-    )
+    result.complexity = complexity
+    result.backend = backend_name
+    result.exhausted = False
+    result.tried = [backend_name]
+    return result
 
 
 def _resolve_backend_and_model(
@@ -206,23 +229,16 @@ def _resolve_backend_and_model(
     Raises:
         ValueError: If complexity is invalid.
     """
-    # Map complexity to default backend
-    backend_map = {
-        Complexity.CHEAP: "deepseek",
-        Complexity.CODE: "glm",
-        Complexity.ADVERSARIAL: "codex",
-    }
-
-    if complexity not in backend_map:
+    if complexity not in _TIER_BACKENDS:
         raise ValueError(f"Unknown complexity: {complexity}")
 
-    backend_name = backend_map[complexity]
+    backend_name = _TIER_BACKENDS[complexity]
 
     # Resolve model
     if model_override:
         model = model_override
-    elif config.model_overrides and complexity in config.model_overrides:
-        model = config.model_overrides[complexity]
+    elif config.model_overrides and complexity.value in config.model_overrides:
+        model = config.model_overrides[complexity.value]
     else:
         # Use backend default
         model = _get_backend_default_model(backend_name, config)
@@ -240,24 +256,6 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
     return defaults.get(backend_name, "unknown")
 
 
-def _resolve_model_for_backend(
-    backend_name: str, model_override: Optional[str], config: Config
-) -> str:
-    """Resolve the model id for a specific backend in the fallback chain.
-
-    A caller-supplied model_override is provider-specific, so it is honored
-    ONLY for the primary backend (the chain caller passes None for fallbacks).
-    Otherwise: a matching [model_overrides] config entry, else the backend
-    default.
-    """
-    if model_override:
-        return model_override
-    overrides = config.model_overrides or {}
-    if backend_name in overrides:
-        return overrides[backend_name]
-    return _get_backend_default_model(backend_name, config)
-
-
 def _validate_credentials(backend_name: str, config: Config) -> None:
     """
     Validate that required credentials are present for the backend.
@@ -273,10 +271,7 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
             raise MissingCredentialError("GLM_KEY", "glm")
     elif backend_name == "codex":
         if not config.codex_enabled:
-            raise BackendUnavailableError(
-                "codex",
-                "Codex not enabled or not available on PATH"
-            )
+            raise BackendUnavailableError("codex", "Codex not enabled or not available on PATH")
 
 
 async def _route_deepseek(
@@ -351,11 +346,19 @@ async def _route_codex(
     model: str,
     config: Config,
 ) -> RouteResult:
-    """Route to Codex backend (subprocess-based, no async wrapper needed)."""
-    # Codex does not use headroom (it's not HTTP-based)
-    result = backends.call_codex(
-        prompt=prompt,
-        model=model,
+    """Route to Codex backend (subprocess-based)."""
+    # Codex does not use headroom (it's not HTTP-based).
+    # call_codex uses BLOCKING subprocess.run (~15-19s). Under the async MCP
+    # stdio server this would freeze the event loop for the whole codex run →
+    # the transport can't answer keepalive pings → client kills the connection
+    # ("-32000 Connection closed"). Offload to a worker thread so the loop stays
+    # responsive. (Root-caused 2026-07-06: this, not quota, was the real
+    # "exhausted"/crash on the adversarial tier. DeepSeek/GLM are async-HTTP so
+    # never hit it; only Codex is subprocess-based.)
+    result = await asyncio.to_thread(
+        backends.call_codex,
+        prompt,
+        model,
     )
 
     return RouteResult(

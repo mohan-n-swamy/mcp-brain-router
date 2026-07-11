@@ -9,24 +9,23 @@ Tests:
 - Router exceptions (MissingCredentialError, BackendUnavailableError)
 """
 
-import os
+import json
 import stat
 import tempfile
-import json
 from pathlib import Path
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
-from mcp_brain_router.router import (
-    route,
-    Complexity,
-    RouteResult,
-    BackendError,
-    MissingCredentialError,
-    BackendUnavailableError,
-)
+from mcp_brain_router import backends, server
 from mcp_brain_router.config import Config, ConfigError, ensure_config_dir
-from mcp_brain_router import backends
+from mcp_brain_router.router import (
+    BackendUnavailableError,
+    Complexity,
+    MissingCredentialError,
+    RouteResult,
+    route,
+)
 
 
 class TestRouteFunction:
@@ -41,7 +40,9 @@ class TestRouteFunction:
             codex_enabled=False,
         )
 
-        with patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mock_ds:
+        with patch(
+            "mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock
+        ) as mock_ds:
             mock_ds.return_value = {
                 "content": "response",
                 "usage": {"input_tokens": 10, "output_tokens": 20},
@@ -202,10 +203,7 @@ class TestConfigError:
 
     def test_config_not_found_raises_config_error(self, monkeypatch):
         """Test that missing config file raises ConfigError."""
-        monkeypatch.setattr(
-            "mcp_brain_router.config.CONFIG_FILE",
-            Path("/nonexistent/config.toml")
-        )
+        monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", Path("/nonexistent/config.toml"))
 
         with pytest.raises(ConfigError):
             Config.load()
@@ -249,7 +247,7 @@ class TestCodexSubprocessArgs:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            result = await route(Complexity.ADVERSARIAL, "test prompt", config=config)
+            await route(Complexity.ADVERSARIAL, "test prompt", config=config)
 
             # Verify subprocess.run was called with args as a list
             assert mock_run.called
@@ -285,7 +283,7 @@ class TestCodexSubprocessArgs:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            result = await route(Complexity.ADVERSARIAL, malicious_prompt, config=config)
+            await route(Complexity.ADVERSARIAL, malicious_prompt, config=config)
 
             # Verify args are passed as list (preventing shell interpretation)
             call_args = mock_run.call_args
@@ -301,6 +299,7 @@ class TestCodexSubprocessArgs:
 # ============================================================================
 # Integration smoke tests
 # ============================================================================
+
 
 class TestIntegrationSmoke:
     """Light integration tests without real API calls."""
@@ -329,7 +328,9 @@ class TestIntegrationSmoke:
             codex_enabled=False,
         )
 
-        with patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mock_ds:
+        with patch(
+            "mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock
+        ) as mock_ds:
             mock_ds.return_value = {
                 "content": "test response",
                 "usage": {"input_tokens": 10, "output_tokens": 20},
@@ -348,6 +349,7 @@ class TestIntegrationSmoke:
 # ============================================================================
 # Model Validation & Security Tests
 # ============================================================================
+
 
 class TestModelValidation:
     """Test model name validation against argument injection."""
@@ -383,12 +385,6 @@ class TestModelValidation:
     @pytest.mark.asyncio
     async def test_codex_model_injection_rejected(self):
         """Test that Codex rejects injected model args."""
-        config = Config(
-            deepseek_key="test_ds",
-            glm_key="test_glm",
-            codex_enabled=True,
-        )
-
         # Try to inject a flag via model name
         with pytest.raises(backends.BackendError) as exc_info:
             backends.call_codex("test prompt", "gpt-5.5; rm -rf /")
@@ -401,14 +397,16 @@ class TestHttpxUsage:
 
     def test_httpx_imported_in_backends(self):
         """Verify httpx is imported at module level in backends."""
-        import sys
         # backends module must import httpx successfully
         import mcp_brain_router.backends
+
         assert "httpx" in dir(mcp_brain_router.backends)
 
     def test_no_aiohttp_in_backends(self):
         """Verify backends.py does NOT use aiohttp."""
-        with open("/Users/mohannarayanswamy/code workshop/claude projects/Personal/mcp-brain-router/src/mcp_brain_router/backends.py") as f:
+        with open(
+            "/Users/mohannarayanswamy/code workshop/claude projects/Personal/mcp-brain-router/src/mcp_brain_router/backends.py"
+        ) as f:
             content = f.read()
             # Should not import aiohttp anywhere
             assert "import aiohttp" not in content
@@ -424,67 +422,91 @@ class TestHeadroomUrlSubstitution:
         """Verify DeepSeek via headroom constructs the correct URL."""
         # This is a code inspection test: verify the function builds the URL correctly
         import inspect
+
         source = inspect.getsource(backends.call_deepseek_via_headroom)
         # Should construct URL as {headroom_url}/anthropic/v1/messages
-        assert "f\"{headroom_url}/anthropic/v1/messages\"" in source or \
-               "f'{headroom_url}/anthropic/v1/messages'" in source
+        assert (
+            'f"{headroom_url}/anthropic/v1/messages"' in source
+            or "f'{headroom_url}/anthropic/v1/messages'" in source
+        )
 
     def test_glm_via_headroom_url_construction(self):
         """Verify GLM via headroom constructs the correct URL."""
         import inspect
+
         source = inspect.getsource(backends.call_glm_via_headroom)
         # Should construct URL as {headroom_url}/anthropic/v1/messages
-        assert "f\"{headroom_url}/anthropic/v1/messages\"" in source or \
-               "f'{headroom_url}/anthropic/v1/messages'" in source
+        assert (
+            'f"{headroom_url}/anthropic/v1/messages"' in source
+            or "f'{headroom_url}/anthropic/v1/messages'" in source
+        )
+
+    def test_glm_paths_use_reasoning_safe_text_extraction(self):
+        """Both GLM paths skip thinking blocks instead of assuming content[0]."""
+        import inspect
+
+        assert "_extract_text" in inspect.getsource(backends.call_glm)
+        assert "_extract_text" in inspect.getsource(backends.call_glm_via_headroom)
+
+    def test_extract_text_skips_thinking_blocks(self):
+        data = {
+            "content": [
+                {"type": "thinking", "thinking": "hidden"},
+                {"type": "text", "text": "usable answer"},
+            ]
+        }
+        assert backends._extract_text(data, "GLM") == "usable answer"
 
 
-class TestFallbackChain:
-    """Quota-fallback chain: on 429/5xx a tier falls through to the next
-    non-Anthropic backend; all-exhausted returns a structured signal."""
+class TestPureTierRouting:
+    """Each tier owns one backend; orchestrators own cross-tier cascades."""
 
     def _cfg(self):
         return Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True)
 
     @pytest.mark.asyncio
-    async def test_code_glm_429_falls_to_deepseek(self):
-        """CODE primary GLM hits 429 -> chain falls to DeepSeek, returns it."""
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm, \
-             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds:
+    async def test_code_glm_429_does_not_call_deepseek(self):
+        """CODE quota exhaustion is returned without crossing into CHEAP."""
+        with (
+            patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm,
+            patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds,
+        ):
             mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit reached")
-            mds.return_value = {"content": "PONG", "usage": {"input_tokens": 1, "output_tokens": 1}}
 
             result = await route(Complexity.CODE, "p", config=self._cfg())
 
-            assert result.backend == "deepseek"
-            assert result.content == "PONG"
-            assert result.exhausted is False
-            assert result.tried == ["glm", "deepseek"]
-            assert mglm.called and mds.called
+            assert result.backend == "none"
+            assert result.exhausted is True
+            assert result.tried == ["glm"]
+            assert result.failure_kind == "quota_exhausted"
+            assert "limit reached" in result.failure_reason
+            assert mglm.called
+            assert not mds.called
 
     @pytest.mark.asyncio
-    async def test_all_backends_exhausted_returns_signal(self):
-        """Both backends 429 -> exhausted=True signal (NOT an exception),
-        carrying reset_at so the orchestrator can decide to handle natively."""
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm, \
-             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds:
-            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "reset at 2026-06-29 15:56:33", reset_at="2026-06-29 15:56:33")
-            mds.side_effect = backends.BackendQuotaError("DeepSeek", 429, "rate limited")
+    async def test_quota_exhaustion_carries_reset_metadata(self):
+        """A real 429 carries reset metadata for orchestrator policy."""
+        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
+            mglm.side_effect = backends.BackendQuotaError(
+                "GLM", 429, "reset at 2026-06-29 15:56:33", reset_at="2026-06-29 15:56:33"
+            )
 
             result = await route(Complexity.CODE, "p", config=self._cfg())
 
             assert result.exhausted is True
             assert result.backend == "none"
-            assert result.tried == ["glm", "deepseek"]
+            assert result.tried == ["glm"]
             assert result.reset_at == "2026-06-29 15:56:33"
-            # The content is a human/agent-readable "handle natively" hint.
-            assert "natively" in result.content.lower()
+            assert "another tier" in result.content.lower()
 
     @pytest.mark.asyncio
     async def test_hard_error_does_not_silently_fallback(self):
         """A non-retryable BackendError (e.g. auth/4xx) must propagate, NOT
         get masked by a fallback — config errors should be loud."""
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm, \
-             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds:
+        with (
+            patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm,
+            patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds,
+        ):
             mglm.side_effect = backends.BackendError("GLM API error 401: bad key")
             mds.return_value = {"content": "should-not-be-used", "usage": {}}
 
@@ -493,40 +515,39 @@ class TestFallbackChain:
             assert not mds.called  # never fell through on a hard error
 
     @pytest.mark.asyncio
-    async def test_codex_timeout_returns_exhausted_not_raw_error(self):
-        """ADVERSARIAL primary (codex) subprocess timeout is TRANSIENT — the
-        single-backend chain ends with exhausted=True ("handle natively"),
-        never a raw error dict / exception leaking to the orchestrator.
-        Regression guard for the 2026-07-02 live failure (codex MCP-boot
-        stall -> 60s timeout -> {"error": ...} with backend "unknown")."""
+    async def test_codex_timeout_is_not_quota_exhaustion(self):
+        """A Codex process timeout propagates as a typed transient error."""
         with patch("mcp_brain_router.router.backends.call_codex") as mcx:
             mcx.side_effect = backends.BackendTransientError(
-                "Codex subprocess timed out (90s)"
+                "codex",
+                "Codex subprocess timed out after 180s",
+                failure_kind="timeout",
+                elapsed_ms=180000,
             )
 
-            result = await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
-
-            assert result.exhausted is True
-            assert result.backend == "none"
-            assert result.tried == ["codex"]
-            assert "natively" in result.content.lower()
+            with pytest.raises(backends.BackendTransientError) as exc_info:
+                await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
+            assert exc_info.value.failure_kind == "timeout"
+            assert exc_info.value.backend == "codex"
 
     @pytest.mark.asyncio
-    async def test_cheap_chain_is_deepseek_then_glm(self):
-        """CHEAP primary DeepSeek 429 -> falls to GLM."""
-        with patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds, \
-             patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
+    async def test_cheap_deepseek_429_does_not_call_glm(self):
+        """CHEAP quota exhaustion never crosses into CODE."""
+        with (
+            patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds,
+            patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm,
+        ):
             mds.side_effect = backends.BackendQuotaError("DeepSeek", 429, "limit")
-            mglm.return_value = {"content": "PONG", "usage": {}}
 
             result = await route(Complexity.CHEAP, "p", config=self._cfg())
 
-            assert result.backend == "glm"
-            assert result.tried == ["deepseek", "glm"]
+            assert result.exhausted is True
+            assert result.tried == ["deepseek"]
+            assert not mglm.called
 
     @pytest.mark.asyncio
-    async def test_adversarial_single_entry_chain(self):
-        """ADVERSARIAL chain is codex-only; success returns codex."""
+    async def test_adversarial_tier_is_codex_only(self):
+        """ADVERSARIAL success returns only Codex."""
         with patch("mcp_brain_router.router.backends.call_codex") as mcx:
             mcx.return_value = {"content": "PONG", "usage": {}}
             result = await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
@@ -534,17 +555,121 @@ class TestFallbackChain:
             assert result.tried == ["codex"]
             assert result.exhausted is False
 
+
+class TestTerminalMetadata:
+    """Server contract distinguishes quota, timeout, and hard errors."""
+
+    def _cfg(self):
+        return Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True)
+
     @pytest.mark.asyncio
-    async def test_missing_fallback_credential_is_skipped_not_fatal(self):
-        """If a FALLBACK backend lacks credentials, it is skipped (unavailable),
-        and if the primary was exhausted with no usable fallback -> signal."""
-        cfg = Config(deepseek_key=None, glm_key="glm-k", codex_enabled=True)
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
-            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit")
-            # CODE chain = [glm, deepseek]; deepseek has no key -> skipped.
-            result = await route(Complexity.CODE, "p", config=cfg)
-            assert result.exhausted is True
-            assert result.tried == ["glm"]  # deepseek skipped (no key)
+    async def test_quota_result_is_logged_with_reason_and_elapsed(self):
+        quota_result = RouteResult(
+            content="glm quota exhausted; call another tier",
+            model="",
+            backend="none",
+            complexity=Complexity.CODE,
+            headroom_used=False,
+            exhausted=True,
+            tried=["glm"],
+            reset_at="2026-07-11 12:00:00",
+            failure_kind="quota_exhausted",
+            failure_reason="GLM quota error 429",
+        )
+        with (
+            patch.object(server, "_load_config", return_value=self._cfg()),
+            patch.object(server, "route", new_callable=AsyncMock, return_value=quota_result),
+            patch.object(server, "_log_delegation") as log_call,
+        ):
+            response = await server._delegate_impl("code", "p")
+
+        assert response["exhausted"] is True
+        assert response["failure_kind"] == "quota_exhausted"
+        assert response["failure_reason"] == "GLM quota error 429"
+        assert response["elapsed_ms"] >= 0
+        log_call.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_error_not_exhausted_and_is_logged(self):
+        timeout = backends.BackendTransientError(
+            "codex",
+            "Codex subprocess timed out after 180s",
+            failure_kind="timeout",
+            elapsed_ms=180000,
+        )
+        with (
+            patch.object(server, "_load_config", return_value=self._cfg()),
+            patch.object(server, "route", new_callable=AsyncMock, side_effect=timeout),
+            patch.object(server, "_log_delegation") as log_call,
+        ):
+            response = await server._delegate_impl("adversarial", "p")
+
+        assert response["exhausted"] is False
+        assert response["backend"] == "codex"
+        assert response["failure_kind"] == "timeout"
+        assert response["failure_reason"] == "Codex subprocess timed out after 180s"
+        assert response["elapsed_ms"] == 180000
+        log_call.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_codex_caller_cannot_spawn_nested_codex(self):
+        with (
+            patch.dict("os.environ", {"BRAIN_ROUTER_CALLER": "codex"}),
+            patch.object(server, "_load_config") as load_config,
+            patch.object(server, "route", new_callable=AsyncMock) as route_call,
+            patch.object(server, "_log_delegation") as log_call,
+        ):
+            response = await server._delegate_impl("adversarial", "p")
+
+        assert response["exhausted"] is False
+        assert response["backend"] == "router"
+        assert response["caller"] == "codex"
+        assert response["failure_kind"] == "nested_codex_blocked"
+        load_config.assert_not_called()
+        route_call.assert_not_awaited()
+        log_call.assert_called_once()
+        assert log_call.call_args.args[0]["caller"] == "codex"
+
+    @pytest.mark.asyncio
+    async def test_claude_caller_may_use_adversarial_tier(self):
+        result = RouteResult(
+            content="PONG",
+            model="gpt-5.5",
+            backend="codex",
+            complexity=Complexity.ADVERSARIAL,
+            headroom_used=False,
+        )
+        with (
+            patch.dict("os.environ", {"BRAIN_ROUTER_CALLER": "claude"}),
+            patch.object(server, "_load_config", return_value=self._cfg()),
+            patch.object(server, "route", new_callable=AsyncMock, return_value=result) as route_call,
+            patch.object(server, "_log_delegation"),
+        ):
+            response = await server._delegate_impl("adversarial", "p")
+
+        assert response["answer"] == "PONG"
+        assert response["caller"] == "claude"
+        route_call.assert_awaited_once()
+
+    def test_audit_log_persists_terminal_metadata(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "delegations.jsonl"
+        monkeypatch.setattr(server, "_DELEGATION_LOG", log_path)
+        server._log_delegation(
+            {
+                "complexity": "adversarial",
+                "backend": "codex",
+                "exhausted": False,
+                "failure_kind": "timeout",
+                "failure_reason": "timed out",
+                "elapsed_ms": 180001,
+            },
+            prompt_len=3,
+        )
+
+        record = json.loads(log_path.read_text().strip())
+        assert record["failure_kind"] == "timeout"
+        assert record["failure_reason"] == "timed out"
+        assert record["elapsed_ms"] == 180001
 
 
 class TestErrorClassification:
@@ -552,20 +677,26 @@ class TestErrorClassification:
 
     def test_429_is_quota_error(self):
         err = backends._classify_http_error(
-            "GLM", 429,
+            "GLM",
+            429,
             '{"error":{"message":"Usage limit reached for 5 hour. reset at 2026-06-29 15:56:33"}}',
         )
         assert isinstance(err, backends.BackendQuotaError)
         assert err.status_code == 429
         assert err.reset_at == "2026-06-29 15:56:33"
 
-    def test_5xx_is_quota_error(self):
+    def test_5xx_is_transient_provider_error_not_quota(self):
         err = backends._classify_http_error("DeepSeek", 503, "{}")
-        assert isinstance(err, backends.BackendQuotaError)
+        assert isinstance(err, backends.BackendTransientError)
+        assert not isinstance(err, backends.BackendQuotaError)
+        assert err.failure_kind == "provider_error"
+        assert err.status_code == 503
 
     def test_4xx_auth_is_hard_error(self):
         err = backends._classify_http_error(
-            "GLM", 401, '{"error":{"message":"invalid api key"}}',
+            "GLM",
+            401,
+            '{"error":{"message":"invalid api key"}}',
         )
         assert isinstance(err, backends.BackendError)
         assert not isinstance(err, backends.BackendQuotaError)
@@ -604,13 +735,54 @@ class TestCodexArgvSafety:
         assert "-c" in argv and "mcp_servers={}" in argv
         assert "--skip-git-repo-check" in argv
 
+    def test_codex_argv_uses_lean_worker_profile(self):
+        """Delegated Codex must not load the full interactive user rig."""
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            mrun.return_value = MagicMock(returncode=0, stdout="ok")
+            backends.call_codex("p", "gpt-5.5")
+            argv = mrun.call_args[0][0]
+
+        for flag in ("--ignore-user-config", "--ignore-rules", "--ephemeral"):
+            assert flag in argv
+        disabled = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--disable"]
+        assert disabled == ["plugins", "hooks", "memories", "apps", "multi_agent"]
+        assert argv[argv.index("-C") + 1] == "/private/tmp"
+        assert 'model_reasoning_effort="low"' in argv
+
+    def test_codex_timeout_carries_kind_reason_and_elapsed(self):
+        """Timeout metadata must survive to the server; it is never quota."""
+        timeout = backends.subprocess.TimeoutExpired(cmd=["codex"], timeout=180)
+        with (
+            patch("mcp_brain_router.backends.subprocess.run", side_effect=timeout),
+            patch("mcp_brain_router.backends.time.perf_counter", side_effect=[10.0, 190.0]),
+        ):
+            with pytest.raises(backends.BackendTransientError) as exc_info:
+                backends.call_codex("p", "gpt-5.5")
+
+        err = exc_info.value
+        assert err.backend == "codex"
+        assert err.failure_kind == "timeout"
+        assert err.elapsed_ms == 180000
+        assert "180s" in str(err)
+
     def test_install_smoke_test_uses_same_codex_base(self):
         """install.py's codex smoke test must share CODEX_EXEC_BASE so the
         two invocations can never drift (found drifted in adversarial pass)."""
         import inspect
+
         from mcp_brain_router import install
+
         src = inspect.getsource(install._test_backend_codex)
         assert "CODEX_EXEC_BASE" in src
+
+    def test_claude_registration_declares_caller_identity(self):
+        """Fresh Claude registrations must activate the nested-Codex guard."""
+        import inspect
+
+        from mcp_brain_router import install
+
+        src = inspect.getsource(install.register_in_claude_code)
+        assert "BRAIN_ROUTER_CALLER=claude" in src
 
     def test_error_family_is_unified(self):
         """router's credential/availability errors must subclass
@@ -618,6 +790,7 @@ class TestCodexArgvSafety:
         from backends) catches the WHOLE family — pre-fix these were two
         unrelated classes and codex errors fell into the generic handler."""
         import mcp_brain_router.router as router_mod
+
         assert issubclass(router_mod.BackendError, backends.BackendError)
         assert issubclass(router_mod.MissingCredentialError, backends.BackendError)
         assert issubclass(backends.BackendTransientError, backends.BackendError)
@@ -638,4 +811,4 @@ class TestCavemanSystemDirective:
             backends.call_codex("do X", "gpt-5.5")
             argv = mrun.call_args[0][0]
         assert argv[-1].startswith(backends.CAVEMAN_SYSTEM)  # directive leads
-        assert argv[-1].endswith("do X")                     # task preserved verbatim
+        assert argv[-1].endswith("do X")  # task preserved verbatim

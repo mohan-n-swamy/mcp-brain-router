@@ -4,7 +4,7 @@ An MCP server for Claude Code that delegates sub-tasks to cheaper and adversaria
 
 ## What It Is
 
-`mcp-brain-router` is a Model Context Protocol server that runs locally and sits between Claude Code (the orchestrator) and three external LLM providers. When Claude Code encounters a task suitable for a cheaper or independent model, it delegates via the `delegate()` tool, specifying complexity (`cheap`, `code`, or `adversarial`). The router selects the appropriate backend, sends the task using that provider's own API key, and returns the answer along with token counts and cost estimates. Anthropic's services are never touched by this tool — only by native Claude Code.
+`mcp-brain-router` is a Model Context Protocol server that runs locally and sits between an orchestrator and three external LLM providers. The orchestrator delegates via the `delegate()` tool, specifying complexity (`cheap`, `code`, or `adversarial`). Each tier maps to exactly one backend; the router never crosses tiers. It returns the answer plus terminal metadata. Anthropic's services are never touched by this tool — only by native Claude Code.
 
 ## Why It Exists
 
@@ -32,7 +32,7 @@ The install script will:
 2. Store secrets in `~/.config/mcp-brain-router/config.toml` (mode 0600, gitignored).
 3. Self-register with Claude Code by printing and offering to run:
    ```
-   claude mcp add brain-router -- python -m mcp_brain_router.server
+   claude mcp add brain-router -e BRAIN_ROUTER_CALLER=claude -- python -m mcp_brain_router.server
    ```
 4. Run smoke tests (one cheap call, one code call, codex if enabled).
 
@@ -45,8 +45,8 @@ from mcp import delegate
 
 # Trivial task: brainstorm 10 ideas
 answer = delegate(
-    task="Brainstorm 10 naming ideas for a CLI tool that routes tasks to cheaper LLMs.",
-    complexity="cheap"
+    complexity="cheap",
+    prompt="Brainstorm 10 naming ideas for a CLI tool that routes tasks to cheaper LLMs."
 )
 print(answer)
 # Returns:
@@ -64,14 +64,14 @@ print(answer)
 # Code review: ask GLM to review Python logic
 code_snippet = "def merge(a, b): return sorted(a + b)"
 answer = delegate(
-    task=f"Review this merge function for correctness and efficiency:\n{code_snippet}",
-    complexity="code"
+    complexity="code",
+    prompt=f"Review this merge function for correctness and efficiency:\n{code_snippet}"
 )
 
 # Adversarial: ask Codex to find the worst flaw in your design
 answer = delegate(
-    task="I'm caching user sessions in memory for 24 hours. What's the single worst thing that can happen?",
-    complexity="adversarial"
+    complexity="adversarial",
+    prompt="I'm caching user sessions in memory for 24 hours. What's the single worst thing that can happen?"
 )
 ```
 
@@ -83,6 +83,24 @@ answer = delegate(
 | `code` | GLM | glm-5.2 | Code review, algorithm design, debugging | ~$0.50/1M tokens | Fast |
 | `adversarial` | Codex | gpt-5.5 (via codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
 
+### Default orchestration policy
+
+- General self-contained work starts with `code` → GLM.
+- A Claude orchestrator may call `adversarial` → Codex only after GLM is unusable: `exhausted=true`, an error, or a missing/empty answer.
+- If Codex is exhausted, errors, or returns no answer, the orchestrator handles the task natively.
+- `cheap` → DeepSeek is an explicit side lane for mechanical/high-volume work.
+
+The MCP performs none of these cross-tier steps automatically. Set `BRAIN_ROUTER_CALLER=claude` in Claude's MCP entry and `BRAIN_ROUTER_CALLER=codex` in Codex's. The server deterministically rejects `adversarial` calls from a Codex caller with `failure_kind="nested_codex_blocked"`; after GLM, Codex must handle the task in its current native session.
+
+Codex registration example:
+
+```toml
+[mcp_servers.brain-router]
+command = "python"
+args = ["-m", "mcp_brain_router.server"]
+env = { BRAIN_ROUTER_CALLER = "codex" }
+```
+
 ## Architecture
 
 ```
@@ -91,7 +109,7 @@ answer = delegate(
 │   (native Claude + MCP)  │  (your subscription)
 └────────────┬─────────────┘
              │
-             │ MCP call: delegate(task, complexity)
+             │ MCP call: delegate(prompt, complexity)
              │
 ┌────────────▼──────────────────────────────────┐
 │     mcp-brain-router (this tool)               │  Local MCP server
@@ -118,16 +136,13 @@ Key point:
 After installation, your config lives at `~/.config/mcp-brain-router/config.toml`:
 
 ```toml
-[providers]
 deepseek_key = "sk-..."
 glm_key = "..."
 codex_enabled = true
-headroom_base_url = ""  # Optional: leave empty if you don't run a local headroom proxy
+# headroom_base_url = "http://localhost:8282"
 
-[defaults]
-deepseek_model = "deepseek-v4-flash"
-glm_model = "glm-5.2"
-codex_model = "gpt-5.5"
+[model_overrides]
+adversarial = "gpt-5.5"
 ```
 
 **Changing keys later:**
@@ -135,9 +150,14 @@ codex_model = "gpt-5.5"
 mcp-brain-router-install  # Re-runs setup, updates config, skips Claude Code re-registration
 ```
 
-**Validating config:**
+**Validating the repo:**
 ```bash
-mcp-brain-router-test  # One-shot smoke test to each configured backend
+pytest -q
+```
+
+**Validating the installed MCP path:**
+```python
+delegate(complexity="code", prompt="Health check. Reply exactly PONG.")
 ```
 
 ## Compliance
@@ -154,7 +174,7 @@ mcp-brain-router-install  # Re-run setup
 ```
 
 **"DeepSeek call failed: 429 rate limit"**
-You've hit the free-tier limit. Codex CLI calls still work; GLM may also be available depending on your z.ai plan. The tool returns the error; Claude Code will handle the fallback.
+You've hit the provider limit. The tool returns `exhausted=true`; the orchestrator decides whether to call another tier or handle the task natively. The router never crosses tiers itself.
 
 **"Codex not installed"**
 The tool is optional. If `codex` binary is not on your PATH, adversarial-tier calls fail with a clear message. Install Codex CLI separately if you want this tier:
@@ -164,10 +184,10 @@ pip install codex-cli
 ```
 
 **"Headroom proxy not responding"**
-The tool tries to route DeepSeek/GLM calls through your local headroom proxy (if configured). If headroom is down, it falls back to direct calls to the providers. No interruption; you'll see `"headroom_used": false` in the response metadata.
+The tool routes DeepSeek/GLM through your local headroom proxy when configured. If that proxy is down, the call returns an error; clear `headroom_base_url` or restart the proxy to use the backend again.
 
 **"TypeError: delegate() got unexpected keyword"**
-Check your function call signature against the Usage section above. The tool accepts `task` (required), `complexity` (required), `context` (optional), and `model` (optional override).
+Check your function call signature against the Usage section above. The tool accepts `complexity` (required), `prompt` (required), and `model` (optional override).
 
 ## License
 

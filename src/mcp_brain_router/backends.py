@@ -3,37 +3,56 @@
 Each backend is isolated; router.py calls these functions.
 """
 
-import asyncio
 import os
 import shutil
 import subprocess
+import time
 from typing import Any, Dict, Optional
+
 import httpx
 
 
 class BackendError(Exception):
     """Base exception for backend errors."""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend: Optional[str] = None,
+        failure_kind: str = "backend_error",
+        elapsed_ms: Optional[int] = None,
+    ):
+        if backend is not None:
+            self.backend = backend
+        self.failure_kind = failure_kind
+        self.elapsed_ms = elapsed_ms
+        super().__init__(message)
 
 
 class BackendQuotaError(BackendError):
-    """Raised when a backend rejects the call for a transient/quota reason
-    (HTTP 429 rate limit, or 5xx server error) — i.e. a DIFFERENT backend
-    might succeed, so the router should fall through to the next in the chain.
+    """Raised only when a backend returns HTTP 429 quota/rate exhaustion.
 
     Carries the HTTP status and a sanitized message. For rate-limit bodies the
     provider message (e.g. GLM "Usage limit reached for 5 hour … reset at …")
     holds NO secret — only the reset time — so it is safe to surface and is
     what lets the orchestrator decide whether to wait.
     """
-    def __init__(self, provider: str, status_code: int, message: str = "",
-                 reset_at: Optional[str] = None):
+
+    def __init__(
+        self, provider: str, status_code: int, message: str = "", reset_at: Optional[str] = None
+    ):
         self.provider = provider
+        self.backend = provider.lower()
         self.status_code = status_code
         self.message = message
         self.reset_at = reset_at
         detail = f" — {message}" if message else ""
-        super().__init__(f"{provider} quota/transient error {status_code}{detail}")
+        super().__init__(
+            f"{provider} quota error {status_code}{detail}",
+            backend=provider.lower(),
+            failure_kind="quota_exhausted",
+        )
 
 
 # Resolve the codex binary to an ABSOLUTE path at import time. The MCP server
@@ -44,24 +63,43 @@ class BackendQuotaError(BackendError):
 # shutil.which honors PATH when present; the ~/.npm-global fallback covers the
 # empty-PATH MCP case. Falls back to bare "codex" so a missing binary still
 # raises the explicit "not found on PATH" BackendError, not an opaque one.
-_CODEX_BIN = (
-    shutil.which("codex")
-    or (
-        os.path.expanduser("~/.npm-global/bin/codex")
-        if os.path.exists(os.path.expanduser("~/.npm-global/bin/codex"))
-        else "codex"
-    )
+_CODEX_BIN = shutil.which("codex") or (
+    os.path.expanduser("~/.npm-global/bin/codex")
+    if os.path.exists(os.path.expanduser("~/.npm-global/bin/codex"))
+    else "codex"
 )
 
-# Canonical codex CLI invocation prefix — shared with install.py's smoke test
-# so the two can never drift. mcp_servers={} skips booting every MCP server in
-# ~/.codex/config.toml (12+, incl. auth-blocked ones) which otherwise stalls
-# startup past the subprocess timeout; delegated prompts never need MCP.
+# Canonical lean Codex worker invocation — shared with install.py's smoke test
+# so the two can never drift. Live A/B (2026-07-11): the full user rig used
+# 23,145 tokens / ~69s for PONG; these flags used 14,907 / 10.6s. Delegated
+# prompts are self-contained workers: no user config, rules, plugins, hooks,
+# memories, apps, multi-agent fan-out, persisted session, MCPs, or repo context.
 CODEX_EXEC_BASE = [
-    _CODEX_BIN, "exec",
+    _CODEX_BIN,
+    "exec",
     "--skip-git-repo-check",
-    "-c", "mcp_servers={}",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--ephemeral",
+    "--disable",
+    "plugins",
+    "--disable",
+    "hooks",
+    "--disable",
+    "memories",
+    "--disable",
+    "apps",
+    "--disable",
+    "multi_agent",
+    "-c",
+    "mcp_servers={}",
+    "-c",
+    'model_reasoning_effort="low"',
+    "-C",
+    "/private/tmp",
 ]
+
+CODEX_TIMEOUT_SECONDS = 180
 
 
 def _find_mise_node() -> str:
@@ -69,6 +107,7 @@ def _find_mise_node() -> str:
     case). Prefer the `lts` alias; fall back to any installed version. Returns
     "" if none found (caller then relies on whatever PATH provides)."""
     import glob
+
     base = os.path.expanduser("~/.local/share/mise/installs/node")
     for cand in [os.path.join(base, "lts", "bin", "node")] + sorted(
         glob.glob(os.path.join(base, "*", "bin", "node")), reverse=True
@@ -113,24 +152,39 @@ CAVEMAN_SYSTEM = (
 
 
 class BackendTransientError(BackendError):
-    """Raised on a transient hard failure with no HTTP status — subprocess
-    timeout or death (Codex CLI). Like BackendQuotaError, a DIFFERENT backend
-    might succeed, so the router falls through the chain; unlike config
-    errors (401/bad model), it must NOT propagate loud."""
-    pass
+    """Raised on timeout/provider failure that is not quota exhaustion."""
+
+    def __init__(
+        self,
+        provider: str,
+        reason: str,
+        *,
+        failure_kind: str = "transient_error",
+        status_code: Optional[int] = None,
+        elapsed_ms: Optional[int] = None,
+    ):
+        self.provider = provider
+        self.status_code = status_code
+        super().__init__(
+            reason,
+            backend=provider.lower(),
+            failure_kind=failure_kind,
+            elapsed_ms=elapsed_ms,
+        )
 
 
-# HTTP status codes that mean "try a different backend" rather than "fix config".
-# 429 = rate limit / quota; 5xx = provider-side transient failure.
-# 4xx (auth, bad request) are NOT here — those are config errors, no fallback.
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+# Provider-side transient failures are errors, not quota exhaustion. The
+# orchestrator may choose another tier, but the router never labels these 5xx
+# responses as exhausted quota.
+_TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
 
 
 def _classify_http_error(provider: str, status_code: int, body: str) -> BackendError:
     """Map a non-200 HTTP response to the right exception type.
 
-    Retryable (429/5xx) -> BackendQuotaError (router falls through).
-    Anything else        -> BackendError (hard stop, surfaces to caller).
+    429  -> BackendQuotaError (genuine quota exhaustion).
+    5xx  -> BackendTransientError (provider failure, not quota).
+    Other -> BackendError (hard stop, surfaces to caller).
 
     The body is parsed ONLY to lift a rate-limit message + reset time, which
     carry no secret. The raw body is never echoed wholesale.
@@ -139,6 +193,7 @@ def _classify_http_error(provider: str, status_code: int, body: str) -> BackendE
     reset_at = None
     try:
         import json as _json
+
         data = _json.loads(body)
         err = data.get("error", data) if isinstance(data, dict) else {}
         if isinstance(err, dict):
@@ -148,16 +203,28 @@ def _classify_http_error(provider: str, status_code: int, body: str) -> BackendE
     # Best-effort reset-time lift from common "reset at YYYY-MM-DD HH:MM:SS" shape.
     if message:
         import re as _re
+
         m = _re.search(r"reset(?:s)?\s+at\s+([0-9:\- ]+)", message)
         if m:
             reset_at = m.group(1).strip()
 
-    if status_code in _RETRYABLE_STATUS:
+    if status_code == 429:
         return BackendQuotaError(provider, status_code, message, reset_at)
+    if status_code in _TRANSIENT_STATUS:
+        detail = f": {message}" if message else ""
+        return BackendTransientError(
+            provider,
+            f"{provider} provider error {status_code}{detail}",
+            failure_kind="provider_error",
+            status_code=status_code,
+        )
     # Non-retryable: do NOT echo the body (may carry request echoes); message
     # from the parsed error field is safe and useful.
     safe = f": {message}" if message else " (body withheld)"
-    return BackendError(f"{provider} API error {status_code}{safe}")
+    return BackendError(
+        f"{provider} API error {status_code}{safe}",
+        backend=provider.lower(),
+    )
 
 
 def _extract_text(data: Dict[str, Any], provider: str) -> str:
@@ -188,6 +255,7 @@ def _extract_text(data: Dict[str, Any], provider: str) -> str:
 # ============================================================================
 # DeepSeek (HTTP, Anthropic-compatible endpoint)
 # ============================================================================
+
 
 async def call_deepseek(
     prompt: str,
@@ -224,9 +292,7 @@ async def call_deepseek(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise _classify_http_error(
-                    "DeepSeek", response.status_code, response.text
-                )
+                raise _classify_http_error("DeepSeek", response.status_code, response.text)
 
             data = response.json()
 
@@ -239,9 +305,17 @@ async def call_deepseek(
             "usage": usage,
         }
     except httpx.RequestError as e:
-        raise BackendError(f"DeepSeek request failed: {e}")
+        raise BackendError(
+            f"DeepSeek request failed: {e}",
+            backend="deepseek",
+            failure_kind="network_error",
+        )
     except (KeyError, IndexError, ValueError) as e:
-        raise BackendError(f"DeepSeek response parse error: {e}")
+        raise BackendError(
+            f"DeepSeek response parse error: {e}",
+            backend="deepseek",
+            failure_kind="response_error",
+        )
 
 
 async def call_deepseek_via_headroom(
@@ -274,13 +348,11 @@ async def call_deepseek_via_headroom(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise _classify_http_error(
-                    "DeepSeek-headroom", response.status_code, response.text
-                )
+                raise _classify_http_error("DeepSeek-headroom", response.status_code, response.text)
 
             data = response.json()
 
-        content = data["content"][0]["text"]
+        content = _extract_text(data, data.get("model", "DeepSeek-headroom"))
         usage = data.get("usage", {})
 
         return {
@@ -288,14 +360,23 @@ async def call_deepseek_via_headroom(
             "usage": usage,
         }
     except httpx.RequestError as e:
-        raise BackendError(f"DeepSeek headroom request failed: {e}")
+        raise BackendError(
+            f"DeepSeek headroom request failed: {e}",
+            backend="deepseek",
+            failure_kind="network_error",
+        )
     except (KeyError, IndexError, ValueError) as e:
-        raise BackendError(f"DeepSeek headroom response parse error: {e}")
+        raise BackendError(
+            f"DeepSeek headroom response parse error: {e}",
+            backend="deepseek",
+            failure_kind="response_error",
+        )
 
 
 # ============================================================================
 # GLM (HTTP, Anthropic-compatible endpoint)
 # ============================================================================
+
 
 async def call_glm(
     prompt: str,
@@ -332,13 +413,11 @@ async def call_glm(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise _classify_http_error(
-                    "GLM", response.status_code, response.text
-                )
+                raise _classify_http_error("GLM", response.status_code, response.text)
 
             data = response.json()
 
-        content = data["content"][0]["text"]
+        content = _extract_text(data, data.get("model", "GLM"))
         usage = data.get("usage", {})
 
         return {
@@ -346,9 +425,17 @@ async def call_glm(
             "usage": usage,
         }
     except httpx.RequestError as e:
-        raise BackendError(f"GLM request failed: {e}")
+        raise BackendError(
+            f"GLM request failed: {e}",
+            backend="glm",
+            failure_kind="network_error",
+        )
     except (KeyError, IndexError, ValueError) as e:
-        raise BackendError(f"GLM response parse error: {e}")
+        raise BackendError(
+            f"GLM response parse error: {e}",
+            backend="glm",
+            failure_kind="response_error",
+        )
 
 
 async def call_glm_via_headroom(
@@ -381,13 +468,11 @@ async def call_glm_via_headroom(
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                raise _classify_http_error(
-                    "GLM-headroom", response.status_code, response.text
-                )
+                raise _classify_http_error("GLM-headroom", response.status_code, response.text)
 
             data = response.json()
 
-        content = data["content"][0]["text"]
+        content = _extract_text(data, data.get("model", "GLM-headroom"))
         usage = data.get("usage", {})
 
         return {
@@ -395,14 +480,23 @@ async def call_glm_via_headroom(
             "usage": usage,
         }
     except httpx.RequestError as e:
-        raise BackendError(f"GLM headroom request failed: {e}")
+        raise BackendError(
+            f"GLM headroom request failed: {e}",
+            backend="glm",
+            failure_kind="network_error",
+        )
     except (KeyError, IndexError, ValueError) as e:
-        raise BackendError(f"GLM headroom response parse error: {e}")
+        raise BackendError(
+            f"GLM headroom response parse error: {e}",
+            backend="glm",
+            failure_kind="response_error",
+        )
 
 
 # ============================================================================
 # Codex (subprocess-based, adversarial)
 # ============================================================================
+
 
 def _validate_model_name(model: str) -> None:
     """
@@ -415,9 +509,12 @@ def _validate_model_name(model: str) -> None:
         BackendError: If model contains disallowed characters.
     """
     import re
+
     if not re.match(r"^[A-Za-z0-9._-]+$", model):
         raise BackendError(
-            f"Invalid model name. Must contain only alphanumeric, dot, underscore, or hyphen."
+            "Invalid model name. Must contain only alphanumeric, dot, underscore, or hyphen.",
+            backend="codex",
+            failure_kind="validation_error",
         )
 
 
@@ -444,6 +541,7 @@ def call_codex(
     # Validate model name to prevent argument injection via model string
     _validate_model_name(model)
 
+    started = time.perf_counter()
     try:
         result = subprocess.run(
             # "--" ends option parsing so a prompt starting with "-" can't be
@@ -452,13 +550,18 @@ def call_codex(
             CODEX_EXEC_BASE + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=CODEX_TIMEOUT_SECONDS,
             check=False,
             env=_codex_env(),
         )
 
         if result.returncode != 0:
-            raise BackendError("Codex subprocess failed")
+            raise BackendError(
+                "Codex subprocess failed",
+                backend="codex",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
 
         return {
             "content": result.stdout.strip(),
@@ -466,8 +569,17 @@ def call_codex(
         }
 
     except subprocess.TimeoutExpired:
-        # Transient (slow model / cold start), not config — router may fall
-        # through the chain or return exhausted=True instead of a raw error.
-        raise BackendTransientError("Codex subprocess timed out (90s)")
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "codex",
+            f"Codex subprocess timed out after {CODEX_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
     except FileNotFoundError:
-        raise BackendError("Codex binary not found on PATH")
+        raise BackendError(
+            "Codex binary not found on PATH",
+            backend="codex",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
