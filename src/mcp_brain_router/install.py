@@ -16,22 +16,20 @@ Flow:
 8. Summary + next steps
 """
 
+import getpass
 import os
-import sys
 import shutil
 import subprocess
-import getpass
+import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Dict, Optional
 
 # Import actual config module
 from mcp_brain_router.config import (
-    Config,
-    ConfigError,
-    ensure_config_dir,
     CONFIG_FILE,
-    CONFIG_DIR,
+    Config,
+    ensure_config_dir,
 )
 
 
@@ -268,7 +266,18 @@ def register_in_claude_code() -> bool:
         True if successfully registered and verified, False otherwise
     """
     python_exe = sys.executable
-    command = ["claude", "mcp", "add", "brain-router", "--", python_exe, "-m", "mcp_brain_router.server"]
+    command = [
+        "claude",
+        "mcp",
+        "add",
+        "brain-router",
+        "-e",
+        "BRAIN_ROUTER_CALLER=claude",
+        "--",
+        python_exe,
+        "-m",
+        "mcp_brain_router.server",
+    ]
     command_str = " ".join(command)
 
     # Check if already registered
@@ -300,7 +309,7 @@ def register_in_claude_code() -> bool:
                 return True
             else:
                 print(f"{Color.YELLOW}Warning:{Color.RESET} Registration succeeded but verification failed.")
-                print(f"Run 'claude mcp list' to confirm manual registration if needed.\n")
+                print("Run 'claude mcp list' to confirm manual registration if needed.\n")
                 return False
         else:
             print(f"{Color.YELLOW}Warning:{Color.RESET} Registration may have failed.")
@@ -491,9 +500,9 @@ def print_summary(
         print(f"  {Color.YELLOW}⊘{Color.RESET} Manual registration may be required (see above)")
 
     print(f"\n{Color.BOLD}Next steps:{Color.RESET}")
-    print(f"  1. Restart Claude Code or reload the MCP")
-    print(f"  2. Test the tool in a conversation")
-    print(f"  3. To update API keys, run: mcp-brain-router-install")
+    print("  1. Restart Claude Code or reload the MCP")
+    print("  2. Test the tool in a conversation")
+    print("  3. To update API keys, run: mcp-brain-router-install")
 
     print()
 

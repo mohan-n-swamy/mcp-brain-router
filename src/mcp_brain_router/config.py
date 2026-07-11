@@ -5,9 +5,9 @@ Loads from ~/.config/mcp-brain-router/config.toml with 0600 permissions.
 
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
-from dataclasses import dataclass
 
 try:
     import tomllib
@@ -82,7 +82,7 @@ class Config:
         if self.glm_key:
             lines.append(f'glm_key = "{self._escape_toml(self.glm_key)}"')
         if self.codex_enabled:
-            lines.append(f"codex_enabled = true")
+            lines.append("codex_enabled = true")
         if self.headroom_base_url:
             lines.append(
                 f'headroom_base_url = "{self._escape_toml(self.headroom_base_url)}"'
