@@ -3,9 +3,11 @@
 Each backend is isolated; router.py calls these functions.
 """
 
+import contextlib
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Any, Dict, Optional
 
@@ -219,6 +221,32 @@ def _grok_env() -> Dict[str, str]:
         current = env.get("PATH", "")
         env["PATH"] = os.pathsep.join([grok_bin, current]) if current else grok_bin
     return env
+
+
+@contextlib.contextmanager
+def _grok_prompt_file(text: str):
+    """Write `text` to a private temp file and yield its path for grok's
+    `--prompt-file <PATH>`, deleting it on exit.
+
+    WHY a file, not `-p <value>`: grok's CLI (clap) does NOT safely bind a `-p`
+    value that starts with "-" — live-verified 2026-07-13: `grok -p "-h ..."`
+    fails "a value is required for --single", and `-p "--cwd /x ..."` fails
+    "unexpected argument". So an untrusted prompt beginning with a dash would
+    break the worker (denial), and `-p` is NOT the injection-safe token the
+    earlier comment claimed. `--prompt-file <real path>` reads the prompt as
+    OPAQUE file content — dashes, --flags, newlines are all literal text
+    (live-verified: a prompt of "-h and --cwd as literal text" returned the
+    expected answer). The file is created 0600 so the prompt (which may carry
+    sensitive context) is never world-readable, and removed in the finally."""
+    fd, path = tempfile.mkstemp(prefix="grok-prompt-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o600)
+        yield path
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
 
 
 def _agentic_cli_env() -> Dict[str, str]:
@@ -758,13 +786,16 @@ def call_grok(
     prompt: str,
     model: str,
 ) -> Dict[str, Any]:
-    """Call Grok CLI via subprocess (chat mode): `grok -p <prompt> -m <model>`.
+    """Call Grok CLI via subprocess (chat mode): `grok --prompt-file <f> -m <model>`.
 
-    `-p/--single` is grok's single-turn headless flag — it prints the response
-    to stdout and exits. Mirrors call_codex: pass the prompt on STDIN after a
-    CAVEMAN_SYSTEM prepend (grok reads --prompt-file/stdin), validate the model
-    name against argument injection, and never echo a secret. Grok is a native
-    binary (no node shebang) so only _grok_env's grok-bin PATH prepend is needed.
+    The prompt (CAVEMAN_SYSTEM-prefixed) is written to a private temp file read
+    via `--prompt-file` — NOT passed as `-p <value>`, because grok's clap parser
+    rejects a `-p` value that starts with "-" (live-verified 2026-07-13), which
+    would break on any dash-leading prompt AND is not the injection-safe token an
+    earlier revision assumed. File content is opaque (dashes/--flags/newlines are
+    literal). Model name is validated against argument injection; no secret is
+    echoed. Grok is a native binary so only _grok_env's grok-bin PATH prepend is
+    needed.
 
     Returns:
         {"content": "response text", "usage": None}  (grok CLI exposes no token counts)
@@ -776,19 +807,15 @@ def call_grok(
 
     started = time.perf_counter()
     try:
-        result = subprocess.run(
-            # `-p/--single VALUE` consumes exactly the NEXT argv token as the
-            # single-turn prompt — a prompt starting with "-" is still bound to
-            # -p (it is -p's value, not a new flag), so passing it as one argv
-            # token in a non-shell list is injection-safe. (Grok's --prompt-file
-            # expects a real FILE path, NOT stdin "-" — that path errors.)
-            [_GROK_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "-m", model, "--output-format", "plain"],
-            capture_output=True,
-            text=True,
-            timeout=CODEX_TIMEOUT_SECONDS,
-            check=False,
-            env=_grok_env(),
-        )
+        with _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
+            result = subprocess.run(
+                [_GROK_BIN, "--prompt-file", pf, "-m", model, "--output-format", "plain"],
+                capture_output=True,
+                text=True,
+                timeout=CODEX_TIMEOUT_SECONDS,
+                check=False,
+                env=_grok_env(),
+            )
 
         if result.returncode != 0:
             raise BackendError(
@@ -897,40 +924,41 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
 
     Grok is xAI's Claude-Code-shaped CLI: `--permission-mode acceptEdits` lets it
     write/edit files with its built-in tools, and `--cwd` roots it in the caller's
-    repo. The prompt is passed as `-p/--single VALUE` — one argv token in a
-    non-shell list, so a prompt starting with "-" stays bound to -p (its value,
-    not a new flag) and cannot inject. (Grok's --prompt-file expects a real FILE
-    path, NOT stdin "-" — live-verified 2026-07-13: "-" errors "No such file".)
-    AGENTIC_SYSTEM (NOT CAVEMAN_SYSTEM) is prepended — the file write is the
-    deliverable, and the chat-terse directive suppresses tool use in weaker
-    workers (root-caused 2026-07-12 for GLM). Grok is a native binary, so only
-    _grok_env's grok-bin PATH prepend is needed."""
+    repo. The prompt (AGENTIC_SYSTEM-prefixed) is written to a private temp file
+    read via `--prompt-file` — NOT `-p <value>`, because grok's clap parser
+    rejects a `-p` value starting with "-" (live-verified 2026-07-13), breaking on
+    any dash-leading prompt; file content is opaque so dashes/--flags/newlines are
+    literal, which is the injection-safe path. AGENTIC_SYSTEM (NOT CAVEMAN_SYSTEM)
+    is used — the file write is the deliverable, and the chat-terse directive
+    suppresses tool use in weaker workers (root-caused 2026-07-12 for GLM). Grok
+    is a native binary, so only _grok_env's grok-bin PATH prepend is needed.
+    Live V-gate 2026-07-13: this path wrote a file in a real cwd via the real CLI."""
     _validate_model_name(model)
     cwd = _resolve_agentic_cwd(cwd, "grok")
     started = time.perf_counter()
-    argv = [
-        _GROK_BIN,
-        "-p",
-        f"{AGENTIC_SYSTEM}\n\n{prompt}",
-        "-m",
-        model,
-        "--cwd",
-        cwd,
-        "--permission-mode",
-        "acceptEdits",
-        "--output-format",
-        "plain",
-    ]
     try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=AGENTIC_TIMEOUT_SECONDS,
-            check=False,
-            cwd=cwd,
-            env=_grok_env(),
-        )
+        with _grok_prompt_file(f"{AGENTIC_SYSTEM}\n\n{prompt}") as pf:
+            result = subprocess.run(
+                [
+                    _GROK_BIN,
+                    "--prompt-file",
+                    pf,
+                    "-m",
+                    model,
+                    "--cwd",
+                    cwd,
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--output-format",
+                    "plain",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=AGENTIC_TIMEOUT_SECONDS,
+                check=False,
+                cwd=cwd,
+                env=_grok_env(),
+            )
         if result.returncode != 0:
             raise BackendError(
                 "grok agentic subprocess failed",
