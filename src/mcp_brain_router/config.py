@@ -49,6 +49,7 @@ class Config:
     deepseek_key: Optional[str] = None
     glm_key: Optional[str] = None
     codex_enabled: bool = False
+    grok_enabled: bool = False
     headroom_base_url: Optional[str] = None
     model_overrides: Optional[Dict[str, str]] = None
     roles: Optional[Dict[str, List[str]]] = None
@@ -86,6 +87,7 @@ class Config:
             deepseek_key=data.get("deepseek_key"),
             glm_key=data.get("glm_key"),
             codex_enabled=data.get("codex_enabled", False),
+            grok_enabled=data.get("grok_enabled", False),
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
             roles=data.get("roles") or {},
@@ -104,6 +106,8 @@ class Config:
             lines.append(f'glm_key = "{self._escape_toml(self.glm_key)}"')
         if self.codex_enabled:
             lines.append("codex_enabled = true")
+        if self.grok_enabled:
+            lines.append("grok_enabled = true")
         if self.headroom_base_url:
             lines.append(
                 f'headroom_base_url = "{self._escape_toml(self.headroom_base_url)}"'

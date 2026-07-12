@@ -129,7 +129,7 @@ async def _delegate_impl(
             complexity_enum = Complexity(complexity)
         except ValueError:
             error_msg = (
-                f"Invalid complexity tier: {complexity}. Must be cheap, code, or adversarial."
+                f"Invalid complexity tier: {complexity}. Must be cheap, code, grok, or adversarial."
             )
             return complete(
                 {
@@ -439,14 +439,15 @@ def create_server():
             """
             Delegate by legacy complexity tier or configured orchestration role.
 
-            This tool routes your request to one of three external non-Anthropic models:
+            This tool routes your request to one of four external non-Anthropic models:
             - 'cheap': GLM 4.7 (Haiku-equivalent, fastest, lowest cost).
             - 'code': GLM-5.2 (Sonnet-equivalent, strong code reasoning).
+            - 'grok': xAI Grok 4.5 CLI (sits between GLM and Codex in the cascade).
             - 'adversarial': Codex CLI (configured model; gpt-5.5 default, GPT-5.6 candidates require eval).
 
             Each tier maps to exactly one backend; this tool never cascades.
-            Default general worker policy: call 'code' first, then let the
-            orchestrator choose 'adversarial' or native handling.
+            Default general worker cascade order (caller-owned): 'code' (GLM) →
+            'grok' → 'adversarial' (Codex) → native handling.
 
             Execution mode (spec 002):
             - 'agentic' (default and only public mode): the router shells to the
@@ -531,14 +532,15 @@ def create_server():
             """
             Delegate by legacy complexity tier or configured orchestration role.
 
-            This tool routes your request to one of three external non-Anthropic models:
+            This tool routes your request to one of four external non-Anthropic models:
             - 'cheap': GLM 4.7 (Haiku-equivalent, fastest, lowest cost).
             - 'code': GLM-5.2 (Sonnet-equivalent, strong code reasoning).
+            - 'grok': xAI Grok 4.5 CLI (sits between GLM and Codex in the cascade).
             - 'adversarial': Codex CLI (configured model; gpt-5.5 default, GPT-5.6 candidates require eval).
 
             Each tier maps to exactly one backend; this tool never cascades.
-            Default general worker policy: call 'code' first, then let the
-            orchestrator choose 'adversarial' or native handling.
+            Default general worker cascade order (caller-owned): 'code' (GLM) →
+            'grok' → 'adversarial' (Codex) → native handling.
 
             Execution mode (spec 002):
             - 'agentic' (default and only public mode): the router shells to the

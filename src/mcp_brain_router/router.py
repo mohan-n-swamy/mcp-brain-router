@@ -19,6 +19,7 @@ class Complexity(str, Enum):
 
     CHEAP = "cheap"
     CODE = "code"
+    GROK = "grok"
     ADVERSARIAL = "adversarial"
 
 
@@ -46,6 +47,7 @@ class Provider(str, Enum):
     ANTHROPIC = "anthropic"   # opus / sonnet / haiku / fable — NEVER called by the router
     CODEX = "codex"           # every gpt-* / sol / terra / luna id (OpenAI Codex CLI)
     ZHIPU = "zhipu"           # glm-4.7 / glm-5.2
+    XAI = "xai"               # grok-4.5 / grok-composer-* (xAI Grok CLI)
     DEEPSEEK = "deepseek"
 
 
@@ -66,6 +68,7 @@ _MODEL_PROVIDER_PREFIXES = (
     ("luna", Provider.CODEX),
     ("o3", Provider.CODEX),
     ("glm", Provider.ZHIPU),
+    ("grok", Provider.XAI),
     ("deepseek", Provider.DEEPSEEK),
 )
 
@@ -101,6 +104,7 @@ class Assignment:
 _PROVIDER_TARGETS = {
     Provider.DEEPSEEK: ("deepseek", Complexity.CHEAP),
     Provider.ZHIPU: ("glm", Complexity.CODE),
+    Provider.XAI: ("grok", Complexity.GROK),
     Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
 }
 
@@ -231,6 +235,7 @@ async def route_assignment(
 _TIER_BACKENDS = {
     Complexity.CHEAP: "glm",
     Complexity.CODE: "glm",
+    Complexity.GROK: "grok",
     Complexity.ADVERSARIAL: "codex",
 }
 
@@ -337,6 +342,8 @@ async def route(
             result = await _route_deepseek(prompt, model, config)
         elif backend_name == "glm":
             result = await _route_glm(prompt, model, config)
+        elif backend_name == "grok":
+            result = await _route_grok(prompt, model, config)
         elif backend_name == "codex":
             result = await _route_codex(prompt, model, config)
         else:  # pragma: no cover - _TIER_BACKENDS is the closed set
@@ -390,6 +397,11 @@ async def _route_agentic(
             backends.call_glm_agentic, prompt, model, cwd
         )
         label = "glm"
+    elif backend_name == "grok":
+        result = await asyncio.to_thread(
+            backends.call_grok_agentic, prompt, model, cwd
+        )
+        label = "grok"
     elif backend_name == "codex":
         result = await asyncio.to_thread(
             backends.call_codex_agentic, prompt, model, cwd
@@ -457,6 +469,9 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # FAST GLM (glm-4.7); the `code` tier keeps glm-5.2. The model override
         # axis (config [model_overrides] cheap=) still wins over this default.
         "glm-cheap": "glm-4.7",
+        # xAI Grok agentic CLI worker (grok.com OAuth, no API key). Sits between
+        # the `code` (GLM) and `adversarial` (Codex) tiers in the caller's cascade.
+        "grok": "grok-4.5",
         # Keep production default until the representative adversarial eval
         # promotes a GPT-5.6 candidate. Terra/Luna remain explicit overrides.
         "codex": "gpt-5.5",
@@ -477,6 +492,11 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
     elif backend_name == "glm":
         if not config.glm_key:
             raise MissingCredentialError("GLM_KEY", "glm")
+    elif backend_name == "grok":
+        # Grok is a CLI worker (grok.com OAuth login, no API key). Availability
+        # is a boolean enable flag like Codex, not a stored credential.
+        if not config.grok_enabled:
+            raise BackendUnavailableError("grok", "Grok not enabled or not available on PATH")
     elif backend_name == "codex":
         if not config.codex_enabled:
             raise BackendUnavailableError("codex", "Codex not enabled or not available on PATH")
@@ -545,6 +565,34 @@ async def _route_glm(
         backend="glm",
         complexity=Complexity.CODE,
         headroom_used=headroom_used,
+        usage=result.get("usage"),
+    )
+
+
+async def _route_grok(
+    prompt: str,
+    model: str,
+    config: Config,
+) -> RouteResult:
+    """Route to Grok backend (subprocess-based, chat mode).
+
+    Like Codex, the Grok CLI is subprocess-based (BLOCKING subprocess.run), so
+    offload to a worker thread to keep the async MCP stdio event loop responsive
+    (same freeze/keepalive reasoning as _route_codex). Grok is not HTTP-based,
+    so it never uses headroom.
+    """
+    result = await asyncio.to_thread(
+        backends.call_grok,
+        prompt,
+        model,
+    )
+
+    return RouteResult(
+        content=result["content"],
+        model=model,
+        backend="grok",
+        complexity=Complexity.GROK,
+        headroom_used=False,
         usage=result.get("usage"),
     )
 

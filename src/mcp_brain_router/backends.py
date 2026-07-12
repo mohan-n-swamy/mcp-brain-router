@@ -132,6 +132,11 @@ def _resolve_bin(primary: str, fallback_dirs: tuple[str, ...] = ("~/.local/bin",
 
 _CC_GLM_BIN = _resolve_bin("cc-glm")
 _CC_BRAIN_BIN = _resolve_bin("cc-brain")
+# xAI Grok CLI (grok.com OAuth login, no API key). A native Mach-O binary
+# (NOT a node shim like codex/cc-glm), so its subprocess needs only grok's own
+# bin dir on PATH — no node runtime resolution. Both the chat (`grok -p`) and
+# agentic (`grok -p --permission-mode acceptEdits`) paths shell to it.
+_GROK_BIN = _resolve_bin("grok")
 
 
 # Codex agentic base flags — SAME lean worker profile as CODEX_EXEC_BASE
@@ -199,6 +204,20 @@ def _codex_env() -> Dict[str, str]:
     env = dict(os.environ)
     current = env.get("PATH", "")
     env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
+    return env
+
+
+def _grok_env() -> Dict[str, str]:
+    """Env for the grok subprocess. Grok is a native Mach-O binary (not an
+    `#!/usr/bin/env node` shim like codex/cc-glm), so ONLY grok's own bin dir
+    needs prepending for the empty-env MCP-process case (`"env": {}`) — there is
+    no node-runtime shebang to resolve. Existing PATH is preserved; the dir is
+    only prepended, so a normal shell launch is unaffected."""
+    env = dict(os.environ)
+    grok_bin = os.path.dirname(_GROK_BIN) if os.path.sep in _GROK_BIN else ""
+    if grok_bin:
+        current = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([grok_bin, current]) if current else grok_bin
     return env
 
 
@@ -731,6 +750,76 @@ def call_codex(
 
 
 # ============================================================================
+# Grok (subprocess-based, chat mode)
+# ============================================================================
+
+
+def call_grok(
+    prompt: str,
+    model: str,
+) -> Dict[str, Any]:
+    """Call Grok CLI via subprocess (chat mode): `grok -p <prompt> -m <model>`.
+
+    `-p/--single` is grok's single-turn headless flag — it prints the response
+    to stdout and exits. Mirrors call_codex: pass the prompt on STDIN after a
+    CAVEMAN_SYSTEM prepend (grok reads --prompt-file/stdin), validate the model
+    name against argument injection, and never echo a secret. Grok is a native
+    binary (no node shebang) so only _grok_env's grok-bin PATH prepend is needed.
+
+    Returns:
+        {"content": "response text", "usage": None}  (grok CLI exposes no token counts)
+
+    Raises:
+        BackendError / BackendTransientError on invalid model, non-zero exit, or timeout.
+    """
+    _validate_model_name(model)
+
+    started = time.perf_counter()
+    try:
+        result = subprocess.run(
+            # --prompt-file - reads the single-turn prompt from stdin, so a
+            # prompt starting with "-" can never be parsed as a grok flag (same
+            # injection protection as call_codex's stdin path).
+            [_GROK_BIN, "--prompt-file", "-", "-m", model, "--output-format", "plain"],
+            input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+            capture_output=True,
+            text=True,
+            timeout=CODEX_TIMEOUT_SECONDS,
+            check=False,
+            env=_grok_env(),
+        )
+
+        if result.returncode != 0:
+            raise BackendError(
+                "Grok subprocess failed",
+                backend="grok",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+
+        return {
+            "content": result.stdout.strip(),
+            "usage": None,
+        }
+
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "grok",
+            f"Grok subprocess timed out after {CODEX_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "Grok binary not found on PATH",
+            backend="grok",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+# ============================================================================
 # Agentic worker backends (spec 002) — shell to a per-provider CLI harness in
 # the REAL working directory so the worker reads the spec, writes files, and
 # runs checks itself. Each returns the {content, ...} dict shape the chat
@@ -796,6 +885,70 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
         raise BackendError(
             "cc-glm binary not found on PATH",
             backend="glm",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    """Agentic Grok worker: `grok --prompt-file - -m <model> --permission-mode
+    acceptEdits` in the REAL cwd.
+
+    Grok is xAI's Claude-Code-shaped CLI: `--permission-mode acceptEdits` lets it
+    write/edit files with its built-in tools, and `--cwd` roots it in the caller's
+    repo. The prompt is fed on STDIN (`--prompt-file -`) so a prompt starting with
+    "-" can never be parsed as a grok flag (same injection protection as the codex
+    stdin path). AGENTIC_SYSTEM (NOT CAVEMAN_SYSTEM) is prepended — the file write
+    is the deliverable, and the chat-terse directive suppresses tool use in weaker
+    workers (root-caused 2026-07-12 for GLM). Grok is a native binary, so only
+    _grok_env's grok-bin PATH prepend is needed."""
+    _validate_model_name(model)
+    cwd = _resolve_agentic_cwd(cwd, "grok")
+    started = time.perf_counter()
+    argv = [
+        _GROK_BIN,
+        "--prompt-file",
+        "-",
+        "-m",
+        model,
+        "--cwd",
+        cwd,
+        "--permission-mode",
+        "acceptEdits",
+        "--output-format",
+        "plain",
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
+            capture_output=True,
+            text=True,
+            timeout=AGENTIC_TIMEOUT_SECONDS,
+            check=False,
+            cwd=cwd,
+            env=_grok_env(),
+        )
+        if result.returncode != 0:
+            raise BackendError(
+                "grok agentic subprocess failed",
+                backend="grok",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+        return {"content": result.stdout.strip(), "usage": None}
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "grok",
+            f"grok agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "grok binary not found on PATH",
+            backend="grok",
             failure_kind="configuration_error",
             elapsed_ms=round((time.perf_counter() - started) * 1000),
         )
