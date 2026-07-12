@@ -526,7 +526,7 @@ def call_codex(
     Call Codex CLI via subprocess: codex exec -m <model> <prompt>.
 
     Args:
-        model: Codex model string (e.g., "gpt-5.5")
+        model: Codex model string (e.g., "gpt-5.6-sol")
         prompt: The prompt/code to send
 
     Returns:
