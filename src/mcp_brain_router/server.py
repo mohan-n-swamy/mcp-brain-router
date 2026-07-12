@@ -202,6 +202,27 @@ async def _delegate_impl(
                 }
             )
 
+        # Agentic mode with no cwd would silently run the worker in the MCP
+        # server's fixed launch dir, not the caller's repo (§9.6 semantics
+        # refuter, 2026-07-12). Fail LOUD instead of mis-placing files: the
+        # orchestrator MUST pass its own cwd for agentic mode.
+        if resolved_mode == "agentic" and not cwd:
+            error_msg = (
+                "cwd is required for mode='agentic': the MCP server's own cwd is "
+                "its fixed launch dir, not your repo. Pass your absolute working "
+                "directory so the worker writes files where you expect."
+            )
+            return complete(
+                {
+                    "error": error_msg,
+                    "backend": "router",
+                    "complexity": complexity,
+                    "exhausted": False,
+                    "failure_kind": "validation_error",
+                    "failure_reason": error_msg,
+                }
+            )
+
         result = await route(
             complexity=complexity_enum,
             prompt=prompt,
@@ -326,6 +347,18 @@ async def _delegate_role_impl(
         if resolved_mode not in ("chat", "agentic"):
             raise ValueError(
                 f"Invalid mode: {mode}. Must be 'chat' or 'agentic'."
+            )
+
+        # Agentic mode with no cwd would silently run the worker in the MCP
+        # server's fixed launch dir, not the caller's repo (§9.6 semantics
+        # refuter, 2026-07-12). The worker role defaults to agentic, so this
+        # guards the common role path too. Fail LOUD; the orchestrator MUST
+        # pass its own cwd.
+        if resolved_mode == "agentic" and not cwd:
+            raise ValueError(
+                "cwd is required for mode='agentic': the MCP server's own cwd is "
+                "its fixed launch dir, not your repo. Pass your absolute working "
+                "directory so the worker writes files where you expect."
             )
 
         exhausted: set[Provider] = set()

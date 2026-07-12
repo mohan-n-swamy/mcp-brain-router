@@ -186,6 +186,22 @@ class TestSC6AgenticArgv:
         assert "-p" in argv
         assert mrun.call_args.kwargs.get("shell", False) is False
 
+    def test_agentic_nonexistent_cwd_raises_clean_backenderror(self):
+        """§9.6 injection-safety guard: a bad cwd fails LOUD with BackendError
+        BEFORE subprocess.run (which would otherwise raise a raw
+        FileNotFoundError that escapes the missing-binary except)."""
+        bad = "/no/such/dir/rt_probe_does_not_exist_12345"
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            for fn in (
+                backends.call_glm_agentic,
+                backends.call_codex_agentic,
+                backends.call_anthropic_agentic,
+            ):
+                with pytest.raises(backends.BackendError, match="not a directory"):
+                    fn("p", "glm-5.2", bad)
+            # validation happens before any subprocess launch
+            mrun.assert_not_called()
+
     def test_codex_agentic_drops_sandbox_and_ignore_rules(self):
         """SC-6: codex exec in REAL cwd — no -C /private/tmp, no --ignore-rules,
         but keeps mcp_servers={} + low reasoning + skip-git-repo-check."""
@@ -351,10 +367,31 @@ class TestRoleModeResolution:
             patch.object(server, "_log_delegation"),
         ):
             magentic.return_value = {"content": "wrote file", "usage": None}
-            response = await server._delegate_role_impl("worker", "build", "opus")
+            response = await server._delegate_role_impl(
+                "worker", "build", "opus", cwd="/tmp"
+            )
         assert response["backend"] == "glm"
         assert response["mode"] == "agentic"
         magentic.assert_called_once()
+        # cwd threads to the backend's 3rd positional (agentic file-placement)
+        assert magentic.call_args[0][2] == "/tmp"
+
+    @pytest.mark.asyncio
+    async def test_agentic_role_without_cwd_fails_loud(self):
+        """role=worker (agentic default) with NO cwd is REJECTED, not silently
+        run in the server's launch dir (§9.6 semantics guard). The role path
+        reports validation failures as an error-dict, not a raise."""
+        config = _agentic_config()
+        with (
+            patch.object(server, "_load_config", return_value=config),
+            patch("mcp_brain_router.router.backends.call_glm_agentic") as magentic,
+            patch.object(server, "_log_delegation"),
+        ):
+            response = await server._delegate_role_impl("worker", "build", "opus")
+        assert response.get("failure_kind") == "validation_error"
+        assert "cwd is required" in response.get("error", "")
+        assert "answer" not in response  # never reached the worker
+        magentic.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_adversary_role_defaults_to_chat(self):

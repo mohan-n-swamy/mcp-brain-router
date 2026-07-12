@@ -22,7 +22,7 @@ def role_config():
         roles={
             "thinker": ["sol-planner", "fable-planner"],
             "adversary": ["terra-refuter", "opus-refuter"],
-            "worker": ["glm-5.2", "gpt-5.5", "sonnet-worker"],
+            "worker": ["glm-5.2", "gpt-5.6-sol", "sonnet-worker"],
             "simple": ["glm-4.7", "luna-simple", "haiku-simple"],
         },
     )
@@ -63,7 +63,7 @@ def test_exhaustion_walks_candidate_providers(role_config):
         exhausted_providers={Provider.ZHIPU},
     )
     assert assignment.provider is Provider.CODEX
-    assert assignment.model == "gpt-5.5"
+    assert assignment.model == "gpt-5.6-sol"
 
 
 def test_anthropic_fallback_is_native(role_config):
@@ -84,7 +84,7 @@ def test_orchestrator_role_is_never_resolved(role_config):
 
 
 def test_same_provider_only_adversary_rejected():
-    config = Config(roles={"adversary": ["gpt-5.5", "terra-refuter"]})
+    config = Config(roles={"adversary": ["gpt-5.6-sol", "terra-refuter"]})
     with pytest.raises(ValueError, match="differs"):
         resolve_role(Role.ADVERSARY, "codex", config)
 
@@ -144,7 +144,7 @@ async def test_delegate_role_walks_quota_then_codex(role_config):
     )
     success = RouteResult(
         content="built",
-        model="gpt-5.5",
+        model="gpt-5.6-sol",
         backend="codex",
         complexity=None,
         headroom_used=False,
@@ -157,7 +157,9 @@ async def test_delegate_role_walks_quota_then_codex(role_config):
             side_effect=[exhausted, success],
         ) as route_call,
     ):
-        response = await server._delegate_role_impl("worker", "build", "opus")
+        response = await server._delegate_role_impl(
+            "worker", "build", "opus", cwd="/tmp"
+        )
 
     assert response["answer"] == "built"
     assert response["provider"] == "codex"

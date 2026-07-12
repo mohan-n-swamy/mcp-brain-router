@@ -580,6 +580,27 @@ def _validate_model_name(model: str) -> None:
         )
 
 
+def _resolve_agentic_cwd(cwd: Optional[str], backend: str) -> str:
+    """Resolve + validate the working directory for an agentic subprocess.
+
+    Falls back to os.getcwd() when cwd is None (the server's launch dir — a
+    caller that wants correct file placement must pass cwd; see route()), then
+    fails LOUD if the resolved dir does not exist. Without this, a bad/typo'd
+    cwd raises FileNotFoundError from INSIDE subprocess.run — which the per-call
+    except only catches for a missing BINARY, so it would escape as a raw crash
+    (§9.6 injection-safety refuter, 2026-07-12). A clean BackendError is the
+    contract every other backend failure already follows.
+    """
+    resolved = cwd or os.getcwd()
+    if not os.path.isdir(resolved):
+        raise BackendError(
+            f"Working directory does not exist or is not a directory: {resolved}",
+            backend=backend,
+            failure_kind="validation_error",
+        )
+    return resolved
+
+
 def call_codex(
     prompt: str,
     model: str,
@@ -666,6 +687,7 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
     GLM variant runs.
     """
     _validate_model_name(model)
+    cwd = _resolve_agentic_cwd(cwd, "glm")
     started = time.perf_counter()
     argv = [_CC_GLM_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model]
     try:
@@ -675,7 +697,7 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
             check=False,
-            cwd=cwd or os.getcwd(),
+            cwd=cwd,
         )
         if result.returncode != 0:
             raise BackendError(
@@ -711,6 +733,7 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
     the worker can edit the repo (spec 002 SC-6).
     """
     _validate_model_name(model)
+    cwd = _resolve_agentic_cwd(cwd, "codex")
     started = time.perf_counter()
     try:
         result = subprocess.run(
@@ -721,7 +744,7 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
             check=False,
-            cwd=cwd or os.getcwd(),
+            cwd=cwd,
             env=_codex_env(),
         )
         if result.returncode != 0:
@@ -756,6 +779,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
     exhausted final fallback (spec 002 SC-4, SC-8). The resolved candidate's
     model id (e.g. claude-sonnet-5 / claude-opus-4-8) is passed via --model."""
     _validate_model_name(model)
+    cwd = _resolve_agentic_cwd(cwd, "anthropic-cli")
     started = time.perf_counter()
     argv = [
         _CC_BRAIN_BIN,
@@ -772,7 +796,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
             check=False,
-            cwd=cwd or os.getcwd(),
+            cwd=cwd,
         )
         if result.returncode != 0:
             raise BackendError(
