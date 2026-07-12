@@ -200,6 +200,33 @@ def _codex_env() -> Dict[str, str]:
     return env
 
 
+def _agentic_cli_env() -> Dict[str, str]:
+    """Env for the cc-glm / cc-brain agentic subprocesses with a PATH that
+    resolves the wrapper (cc-glm/cc-brain), the `claude` binary it `exec`s, AND
+    `claude`'s node runtime. Same empty-env MCP-process failure as codex
+    (root-caused 2026-07-12): the server runs with `"env": {}`, so cc-glm's
+    `exec claude "$@"` dies with `line 56: exec: claude: not found` (or degrades
+    to a bare chat completion that writes no file and exits 0 — silent). Prepend
+    each needed bin dir so the wrapper→claude→node chain resolves. Existing PATH
+    is preserved; dirs are only prepended, never replaced, so a normal shell
+    launch is unaffected. Mirrors _codex_env() — the codex half of this same
+    PATH bug was fixed 2026-07-05; GLM + anthropic-cli were missed until now."""
+    extra = []
+    node_path = shutil.which("node") or _find_mise_node()
+    node_bin = os.path.dirname(node_path) if node_path else ""
+    claude_path = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+    claude_bin = os.path.dirname(claude_path) if os.path.exists(claude_path) else ""
+    ccglm_bin = os.path.dirname(_CC_GLM_BIN) if os.path.sep in _CC_GLM_BIN else ""
+    ccbrain_bin = os.path.dirname(_CC_BRAIN_BIN) if os.path.sep in _CC_BRAIN_BIN else ""
+    for d in (ccglm_bin, ccbrain_bin, claude_bin, node_bin):
+        if d and d not in extra:
+            extra.append(d)
+    env = dict(os.environ)
+    current = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
+    return env
+
+
 # Caveman-ultra system directive prepended to EVERY delegated backend call
 # (DeepSeek/GLM via the `system` field; Codex prepended to the prompt). Shapes
 # how backends REPLY (terse, no filler) — cuts output tokens on every delegate
@@ -698,6 +725,7 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
             timeout=AGENTIC_TIMEOUT_SECONDS,
             check=False,
             cwd=cwd,
+            env=_agentic_cli_env(),
         )
         if result.returncode != 0:
             raise BackendError(
@@ -797,6 +825,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             timeout=AGENTIC_TIMEOUT_SECONDS,
             check=False,
             cwd=cwd,
+            env=_agentic_cli_env(),
         )
         if result.returncode != 0:
             raise BackendError(

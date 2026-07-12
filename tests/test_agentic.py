@@ -226,6 +226,36 @@ class TestSC6AgenticArgv:
         assert "--" in argv
         assert argv[-1].endswith("do Z")
 
+    def test_glm_and_anthropic_agentic_pass_path_fixed_env(self):
+        """G-guard (env-drop, root-caused 2026-07-12): cc-glm/cc-brain shell to
+        `claude` (a node shim). Under the MCP server's degraded PATH the shim
+        dies with `exec: claude: not found` → no file written, rc-0 silent
+        degrade. Both agentic calls MUST pass env=_agentic_cli_env() so the
+        wrapper→claude→node chain resolves. Regressing to no-env re-breaks the
+        agentic worker end-to-end while every mocked test stays green — this is
+        the only guard that catches it. Codex already had _codex_env()."""
+        node_dir = os.path.dirname(
+            backends.shutil.which("node") or backends._find_mise_node() or "/x/node"
+        )
+        for fn, args in (
+            (backends.call_glm_agentic, ("p", "glm-5.2")),
+            (backends.call_anthropic_agentic, ("p", "claude-sonnet-5")),
+        ):
+            with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+                mrun.return_value = MagicMock(returncode=0, stdout="ok")
+                fn(*args)
+                env = mrun.call_args.kwargs.get("env")
+            assert env is not None, f"{fn.__name__} passed no env= (env-drop regression)"
+            path = env.get("PATH", "")
+            # ~/.local/bin (where cc-glm/cc-brain/claude live) must be present
+            assert os.path.expanduser("~/.local/bin") in path, (
+                f"{fn.__name__} env PATH missing ~/.local/bin: {path[:120]}"
+            )
+            # node's bin dir must be present so claude's `#!/usr/bin/env node` resolves
+            assert node_dir in path, (
+                f"{fn.__name__} env PATH missing node dir {node_dir}: {path[:120]}"
+            )
+
     def test_no_api_key_in_agentic_argv(self):
         """No secret/API key ever appears in the constructed argv (SC-6)."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
