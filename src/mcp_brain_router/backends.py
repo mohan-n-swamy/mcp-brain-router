@@ -99,7 +99,10 @@ CODEX_EXEC_BASE = [
     "/private/tmp",
 ]
 
-CODEX_TIMEOUT_SECONDS = 180
+CODEX_TIMEOUT_SECONDS = 360  # 004 C410: 180s starved long adversarial prompts (2026-07-12)
+# 004 C410: 30s starved GLM on >1k-token prompts (died at exactly the cap, reported
+# as network_error). One constant, all HTTP backends — DRY.
+HTTP_TIMEOUT_SECONDS = 120.0
 
 
 def _find_mise_node() -> str:
@@ -288,7 +291,7 @@ async def call_deepseek(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
@@ -344,7 +347,7 @@ async def call_deepseek_via_headroom(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
@@ -409,7 +412,7 @@ async def call_glm(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
@@ -464,7 +467,7 @@ async def call_glm_via_headroom(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:

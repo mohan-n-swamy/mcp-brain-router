@@ -764,10 +764,10 @@ class TestCodexArgvSafety:
 
     def test_codex_timeout_carries_kind_reason_and_elapsed(self):
         """Timeout metadata must survive to the server; it is never quota."""
-        timeout = backends.subprocess.TimeoutExpired(cmd=["codex"], timeout=180)
+        timeout = backends.subprocess.TimeoutExpired(cmd=["codex"], timeout=360)
         with (
             patch("mcp_brain_router.backends.subprocess.run", side_effect=timeout),
-            patch("mcp_brain_router.backends.time.perf_counter", side_effect=[10.0, 190.0]),
+            patch("mcp_brain_router.backends.time.perf_counter", side_effect=[10.0, 370.0]),
         ):
             with pytest.raises(backends.BackendTransientError) as exc_info:
                 backends.call_codex("p", "gpt-5.5")
@@ -775,8 +775,8 @@ class TestCodexArgvSafety:
         err = exc_info.value
         assert err.backend == "codex"
         assert err.failure_kind == "timeout"
-        assert err.elapsed_ms == 180000
-        assert "180s" in str(err)
+        assert err.elapsed_ms == 360000
+        assert "360s" in str(err)  # 004 C410: cap raised 180->360
 
     def test_install_smoke_test_uses_same_codex_base(self):
         """install.py's codex smoke test must share CODEX_EXEC_BASE so the
