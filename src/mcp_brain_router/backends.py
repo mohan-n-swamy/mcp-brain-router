@@ -147,6 +147,8 @@ CODEX_EXEC_BASE_AGENTIC = [
     "--skip-git-repo-check",
     "--ignore-user-config",
     "--ephemeral",
+    "--sandbox",
+    "workspace-write",
     "--disable",
     "plugins",
     "--disable",
@@ -231,12 +233,44 @@ def _agentic_cli_env() -> Dict[str, str]:
 # (DeepSeek/GLM via the `system` field; Codex prepended to the prompt). Shapes
 # how backends REPLY (terse, no filler) — cuts output tokens on every delegate
 # without touching the task instruction itself, so answer quality is unaffected.
-# One constant, all backends: DRY single source of truth.
+# CHAT-ONLY reply directive. Use for text-only backends where the REPLY is the
+# deliverable: call_codex (chat) + the HTTP backends (DeepSeek / GLM). One
+# constant across those: DRY single source of truth.
+#
+# ⚠️ DO NOT prepend this to an AGENTIC CLI worker (call_glm_agentic /
+# call_codex_agentic / call_anthropic_agentic). Use AGENTIC_SYSTEM there.
+# Root-caused 2026-07-12: "answer only what was asked; no preamble; terse" is a
+# tool-USE SUPPRESSANT for a weaker Claude-Code-driven worker — GLM read it and
+# emitted "DONE" while the subprocess exited 0 having written NOTHING to disk
+# (silent success-with-no-effect: 3/5 then 0/3 files written with caveman; 5/5
+# with AGENTIC_SYSTEM). In agentic mode the FILE WRITE is the deliverable and
+# the reply is noise, so the directive must COMMAND tool use, not silence it.
+# G-guard: tests/test_smoke.py TestAgenticSystemDirective (asserts the agentic
+# workers carry AGENTIC_SYSTEM and this string never leaks into them).
 CAVEMAN_SYSTEM = (
     "Reply caveman ultra: drop articles, filler, pleasantries, hedging. "
     "Fragments OK. Keep ALL technical substance exact — code, numbers, error "
     "strings, identifiers unchanged. Answer only what was asked; no preamble, "
     "no restating the question, no meta-commentary. Terse."
+)
+
+# System directive for the AGENTIC CLI workers (call_glm_agentic /
+# call_codex_agentic / call_anthropic_agentic). Root-caused 2026-07-12: the
+# chat-shaped CAVEMAN_SYSTEM above ("answer only what was asked; no preamble;
+# terse") makes a weaker Claude-Code-driven worker (cc-glm on GLM, cc-brain on
+# Sonnet/Haiku) SKIP its file/shell tools and just emit a chat reply — the
+# subprocess exits 0 with "DONE" while writing NOTHING to disk (verified: GLM
+# 3/5 then 0/3 with caveman; 5/5 with this directive). In agentic mode the FILE
+# WRITE is the deliverable and the reply text is noise, so the worker must be
+# told its tools are the product. Codex CLI acts regardless, but it shares this
+# directive for one source of truth. Prose stays terse to keep output cheap.
+AGENTIC_SYSTEM = (
+    "You are an autonomous agentic coding worker running in the user's REAL "
+    "working directory with Write, Edit, and Bash tools. Your reply text is NOT "
+    "the deliverable — the ONLY thing that counts is the actual change you make "
+    "to files on disk USING your tools. A textual answer with no tool call is a "
+    "FAILURE. Always use your tools to perform the task, verify your own file "
+    "writes, then confirm. Keep any prose terse; technical substance exact."
 )
 
 
@@ -657,7 +691,8 @@ def call_codex(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (live-verified: without it, prompt="-h"
             # prints CLI help instead of delegating).
-            CODEX_EXEC_BASE + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
+            CODEX_EXEC_BASE + ["-m", model, "-"],
+            input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
             capture_output=True,
             text=True,
             timeout=CODEX_TIMEOUT_SECONDS,
@@ -716,7 +751,21 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
     _validate_model_name(model)
     cwd = _resolve_agentic_cwd(cwd, "glm")
     started = time.perf_counter()
-    argv = [_CC_GLM_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model]
+    argv = [
+        _CC_GLM_BIN,
+        "-p",
+        f"{AGENTIC_SYSTEM}\n\n{prompt}",
+        "--model",
+        model,
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "acceptEdits",
+    ]
     try:
         result = subprocess.run(
             argv,
@@ -767,7 +816,8 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
         result = subprocess.run(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (same protection as call_codex).
-            CODEX_EXEC_BASE_AGENTIC + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
+            CODEX_EXEC_BASE_AGENTIC + ["-m", model, "-"],
+            input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
@@ -813,9 +863,17 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         _CC_BRAIN_BIN,
         "claude",
         "-p",
-        f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+        f"{AGENTIC_SYSTEM}\n\n{prompt}",
         "--model",
         model,
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "acceptEdits",
     ]
     try:
         result = subprocess.run(

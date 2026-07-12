@@ -143,23 +143,14 @@ async def _delegate_impl(
             )
 
         # A Codex host must never route the adversarial tier back into Codex.
-        # Enforce this at the MCP boundary; prose instructions alone cannot
-        # prevent accidental recursive Codex subprocesses and duplicate burn.
+        # Route it to the configured Anthropic CLI adversary instead.
         if caller == "codex" and complexity_enum is Complexity.ADVERSARIAL:
-            error_msg = (
-                "Nested Codex blocked: a Codex caller cannot delegate the "
-                "adversarial tier. Handle this task in the current Codex session."
-            )
-            return complete(
-                {
-                    "error": error_msg,
-                    "backend": "router",
-                    "complexity": complexity,
-                    "exhausted": False,
-                    "failure_kind": "nested_codex_blocked",
-                    "failure_reason": error_msg,
-                    "action_required": "Handle natively in the current Codex session.",
-                }
+            return await _delegate_role_impl(
+                "adversary",
+                prompt,
+                "codex",
+                mode="agentic",
+                cwd=cwd,
             )
 
         # Load provider configuration only after the caller boundary. Nested
@@ -185,11 +176,11 @@ async def _delegate_impl(
             )
 
         # Call the router async function
-        resolved_mode = (mode or "chat").strip().lower()
-        if resolved_mode not in ("chat", "agentic"):
+        resolved_mode = (mode or "agentic").strip().lower()
+        if resolved_mode != "agentic":
             error_msg = (
-                f"Invalid mode: {mode}. Must be 'chat' (text-only) or 'agentic' "
-                f"(shells to a CLI harness that writes files in the real cwd)."
+                f"Invalid mode: {mode}. HTTP/chat delegation was removed; use "
+                f"'agentic' with an absolute cwd."
             )
             return complete(
                 {
@@ -458,9 +449,7 @@ def create_server():
             orchestrator choose 'adversarial' or native handling.
 
             Execution mode (spec 002):
-            - 'chat' (default for adversary/thinker/simple): text-only — the
-              backend REPLIES with a string, the orchestrator applies any diff.
-            - 'agentic' (default for the worker role): the router shells to the
+            - 'agentic' (default and only public mode): the router shells to the
               per-provider CLI harness (cc-glm / codex exec / cc-brain claude)
               in the REAL working directory, so the worker reads the spec,
               writes files, and runs checks ITSELF. Orchestrator-agnostic.
@@ -471,12 +460,11 @@ def create_server():
             Args:
                 complexity: Tier — 'cheap', 'code', or 'adversarial'.
                 prompt: The prompt to send (required).
-                role: Optional role — thinker, adversary, worker, or simple.
+                role: Alternative to complexity — thinker, adversary, worker, or simple.
                 orchestrator: Required with role; provider/model id of the native orchestrator.
                 model: Optional model override. If not provided, uses tier-default.
-                mode: 'chat' (text-only) or 'agentic' (CLI harness writes files
-                      in the real cwd). When role is given and mode is omitted,
-                      the per-role default from [role_modes] applies (worker=agentic).
+                mode: Omit or pass 'agentic'. HTTP/chat mode is removed.
+                cwd: Required absolute working directory for every CLI worker.
 
             Returns:
                 A structured dict with:
@@ -507,8 +495,8 @@ def create_server():
                 - exhausted: false.
                 - failure_kind/failure_reason/elapsed_ms: Terminal diagnostics.
 
-            A process launched with BRAIN_ROUTER_CALLER=codex rejects the
-            adversarial tier with failure_kind='nested_codex_blocked'.
+            A Codex caller's adversarial tier routes to cc-brain claude so Codex
+            never recursively launches another Codex worker.
             """
             if role is not None and complexity is not None:
                 return {
@@ -553,8 +541,7 @@ def create_server():
             orchestrator choose 'adversarial' or native handling.
 
             Execution mode (spec 002):
-            - 'chat' (default for adversary/thinker/simple): text-only.
-            - 'agentic' (default for the worker role): the router shells to the
+            - 'agentic' (default and only public mode): the router shells to the
               per-provider CLI harness (cc-glm / codex exec / cc-brain claude)
               in the REAL working directory, so the worker writes files / runs
               checks itself.
@@ -566,7 +553,8 @@ def create_server():
                 complexity: Tier — 'cheap', 'code', or 'adversarial'.
                 prompt: The prompt to send (required).
                 model: Optional model override. If not provided, uses tier-default.
-                mode: 'chat' (text-only) or 'agentic' (CLI harness writes files).
+                mode: Omit or pass 'agentic'. HTTP/chat mode is removed.
+                cwd: Required absolute working directory for every CLI worker.
 
             Returns:
                 A structured dict with:
@@ -597,8 +585,8 @@ def create_server():
                 - exhausted: false.
                 - failure_kind/failure_reason/elapsed_ms: Terminal diagnostics.
 
-            A process launched with BRAIN_ROUTER_CALLER=codex rejects the
-            adversarial tier with failure_kind='nested_codex_blocked'.
+            A Codex caller's adversarial tier routes to cc-brain claude so Codex
+            never recursively launches another Codex worker.
             """
             if role is not None and complexity is not None:
                 result = {

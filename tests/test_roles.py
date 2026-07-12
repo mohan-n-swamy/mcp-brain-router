@@ -119,17 +119,31 @@ async def test_native_assignment_never_calls_backend(role_config):
 
 
 @pytest.mark.asyncio
-async def test_delegate_role_returns_native_stub_without_route(role_config):
+async def test_delegate_role_runs_anthropic_cli_for_codex_adversary(role_config, tmp_path):
+    success = RouteResult(
+        content="refuted",
+        model="claude-opus-4-8",
+        backend="anthropic-cli",
+        complexity=None,
+        headroom_used=False,
+    )
     with (
         patch.object(server, "_load_config", return_value=role_config),
-        patch("mcp_brain_router.server.route_assignment", new_callable=AsyncMock) as route_call,
+        patch(
+            "mcp_brain_router.server.route_assignment",
+            new_callable=AsyncMock,
+            return_value=success,
+        ) as route_call,
     ):
-        response = await server._delegate_role_impl("adversary", "refute", "codex")
+        response = await server._delegate_role_impl(
+            "adversary", "refute", "codex", cwd=str(tmp_path)
+        )
 
-    assert response["execute_natively"] is True
+    assert response["execute_natively"] is False
+    assert response["backend"] == "anthropic-cli"
     assert response["provider"] == "anthropic"
     assert response["role"] == "adversary"
-    route_call.assert_not_called()
+    route_call.assert_awaited_once()
 
 
 @pytest.mark.asyncio

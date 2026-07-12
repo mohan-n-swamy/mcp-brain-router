@@ -108,13 +108,10 @@ _PROVIDER_TARGETS = {
 def default_mode_for_role(role: Role) -> str:
     """Code default for a role's execution mode (spec 002 SC-3).
 
-    Worker is permanently agentic (does the file work); every other role
-    defaults to chat (text-only). This mirrors Config.DEFAULT_ROLE_MODES but
-    lives in the router so resolve_role works without a config section.
+    Every role is a CLI worker. This mirrors Config.DEFAULT_ROLE_MODES but lives
+    in the router so resolve_role works without a config section.
     """
-    if role is Role.WORKER:
-        return "agentic"
-    return "chat"
+    return "agentic"
 
 
 def orchestrator_provider(value: str | Provider) -> Provider:

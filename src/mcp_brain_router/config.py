@@ -24,16 +24,16 @@ CONFIG_DIR = Path.home() / ".config" / "mcp-brain-router"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 # Code default for per-role execution mode (spec 002). The worker role is
-# agentic by default (shells to a CLI harness that writes files); every other
-# role defaults to chat (text-only) so adversaries/refuters stay read-only.
+# agentic by default (shells to a CLI harness that writes files). HTTP-only
+# delegates were removed from the active path: every role is now a CLI worker.
 # A config.toml [role_modes] section is merged ON TOP of this — only non-default
 # roles need to be listed there. Worker is permanently agentic-for-workers so no
 # orchestrator ever re-asks "should the worker do the work".
 DEFAULT_ROLE_MODES: Dict[str, str] = {
     "worker": "agentic",
-    "adversary": "chat",
-    "thinker": "chat",
-    "simple": "chat",
+    "adversary": "agentic",
+    "thinker": "agentic",
+    "simple": "agentic",
 }
 
 
