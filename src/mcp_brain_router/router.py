@@ -205,17 +205,24 @@ async def route_assignment(
     prompt: str,
     config: Config,
     mode: str = "chat",
+    cwd: Optional[str] = None,
 ) -> "RouteResult":
-    """Execute a non-native assignment through existing tier machinery."""
+    """Execute a non-native assignment through existing tier machinery.
+
+    cwd is the orchestrator-supplied working directory for agentic subprocesses
+    (see route()); threaded through so the worker writes into the caller's repo.
+    """
     if assignment.execute_natively or assignment.backend is None:
         raise ValueError("native assignment cannot be executed by the router")
     # 002: the anthropic-cli agentic harness has no Complexity tier
     # (it's the codex-orchestrator adversary / GLM+codex-exhausted fallback).
     # Dispatch straight to the agentic router by backend name.
     if assignment.backend == "anthropic-cli":
-        return await _route_agentic("anthropic-cli", prompt, assignment.model, config)
+        return await _route_agentic(
+            "anthropic-cli", prompt, assignment.model, config, cwd
+        )
     _, complexity = _PROVIDER_TARGETS[assignment.provider]
-    return await route(complexity, prompt, assignment.model, config, mode=mode)
+    return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd)
 
 
 # Pure tier ownership. The router selects exactly one backend and never crosses
@@ -290,6 +297,7 @@ async def route(
     model_override: Optional[str] = None,
     config: Optional[Config] = None,
     mode: str = "chat",
+    cwd: Optional[str] = None,
 ) -> RouteResult:
     """
     Route a request to the appropriate backend.
@@ -304,6 +312,12 @@ async def route(
         mode: Execution mode — 'chat' (text-only, the original path) or
               'agentic' (spec 002: shells to the per-provider CLI harness in the
               REAL cwd so the worker writes files / runs checks itself).
+        cwd: Working directory for agentic-mode subprocesses. REQUIRED for
+             correct agentic behaviour — the MCP server is a long-lived process
+             whose os.getcwd() is fixed at launch (whichever session first
+             spawned it), NOT the caller's repo. The orchestrator MUST pass its
+             own cwd so the worker writes files into the caller's directory, not
+             the server's launch dir. Ignored in chat mode (no subprocess cwd).
 
     Returns:
         RouteResult containing response, metadata, and backend info.
@@ -321,7 +335,7 @@ async def route(
 
     try:
         if mode == "agentic":
-            result = await _route_agentic(backend_name, prompt, model, config)
+            result = await _route_agentic(backend_name, prompt, model, config, cwd)
         elif backend_name == "deepseek":
             result = await _route_deepseek(prompt, model, config)
         elif backend_name == "glm":
@@ -361,21 +375,32 @@ async def _route_agentic(
     prompt: str,
     model: str,
     config: Config,
+    cwd: Optional[str] = None,
 ) -> RouteResult:
     """Agentic dispatch — shell to the per-provider CLI harness in the REAL cwd
     (spec 002). GLM→cc-glm, codex→codex exec (real cwd), and an explicit
     anthropic-cli target for the codex-orchestrator adversary + the
     GLM+codex-exhausted final fallback. All three run blocking subprocess.run,
-    so offload to a worker thread (same reason as _route_codex)."""
+    so offload to a worker thread (same reason as _route_codex).
+
+    cwd is the orchestrator-supplied working directory (see route()). Threaded
+    into every backend so the worker writes files into the caller's repo, not
+    the MCP server's fixed launch cwd. None → backend falls back to
+    os.getcwd() (server dir) — a caller that wants correct file placement MUST
+    pass cwd."""
     if backend_name == "glm":
-        result = await asyncio.to_thread(backends.call_glm_agentic, prompt, model)
+        result = await asyncio.to_thread(
+            backends.call_glm_agentic, prompt, model, cwd
+        )
         label = "glm"
     elif backend_name == "codex":
-        result = await asyncio.to_thread(backends.call_codex_agentic, prompt, model)
+        result = await asyncio.to_thread(
+            backends.call_codex_agentic, prompt, model, cwd
+        )
         label = "codex"
     elif backend_name == "anthropic-cli":
         result = await asyncio.to_thread(
-            backends.call_anthropic_agentic, prompt, model
+            backends.call_anthropic_agentic, prompt, model, cwd
         )
         label = "anthropic-cli"
     else:  # pragma: no cover - agentic mode only targets these three

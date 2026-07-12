@@ -103,6 +103,7 @@ async def _delegate_impl(
     prompt: str,
     model: str | None = None,
     mode: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     """
     Implementation of delegate tool.
@@ -207,6 +208,7 @@ async def _delegate_impl(
             model_override=model,
             config=config,
             mode=resolved_mode,
+            cwd=cwd,
         )
 
         # Convert RouteResult to dict
@@ -291,6 +293,7 @@ async def _delegate_role_impl(
     prompt: str,
     orchestrator: str,
     mode: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
     """Resolve and execute a role, walking candidates only on real quota exhaustion."""
     started = time.perf_counter()
@@ -345,7 +348,9 @@ async def _delegate_role_impl(
                     }
                 )
 
-            result = await route_assignment(assignment, prompt, config, mode=resolved_mode)
+            result = await route_assignment(
+                assignment, prompt, config, mode=resolved_mode, cwd=cwd
+            )
             tried.append(assignment.backend or assignment.provider.value)
             if result.exhausted:
                 exhausted.add(assignment.provider)
@@ -405,6 +410,7 @@ def create_server():
             orchestrator: str | None = None,
             model: str | None = None,
             mode: str | None = None,
+            cwd: str | None = None,
         ) -> dict[str, Any]:
             """
             Delegate by legacy complexity tier or configured orchestration role.
@@ -479,7 +485,7 @@ def create_server():
                     "exhausted": False,
                 }
             if role is not None:
-                return await _delegate_role_impl(role, prompt, orchestrator or "", mode)
+                return await _delegate_role_impl(role, prompt, orchestrator or "", mode, cwd)
             if complexity is None:
                 return {
                     "error": "Provide either role or complexity",
@@ -487,7 +493,7 @@ def create_server():
                     "failure_kind": "validation_error",
                     "exhausted": False,
                 }
-            return await _delegate_impl(complexity, prompt, model, mode)
+            return await _delegate_impl(complexity, prompt, model, mode, cwd)
     else:
         server = Server("mcp-brain-router")
 
@@ -499,6 +505,7 @@ def create_server():
             orchestrator: str | None = None,
             model: str | None = None,
             mode: str | None = None,
+            cwd: str | None = None,
         ):
             """
             Delegate by legacy complexity tier or configured orchestration role.
@@ -568,9 +575,9 @@ def create_server():
                     "exhausted": False,
                 }
             elif role is not None:
-                result = await _delegate_role_impl(role, prompt, orchestrator or "", mode)
+                result = await _delegate_role_impl(role, prompt, orchestrator or "", mode, cwd)
             elif complexity is not None:
-                result = await _delegate_impl(complexity, prompt, model, mode)
+                result = await _delegate_impl(complexity, prompt, model, mode, cwd)
             else:
                 result = {
                     "error": "Provide either role or complexity",
@@ -634,6 +641,16 @@ def create_server():
                                 "the per-provider CLI harness in the real cwd — writes files / runs "
                                 "checks). When role is given and mode is omitted, the per-role "
                                 "default applies (worker=agentic, else chat)."
+                            ),
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": (
+                                "Working directory for agentic-mode subprocesses. REQUIRED for "
+                                "correct agentic file placement: this MCP server is long-lived and "
+                                "its os.getcwd() is fixed at launch (the session that first spawned "
+                                "it), NOT your repo. Pass your absolute cwd so the worker writes into "
+                                "YOUR directory. Ignored in chat mode."
                             ),
                         },
                     },

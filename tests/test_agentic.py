@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mcp_brain_router import backends, server
-from mcp_brain_router.config import Config, DEFAULT_ROLE_MODES
+from mcp_brain_router.config import DEFAULT_ROLE_MODES, Config
 from mcp_brain_router.router import (
     Complexity,
     Provider,
@@ -207,7 +207,7 @@ class TestSC6AgenticArgv:
         # runs in the real cwd (no cwd isolation to /private/tmp)
         assert mrun.call_args.kwargs.get("cwd") is not None
         # prompt travels after a "--" separator (same protection as call_codex)
-        sep = argv.index("--")
+        assert "--" in argv
         assert argv[-1].endswith("do Z")
 
     def test_no_api_key_in_agentic_argv(self):
@@ -247,8 +247,27 @@ class TestSC1AgenticDispatch:
         assert result.content == "done"
         magentic.assert_called_once()
         # the harness binary the dispatch targets is cc-glm
-        sent_argv = magentic.call_args[0]  # (prompt, model)
+        sent_argv = magentic.call_args[0]  # (prompt, model, cwd)
         assert "build it" in sent_argv[0]
+
+    @pytest.mark.asyncio
+    async def test_caller_cwd_threads_to_agentic_backend(self):
+        """SC-1 (real): a caller-supplied cwd reaches the backend subprocess, so
+        the worker writes into the CALLER's repo, not the MCP server's fixed
+        launch dir. Regression guard for the cwd-drop bug (route/_route_agentic
+        dropped cwd → os.getcwd() = server dir)."""
+        config = Config(glm_key="glm-k", codex_enabled=True)
+        caller_cwd = "/some/caller/repo"
+        with patch(
+            "mcp_brain_router.router.backends.call_glm_agentic"
+        ) as magentic:
+            magentic.return_value = {"content": "done", "usage": None}
+            await route(
+                Complexity.CODE, "build it", config=config,
+                mode="agentic", cwd=caller_cwd,
+            )
+        # cwd must arrive at the backend as the 3rd positional arg
+        assert magentic.call_args[0][2] == caller_cwd
 
     @pytest.mark.asyncio
     async def test_adversarial_agentic_dispatches_to_codex_agentic(self):
