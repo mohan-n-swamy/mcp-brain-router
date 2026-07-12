@@ -229,6 +229,77 @@ class TestSC6AgenticArgv:
         assert mrun.call_args.kwargs["input"].endswith("do Z")
         assert "do Z" not in argv
 
+    def test_grok_agentic_uses_grok_argv_stdin_acceptedits(self):
+        """Grok agentic: `grok --prompt-file - -m <model> --cwd <cwd>
+        --permission-mode acceptEdits`. Prompt on stdin (injection-safe), file
+        write is the deliverable so AGENTIC_SYSTEM (not caveman) is prepended."""
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+            "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+        ):
+            mrun.return_value = MagicMock(returncode=0, stdout="ok")
+            backends.call_grok_agentic("do G", "grok-4.5", "/tmp")
+            argv = mrun.call_args[0][0]
+        assert isinstance(argv, list)
+        assert argv[0] == "grok" or argv[0].endswith("/grok")
+        assert "grok-4.5" in argv  # tier model passed through -m
+        assert argv[argv.index("-m") + 1] == "grok-4.5"
+        assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+        assert argv[argv.index("--cwd") + 1] == "/tmp"
+        # prompt travels on stdin (--prompt-file -), never as an argv token
+        assert "--prompt-file" in argv and argv[argv.index("--prompt-file") + 1] == "-"
+        assert "do G" not in argv
+        # AGENTIC_SYSTEM prepended, caveman NOT — file write is the deliverable
+        stdin = mrun.call_args.kwargs["input"]
+        assert stdin.endswith("do G")
+        assert stdin.startswith(backends.AGENTIC_SYSTEM[:20])
+        assert mrun.call_args.kwargs.get("shell", False) is False
+
+    def test_grok_chat_uses_stdin_and_plain_output(self):
+        """Grok chat: `grok --prompt-file - -m <model> --output-format plain`,
+        prompt + CAVEMAN_SYSTEM on stdin. No --permission-mode (no file writes)."""
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            mrun.return_value = MagicMock(returncode=0, stdout="pong")
+            out = backends.call_grok("ping", "grok-4.5")
+            argv = mrun.call_args[0][0]
+        assert out["content"] == "pong"
+        assert argv[0] == "grok" or argv[0].endswith("/grok")
+        assert "--prompt-file" in argv and "-m" in argv and "grok-4.5" in argv
+        assert argv[argv.index("--output-format") + 1] == "plain"
+        assert "--permission-mode" not in argv  # chat mode never edits
+        assert mrun.call_args.kwargs["input"].endswith("ping")
+        assert mrun.call_args.kwargs["input"].startswith(backends.CAVEMAN_SYSTEM[:20])
+
+    def test_grok_agentic_pass_path_fixed_env(self):
+        """G-guard (env-drop): grok is a native binary (no node shim) so
+        _grok_env only prepends grok's own bin dir — but it MUST still pass
+        env= so the empty-env MCP process resolves grok. No-env regression =
+        silent 'grok: not found'."""
+        grok_dir = os.path.dirname(backends._GROK_BIN) if "/" in backends._GROK_BIN else ""
+        for fn, args in (
+            (backends.call_grok, ("p", "grok-4.5")),
+            (backends.call_grok_agentic, ("p", "grok-4.5", "/tmp")),
+        ):
+            with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+                "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+            ):
+                mrun.return_value = MagicMock(returncode=0, stdout="ok")
+                fn(*args)
+                env = mrun.call_args.kwargs.get("env")
+            assert env is not None, f"{fn.__name__} passed no env= (env-drop regression)"
+            if grok_dir:
+                assert grok_dir in env.get("PATH", ""), (
+                    f"{fn.__name__} env PATH missing grok bin dir {grok_dir}"
+                )
+
+    def test_grok_agentic_nonexistent_cwd_raises_clean_backenderror(self):
+        """Same §9.6 injection-safety guard as the other agentic workers: a bad
+        cwd fails LOUD with BackendError before subprocess.run."""
+        bad = "/no/such/dir/grok_probe_does_not_exist_98765"
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+            with pytest.raises(backends.BackendError, match="not a directory"):
+                backends.call_grok_agentic("p", "grok-4.5", bad)
+            mrun.assert_not_called()
+
     def test_glm_and_anthropic_agentic_pass_path_fixed_env(self):
         """G-guard (env-drop, root-caused 2026-07-12): cc-glm/cc-brain shell to
         `claude` (a node shim). Under the MCP server's degraded PATH the shim

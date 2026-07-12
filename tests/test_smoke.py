@@ -566,6 +566,39 @@ class TestPureTierRouting:
             assert result.tried == ["codex"]
             assert result.exhausted is False
 
+    def test_grok_tier_maps_to_grok_backend_and_default_model(self):
+        """GROK is its own tier → grok backend, default model grok-4.5."""
+        from mcp_brain_router.router import (
+            _TIER_BACKENDS,
+            Provider,
+            _get_backend_default_model,
+            provider_for_model,
+        )
+
+        assert _TIER_BACKENDS[Complexity.GROK] == "grok"
+        assert provider_for_model("grok-4.5") is Provider.XAI
+        assert _get_backend_default_model("grok", self._cfg()) == "grok-4.5"
+
+    @pytest.mark.asyncio
+    async def test_grok_tier_is_grok_only(self):
+        """GROK success returns only grok; never crosses to another tier."""
+        cfg = Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True, grok_enabled=True)
+        with patch("mcp_brain_router.router.backends.call_grok") as mgk:
+            mgk.return_value = {"content": "PONG", "usage": None}
+            result = await route(Complexity.GROK, "p", config=cfg)
+            assert result.backend == "grok"
+            assert result.tried == ["grok"]
+            assert result.exhausted is False
+
+    @pytest.mark.asyncio
+    async def test_grok_tier_disabled_raises_unavailable(self):
+        """grok_enabled=False → BackendUnavailableError, not a silent misroute."""
+        from mcp_brain_router.router import BackendUnavailableError
+
+        cfg = Config(deepseek_key="sk-ds", glm_key="glm-k", grok_enabled=False)
+        with pytest.raises(BackendUnavailableError):
+            await route(Complexity.GROK, "p", config=cfg)
+
 
 class TestTerminalMetadata:
     """Server contract distinguishes quota, timeout, and hard errors."""
