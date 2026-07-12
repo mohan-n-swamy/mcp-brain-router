@@ -856,3 +856,48 @@ class TestCavemanSystemDirective:
             stdin = mrun.call_args.kwargs["input"]
         assert stdin.startswith(backends.CAVEMAN_SYSTEM)  # directive leads
         assert stdin.endswith("do X")  # task preserved verbatim
+
+
+class TestAgenticSystemDirective:
+    """G-guard for the 2026-07-12 silent-no-write bug. The AGENTIC CLI workers
+    (call_glm_agentic / call_codex_agentic / call_anthropic_agentic) must carry
+    the TOOL-USE directive (AGENTIC_SYSTEM), NOT the chat caveman directive.
+    CAVEMAN_SYSTEM's "answer only what was asked; no preamble; terse" made a
+    weaker Claude-Code-driven GLM worker emit a "DONE" chat reply and write NO
+    file (verified: 3/5 then 0/3 with caveman; 5/5 with AGENTIC_SYSTEM). In
+    agentic mode the file write is the deliverable — the directive must command
+    tool use, or the worker silently succeeds-with-no-effect."""
+
+    def test_constant_commands_tool_use(self):
+        s = backends.AGENTIC_SYSTEM
+        assert s
+        low = s.lower()
+        # names the tools and forbids reply-only (the failure this catches)
+        assert "tool" in low
+        assert "write" in low
+        assert "failure" in low  # "a textual answer with no tool call is a FAILURE"
+
+    def _prompt_arg(self, mrun):
+        """Extract the prompt argument whether it travels via stdin (codex) or
+        the `-p` argv token (cc-glm / cc-brain claude)."""
+        kwargs = mrun.call_args.kwargs
+        if "input" in kwargs and kwargs["input"] is not None:
+            return kwargs["input"]
+        argv = mrun.call_args[0][0]
+        return argv[argv.index("-p") + 1]
+
+    def test_agentic_workers_prepend_agentic_directive_not_caveman(self):
+        for fn, args in (
+            (backends.call_glm_agentic, ("do X", "glm-5.2")),
+            (backends.call_codex_agentic, ("do X", "gpt-5.6-terra")),
+            (backends.call_anthropic_agentic, ("do X", "claude-opus-4-8")),
+        ):
+            with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+                mrun.return_value = MagicMock(returncode=0, stdout="ok")
+                fn(*args)
+                prompt = self._prompt_arg(mrun)
+            assert prompt.startswith(backends.AGENTIC_SYSTEM), fn.__name__
+            # the chat directive must NOT leak into an agentic worker — it is the
+            # exact string that suppressed tool use
+            assert backends.CAVEMAN_SYSTEM not in prompt, fn.__name__
+            assert prompt.endswith("do X"), fn.__name__  # task preserved verbatim
