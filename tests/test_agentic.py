@@ -229,10 +229,12 @@ class TestSC6AgenticArgv:
         assert mrun.call_args.kwargs["input"].endswith("do Z")
         assert "do Z" not in argv
 
-    def test_grok_agentic_uses_grok_argv_stdin_acceptedits(self):
-        """Grok agentic: `grok --prompt-file - -m <model> --cwd <cwd>
-        --permission-mode acceptEdits`. Prompt on stdin (injection-safe), file
-        write is the deliverable so AGENTIC_SYSTEM (not caveman) is prepended."""
+    def test_grok_agentic_uses_grok_argv_p_acceptedits(self):
+        """Grok agentic: `grok -p <prompt> -m <model> --cwd <cwd>
+        --permission-mode acceptEdits`. Prompt is the -p value (one argv token,
+        injection-safe), file write is the deliverable so AGENTIC_SYSTEM (not
+        caveman) is prepended. Grok's --prompt-file wants a real FILE path, not
+        stdin (live-verified 2026-07-13), so the prompt goes via -p."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
             "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
         ):
@@ -241,33 +243,34 @@ class TestSC6AgenticArgv:
             argv = mrun.call_args[0][0]
         assert isinstance(argv, list)
         assert argv[0] == "grok" or argv[0].endswith("/grok")
-        assert "grok-4.5" in argv  # tier model passed through -m
         assert argv[argv.index("-m") + 1] == "grok-4.5"
         assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
         assert argv[argv.index("--cwd") + 1] == "/tmp"
-        # prompt travels on stdin (--prompt-file -), never as an argv token
-        assert "--prompt-file" in argv and argv[argv.index("--prompt-file") + 1] == "-"
-        assert "do G" not in argv
-        # AGENTIC_SYSTEM prepended, caveman NOT — file write is the deliverable
-        stdin = mrun.call_args.kwargs["input"]
-        assert stdin.endswith("do G")
-        assert stdin.startswith(backends.AGENTIC_SYSTEM[:20])
+        # prompt is the -p value: one argv token, AGENTIC_SYSTEM-prefixed
+        prompt_tok = argv[argv.index("-p") + 1]
+        assert prompt_tok.endswith("do G")
+        assert prompt_tok.startswith(backends.AGENTIC_SYSTEM[:20])
+        # no stdin path (grok --prompt-file "-" is a real-file error, not stdin)
+        assert mrun.call_args.kwargs.get("input") is None
+        assert "--prompt-file" not in argv
         assert mrun.call_args.kwargs.get("shell", False) is False
 
-    def test_grok_chat_uses_stdin_and_plain_output(self):
-        """Grok chat: `grok --prompt-file - -m <model> --output-format plain`,
-        prompt + CAVEMAN_SYSTEM on stdin. No --permission-mode (no file writes)."""
+    def test_grok_chat_uses_p_prompt_and_plain_output(self):
+        """Grok chat: `grok -p <prompt> -m <model> --output-format plain`,
+        CAVEMAN_SYSTEM-prefixed prompt as the -p value. No --permission-mode."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="pong")
             out = backends.call_grok("ping", "grok-4.5")
             argv = mrun.call_args[0][0]
         assert out["content"] == "pong"
         assert argv[0] == "grok" or argv[0].endswith("/grok")
-        assert "--prompt-file" in argv and "-m" in argv and "grok-4.5" in argv
+        assert "-p" in argv and "-m" in argv and "grok-4.5" in argv
         assert argv[argv.index("--output-format") + 1] == "plain"
         assert "--permission-mode" not in argv  # chat mode never edits
-        assert mrun.call_args.kwargs["input"].endswith("ping")
-        assert mrun.call_args.kwargs["input"].startswith(backends.CAVEMAN_SYSTEM[:20])
+        prompt_tok = argv[argv.index("-p") + 1]
+        assert prompt_tok.endswith("ping")
+        assert prompt_tok.startswith(backends.CAVEMAN_SYSTEM[:20])
+        assert mrun.call_args.kwargs.get("input") is None
 
     def test_grok_agentic_pass_path_fixed_env(self):
         """G-guard (env-drop): grok is a native binary (no node shim) so

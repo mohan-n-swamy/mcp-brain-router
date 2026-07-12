@@ -777,11 +777,12 @@ def call_grok(
     started = time.perf_counter()
     try:
         result = subprocess.run(
-            # --prompt-file - reads the single-turn prompt from stdin, so a
-            # prompt starting with "-" can never be parsed as a grok flag (same
-            # injection protection as call_codex's stdin path).
-            [_GROK_BIN, "--prompt-file", "-", "-m", model, "--output-format", "plain"],
-            input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+            # `-p/--single VALUE` consumes exactly the NEXT argv token as the
+            # single-turn prompt — a prompt starting with "-" is still bound to
+            # -p (it is -p's value, not a new flag), so passing it as one argv
+            # token in a non-shell list is injection-safe. (Grok's --prompt-file
+            # expects a real FILE path, NOT stdin "-" — that path errors.)
+            [_GROK_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "-m", model, "--output-format", "plain"],
             capture_output=True,
             text=True,
             timeout=CODEX_TIMEOUT_SECONDS,
@@ -896,10 +897,12 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
 
     Grok is xAI's Claude-Code-shaped CLI: `--permission-mode acceptEdits` lets it
     write/edit files with its built-in tools, and `--cwd` roots it in the caller's
-    repo. The prompt is fed on STDIN (`--prompt-file -`) so a prompt starting with
-    "-" can never be parsed as a grok flag (same injection protection as the codex
-    stdin path). AGENTIC_SYSTEM (NOT CAVEMAN_SYSTEM) is prepended — the file write
-    is the deliverable, and the chat-terse directive suppresses tool use in weaker
+    repo. The prompt is passed as `-p/--single VALUE` — one argv token in a
+    non-shell list, so a prompt starting with "-" stays bound to -p (its value,
+    not a new flag) and cannot inject. (Grok's --prompt-file expects a real FILE
+    path, NOT stdin "-" — live-verified 2026-07-13: "-" errors "No such file".)
+    AGENTIC_SYSTEM (NOT CAVEMAN_SYSTEM) is prepended — the file write is the
+    deliverable, and the chat-terse directive suppresses tool use in weaker
     workers (root-caused 2026-07-12 for GLM). Grok is a native binary, so only
     _grok_env's grok-bin PATH prepend is needed."""
     _validate_model_name(model)
@@ -907,8 +910,8 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
     started = time.perf_counter()
     argv = [
         _GROK_BIN,
-        "--prompt-file",
-        "-",
+        "-p",
+        f"{AGENTIC_SYSTEM}\n\n{prompt}",
         "-m",
         model,
         "--cwd",
@@ -921,7 +924,6 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
     try:
         result = subprocess.run(
             argv,
-            input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
