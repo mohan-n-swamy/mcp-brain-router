@@ -102,7 +102,7 @@ def ask_enable_codex() -> bool:
 
     try:
         response = input(
-            f"{Color.YELLOW}Enable Codex adversarial backend (gpt-5.5 Pro)? [y/N]: {Color.RESET}"
+            f"{Color.YELLOW}Enable Codex adversarial backend (gpt-5.5 default; GPT-5.6 candidates require eval)? [y/N]: {Color.RESET}"
         ).strip().lower()
     except (KeyboardInterrupt, EOFError):
         print("\n" + Color.RED + "Installation cancelled." + Color.RESET)
@@ -340,6 +340,7 @@ def run_smoke_test(
     glm_key: str,
     deepseek_key: str,
     codex_enabled: bool,
+    codex_model: Optional[str],
     headroom_url: Optional[str],
 ) -> Dict[str, bool]:
     """
@@ -363,7 +364,7 @@ def run_smoke_test(
 
     # Test Codex (if enabled)
     if codex_enabled:
-        results["Codex"] = _test_backend_codex()
+        results["Codex"] = _test_backend_codex(codex_model or "gpt-5.5")
 
     return results
 
@@ -454,13 +455,13 @@ def _test_backend_deepseek(api_key: str, headroom_url: Optional[str]) -> bool:
         return False
 
 
-def _test_backend_codex() -> bool:
+def _test_backend_codex(model: str = "gpt-5.5") -> bool:
     """Test Codex CLI availability."""
     try:
         start = time.time()
         from .backends import CODEX_EXEC_BASE
         result = subprocess.run(
-            CODEX_EXEC_BASE + ["-m", "gpt-5.5", "--", "reply: OK"],
+            CODEX_EXEC_BASE + ["-m", model, "--", "reply: OK"],
             capture_output=True,
             text=True,
             # codex answers in ~20-30s even with MCP boot skipped; 10s was
@@ -470,7 +471,7 @@ def _test_backend_codex() -> bool:
         elapsed = time.time() - start
 
         if result.returncode == 0:
-            print(f"  {Color.GREEN}✓{Color.RESET} Codex (gpt-5.5): {elapsed:.2f}s")
+            print(f"  {Color.GREEN}✓{Color.RESET} Codex ({model}): {elapsed:.2f}s")
             return True
         else:
             print(f"  {Color.RED}✗{Color.RESET} Codex: exit code {result.returncode}")
@@ -561,6 +562,7 @@ def main():
             glm_key=glm_key,
             deepseek_key=deepseek_key,
             codex_enabled=codex_enabled,
+            codex_model=codex_model,
             headroom_url=headroom_url,
         )
 

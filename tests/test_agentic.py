@@ -79,7 +79,7 @@ class TestSC2CheapRoutesToGlm:
 
 
 # ============================================================================
-# SC-3: default mode policy (worker=agentic, others=chat)
+# SC-3: every role is a CLI worker
 # ============================================================================
 
 
@@ -88,9 +88,9 @@ class TestSC3DefaultPolicy:
         ("role", "expected"),
         [
             (Role.WORKER, "agentic"),
-            (Role.ADVERSARY, "chat"),
-            (Role.THINKER, "chat"),
-            (Role.SIMPLE, "chat"),
+            (Role.ADVERSARY, "agentic"),
+            (Role.THINKER, "agentic"),
+            (Role.SIMPLE, "agentic"),
         ],
     )
     def test_default_mode_per_role(self, role, expected):
@@ -98,7 +98,7 @@ class TestSC3DefaultPolicy:
 
     def test_config_default_role_modes_worker_agentic(self):
         assert DEFAULT_ROLE_MODES["worker"] == "agentic"
-        assert DEFAULT_ROLE_MODES["adversary"] == "chat"
+        assert DEFAULT_ROLE_MODES["adversary"] == "agentic"
 
     def test_role_modes_merged_on_load_even_when_section_absent(self, tmp_path, monkeypatch):
         """A config.toml that omits [role_modes] still resolves worker=agentic."""
@@ -108,7 +108,7 @@ class TestSC3DefaultPolicy:
         monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", cfg_file)
         loaded = Config.load()
         assert loaded.role_modes["worker"] == "agentic"
-        assert loaded.role_modes["adversary"] == "chat"
+        assert loaded.role_modes["adversary"] == "agentic"
 
     def test_role_modes_user_override_wins(self, tmp_path, monkeypatch):
         """A config.toml [role_modes] override sits on top of the default."""
@@ -120,7 +120,7 @@ class TestSC3DefaultPolicy:
         monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", cfg_file)
         loaded = Config.load()
         assert loaded.role_modes["worker"] == "chat"  # user override
-        assert loaded.role_modes["adversary"] == "chat"  # default preserved
+        assert loaded.role_modes["adversary"] == "agentic"  # default preserved
 
 
 # ============================================================================
@@ -214,6 +214,7 @@ class TestSC6AgenticArgv:
         assert "-c" in argv and "mcp_servers={}" in argv
         assert "--skip-git-repo-check" in argv
         assert 'model_reasoning_effort="low"' in argv
+        assert argv[argv.index("--sandbox") + 1] == "workspace-write"
         for flag in ("--ignore-user-config", "--ephemeral"):
             assert flag in argv
         # SC-6: the two flags that would prevent editing the repo are DROPPED
@@ -222,9 +223,11 @@ class TestSC6AgenticArgv:
         assert "--ignore-rules" not in argv
         # runs in the real cwd (no cwd isolation to /private/tmp)
         assert mrun.call_args.kwargs.get("cwd") is not None
-        # prompt travels after a "--" separator (same protection as call_codex)
-        assert "--" in argv
-        assert argv[-1].endswith("do Z")
+        # Prompt travels on stdin. Codex CLI 0.144.1 no longer accepts the
+        # prompt after `--`; that shape waits for stdin until router timeout.
+        assert argv[-1] == "-"
+        assert mrun.call_args.kwargs["input"].endswith("do Z")
+        assert "do Z" not in argv
 
     def test_glm_and_anthropic_agentic_pass_path_fixed_env(self):
         """G-guard (env-drop, root-caused 2026-07-12): cc-glm/cc-brain shell to
@@ -255,6 +258,26 @@ class TestSC6AgenticArgv:
             assert node_dir in path, (
                 f"{fn.__name__} env PATH missing node dir {node_dir}: {path[:120]}"
             )
+
+    def test_claude_code_workers_are_slim_but_keep_builtin_tools(self):
+        """Skip rig startup overhead without degrading workers to text-only."""
+        for fn, args in (
+            (backends.call_glm_agentic, ("p", "glm-5.2")),
+            (backends.call_anthropic_agentic, ("p", "claude-sonnet-5")),
+        ):
+            with patch("mcp_brain_router.backends.subprocess.run") as mrun:
+                mrun.return_value = MagicMock(returncode=0, stdout="ok")
+                fn(*args)
+                argv = mrun.call_args[0][0]
+            for flag in (
+                "--safe-mode",
+                "--disable-slash-commands",
+                "--no-chrome",
+                "--no-session-persistence",
+            ):
+                assert flag in argv
+            assert argv[argv.index("--tools") + 1] == "default"
+            assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
 
     def test_no_api_key_in_agentic_argv(self):
         """No secret/API key ever appears in the constructed argv (SC-6)."""
@@ -424,23 +447,21 @@ class TestRoleModeResolution:
         magentic.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_adversary_role_defaults_to_chat(self):
-        """role=adversary, no explicit mode → chat (codex, NOT agentic)."""
+    async def test_adversary_role_defaults_to_agentic(self, tmp_path):
+        """role=adversary, no explicit mode → writable Codex CLI worker."""
         config = _agentic_config()
         with (
             patch.object(server, "_load_config", return_value=config),
-            patch(
-                "mcp_brain_router.router.backends.call_codex"
-            ) as mcodex,
             patch("mcp_brain_router.router.backends.call_codex_agentic") as magentic,
             patch.object(server, "_log_delegation"),
         ):
-            mcodex.return_value = {"content": "refuted", "usage": None}
-            response = await server._delegate_role_impl("adversary", "refute", "opus")
+            magentic.return_value = {"content": "refuted", "usage": None}
+            response = await server._delegate_role_impl(
+                "adversary", "refute", "opus", cwd=str(tmp_path)
+            )
         assert response["backend"] == "codex"
-        assert response["mode"] == "chat"
-        mcodex.assert_called_once()
-        magentic.assert_not_called()
+        assert response["mode"] == "agentic"
+        magentic.assert_called_once()
 
 
 # ============================================================================

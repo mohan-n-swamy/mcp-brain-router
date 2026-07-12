@@ -147,6 +147,8 @@ CODEX_EXEC_BASE_AGENTIC = [
     "--skip-git-repo-check",
     "--ignore-user-config",
     "--ephemeral",
+    "--sandbox",
+    "workspace-write",
     "--disable",
     "plugins",
     "--disable",
@@ -657,7 +659,8 @@ def call_codex(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (live-verified: without it, prompt="-h"
             # prints CLI help instead of delegating).
-            CODEX_EXEC_BASE + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
+            CODEX_EXEC_BASE + ["-m", model, "-"],
+            input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
             capture_output=True,
             text=True,
             timeout=CODEX_TIMEOUT_SECONDS,
@@ -716,7 +719,21 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
     _validate_model_name(model)
     cwd = _resolve_agentic_cwd(cwd, "glm")
     started = time.perf_counter()
-    argv = [_CC_GLM_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model]
+    argv = [
+        _CC_GLM_BIN,
+        "-p",
+        f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+        "--model",
+        model,
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "acceptEdits",
+    ]
     try:
         result = subprocess.run(
             argv,
@@ -767,7 +784,8 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
         result = subprocess.run(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (same protection as call_codex).
-            CODEX_EXEC_BASE_AGENTIC + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
+            CODEX_EXEC_BASE_AGENTIC + ["-m", model, "-"],
+            input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
@@ -816,6 +834,14 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         f"{CAVEMAN_SYSTEM}\n\n{prompt}",
         "--model",
         model,
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "acceptEdits",
     ]
     try:
         result = subprocess.run(

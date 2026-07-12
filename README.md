@@ -97,7 +97,7 @@ Legacy `delegate(complexity=..., prompt=...)` remains supported and single-tier.
 |------|---------|-------|----------|------|-------|
 | `cheap` | DeepSeek | deepseek-v4-flash | Brainstorm, high-volume fan-out, quick checks | ~$0.07/1M tokens | Fastest |
 | `code` | GLM | glm-5.2 | Code review, algorithm design, debugging | ~$0.50/1M tokens | Fast |
-| `adversarial` | Codex | gpt-5.5 (via codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
+| `adversarial` | Codex | gpt-5.5, low effort (via Codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
 
 ### Default orchestration policy
 
@@ -160,6 +160,16 @@ codex_enabled = true
 [model_overrides]
 adversarial = "gpt-5.5"
 ```
+
+### GPT-5.6 routing policy
+
+- `gpt-5.6-sol` is the capability-first adversarial candidate. Production default remains `gpt-5.5` until representative eval promotion.
+- `gpt-5.6-terra` is an explicit cost-balanced candidate; adopt only after the same representative adversarial eval holds.
+- `gpt-5.6-luna` is for efficient high-volume work, not the default refutation/security lane.
+- Keep `model_reasoning_effort="low"` as the migration baseline; compare `none` on the same eval before lowering it.
+- Reserve pro mode or `max` effort for quality-first tasks with measured gain; the CLI worker does not enable either by default.
+- Codex runs as an ephemeral, direct CLI worker. Responses-API explicit caching and Programmatic Tool Calling do not apply to this backend unless it is deliberately migrated to that API surface.
+- Model efficiency never replaces caller fallback, timeout, nested-Codex prevention, untrusted-output handling, or downstream verification.
 
 **Changing keys later:**
 ```bash

@@ -574,6 +574,32 @@ class TestTerminalMetadata:
         return Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True)
 
     @pytest.mark.asyncio
+    async def test_public_complexity_path_defaults_to_cli_and_requires_cwd(self):
+        with (
+            patch.object(server, "_load_config", return_value=self._cfg()),
+            patch.object(server, "route", new_callable=AsyncMock) as route_call,
+            patch.object(server, "_log_delegation"),
+        ):
+            response = await server._delegate_impl("code", "build")
+        assert response["failure_kind"] == "validation_error"
+        assert "cwd is required" in response["error"]
+        route_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_public_complexity_path_rejects_http_chat_mode(self):
+        with (
+            patch.object(server, "_load_config", return_value=self._cfg()),
+            patch.object(server, "route", new_callable=AsyncMock) as route_call,
+            patch.object(server, "_log_delegation"),
+        ):
+            response = await server._delegate_impl(
+                "code", "build", mode="chat", cwd="/tmp"
+            )
+        assert response["failure_kind"] == "validation_error"
+        assert "HTTP/chat delegation was removed" in response["error"]
+        route_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_quota_result_is_logged_with_reason_and_elapsed(self):
         quota_result = RouteResult(
             content="glm quota exhausted; call another tier",
@@ -592,7 +618,7 @@ class TestTerminalMetadata:
             patch.object(server, "route", new_callable=AsyncMock, return_value=quota_result),
             patch.object(server, "_log_delegation") as log_call,
         ):
-            response = await server._delegate_impl("code", "p")
+            response = await server._delegate_impl("code", "p", cwd="/tmp")
 
         assert response["exhausted"] is True
         assert response["failure_kind"] == "quota_exhausted"
@@ -613,7 +639,7 @@ class TestTerminalMetadata:
             patch.object(server, "route", new_callable=AsyncMock, side_effect=timeout),
             patch.object(server, "_log_delegation") as log_call,
         ):
-            response = await server._delegate_impl("adversarial", "p")
+            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
 
         assert response["exhausted"] is False
         assert response["backend"] == "codex"
@@ -623,23 +649,20 @@ class TestTerminalMetadata:
         log_call.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_codex_caller_cannot_spawn_nested_codex(self):
+    async def test_codex_caller_routes_adversary_to_claude_cli(self):
+        routed = {"answer": "PONG", "backend": "anthropic-cli", "caller": "codex"}
         with (
             patch.dict("os.environ", {"BRAIN_ROUTER_CALLER": "codex"}),
-            patch.object(server, "_load_config") as load_config,
-            patch.object(server, "route", new_callable=AsyncMock) as route_call,
-            patch.object(server, "_log_delegation") as log_call,
+            patch.object(
+                server, "_delegate_role_impl", new_callable=AsyncMock, return_value=routed
+            ) as role_call,
         ):
-            response = await server._delegate_impl("adversarial", "p")
+            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
 
-        assert response["exhausted"] is False
-        assert response["backend"] == "router"
-        assert response["caller"] == "codex"
-        assert response["failure_kind"] == "nested_codex_blocked"
-        load_config.assert_not_called()
-        route_call.assert_not_awaited()
-        log_call.assert_called_once()
-        assert log_call.call_args.args[0]["caller"] == "codex"
+        assert response["backend"] == "anthropic-cli"
+        role_call.assert_awaited_once_with(
+            "adversary", "p", "codex", mode="agentic", cwd="/tmp"
+        )
 
     @pytest.mark.asyncio
     async def test_claude_caller_may_use_adversarial_tier(self):
@@ -656,7 +679,7 @@ class TestTerminalMetadata:
             patch.object(server, "route", new_callable=AsyncMock, return_value=result) as route_call,
             patch.object(server, "_log_delegation"),
         ):
-            response = await server._delegate_impl("adversarial", "p")
+            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
 
         assert response["answer"] == "PONG"
         assert response["caller"] == "claude"
@@ -721,20 +744,17 @@ class TestErrorClassification:
 class TestCodexArgvSafety:
     """G-guards from the 2026-07-02 adversarial pass (PR #1 review)."""
 
-    def test_codex_argv_has_end_of_options_separator(self):
-        """A prompt starting with "-" must reach codex as the PROMPT, not be
-        parsed as a CLI flag (prompt="-h" printed codex help pre-fix). The
-        "--" separator must sit between options and the prompt."""
+    def test_codex_prompt_uses_stdin(self):
+        """A prompt starting with "-" must reach codex through stdin, not be
+        parsed as a CLI flag. Codex CLI 0.144.1 ignores a prompt after `--`
+        and waits for stdin, which previously caused the 360s timeout."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
             backends.call_codex("-h --evil-flag", "gpt-5.6-sol")
             argv = mrun.call_args[0][0]
-        sep = argv.index("--")
-        # Prompt is ONE positional arg after "--" (caveman system directive is
-        # prepended inside that same arg — still not parsed as a CLI flag).
-        assert sep == len(argv) - 2  # exactly one positional after the separator
-        assert argv[-1].endswith("-h --evil-flag")  # untrusted input reaches codex verbatim
-        assert "--evil-flag" not in argv[:-1]  # never leaks out as its own argv token
+        assert argv[-1] == "-"
+        assert mrun.call_args.kwargs["input"].endswith("-h --evil-flag")
+        assert "--evil-flag" not in argv
 
     def test_codex_argv_skips_mcp_boot(self):
         """mcp_servers={} must be present — codex otherwise boots every MCP
@@ -833,6 +853,6 @@ class TestCavemanSystemDirective:
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
             backends.call_codex("do X", "gpt-5.6-sol")
-            argv = mrun.call_args[0][0]
-        assert argv[-1].startswith(backends.CAVEMAN_SYSTEM)  # directive leads
-        assert argv[-1].endswith("do X")  # task preserved verbatim
+            stdin = mrun.call_args.kwargs["input"]
+        assert stdin.startswith(backends.CAVEMAN_SYSTEM)  # directive leads
+        assert stdin.endswith("do X")  # task preserved verbatim
