@@ -104,6 +104,65 @@ CODEX_TIMEOUT_SECONDS = 360  # 004 C410: 180s starved long adversarial prompts (
 # as network_error). One constant, all HTTP backends — DRY.
 HTTP_TIMEOUT_SECONDS = 120.0
 
+# Agentic worker timeout — agentic mode does REAL file + check work (a full
+# build loop step), so it runs longer than a text-only chat reply. Same as the
+# codex adversarial cap: one constant, every agentic backend.
+AGENTIC_TIMEOUT_SECONDS = 360
+
+
+# ============================================================================
+# CLI harness binaries for the agentic worker mode (spec 002).
+# Resolved at import time so the empty-PATH MCP-process case still finds them.
+# Each is the per-provider headless CLI the router shells to in the REAL cwd so
+# the worker reads the spec, writes files, and runs checks itself.
+# ============================================================================
+def _resolve_bin(primary: str, fallback_dirs: tuple[str, ...] = ("~/.local/bin",)) -> str:
+    """Resolve a CLI binary to an absolute path (honors shutil.which, then
+    ~/.local/bin fallbacks for the empty-PATH MCP-process case). Falls back to
+    the bare name so a missing binary raises the explicit not-found error."""
+    resolved = shutil.which(primary)
+    if resolved:
+        return resolved
+    for d in fallback_dirs:
+        cand = os.path.expanduser(os.path.join(d, primary))
+        if os.path.exists(cand):
+            return cand
+    return primary
+
+
+_CC_GLM_BIN = _resolve_bin("cc-glm")
+_CC_BRAIN_BIN = _resolve_bin("cc-brain")
+
+
+# Codex agentic base flags — SAME lean worker profile as CODEX_EXEC_BASE
+# (skip-git-repo-check, ignore-user-config, ephemeral, all --disable, no MCPs,
+# low reasoning) EXCEPT two flags dropped so the agentic worker can edit the
+# caller's repo:
+#   - `-C /private/tmp`  → run in the REAL cwd (files must land in the repo)
+#   - `--ignore-rules`  → removed so codex's edit/permission rules can apply
+# (spec 002 SC-6). The cwd is set per-call via subprocess.run(cwd=...).
+CODEX_EXEC_BASE_AGENTIC = [
+    _CODEX_BIN,
+    "exec",
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "--ephemeral",
+    "--disable",
+    "plugins",
+    "--disable",
+    "hooks",
+    "--disable",
+    "memories",
+    "--disable",
+    "apps",
+    "--disable",
+    "multi_agent",
+    "-c",
+    "mcp_servers={}",
+    "-c",
+    'model_reasoning_effort="low"',
+]
+
 
 def _find_mise_node() -> str:
     """Locate the mise-managed node binary when PATH is empty (MCP-process
@@ -583,6 +642,158 @@ def call_codex(
         raise BackendError(
             "Codex binary not found on PATH",
             backend="codex",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+# ============================================================================
+# Agentic worker backends (spec 002) — shell to a per-provider CLI harness in
+# the REAL working directory so the worker reads the spec, writes files, and
+# runs checks itself. Each returns the {content, ...} dict shape the chat
+# backends return; the prompt is passed as an argv token (cc-glm / claude -p)
+# or after a `--` separator (codex), the same secure pattern as call_codex —
+# never echo a secret and never let an untrusted prompt be parsed as a CLI flag.
+# ============================================================================
+
+
+def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    """Agentic GLM worker: `cc-glm -p <prompt> --model <model>` in the REAL cwd.
+
+    cc-glm is the rig's headless GLM CLI; it has file + shell tools and writes
+    into the caller's working directory. The resolved model (the tier's glm id,
+    e.g. glm-5.2 / glm-4.7) is passed via --model so the caller decides which
+    GLM variant runs.
+    """
+    _validate_model_name(model)
+    started = time.perf_counter()
+    argv = [_CC_GLM_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=AGENTIC_TIMEOUT_SECONDS,
+            check=False,
+            cwd=cwd or os.getcwd(),
+        )
+        if result.returncode != 0:
+            raise BackendError(
+                "cc-glm agentic subprocess failed",
+                backend="glm",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+        return {"content": result.stdout.strip(), "usage": None}
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "glm",
+            f"cc-glm agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "cc-glm binary not found on PATH",
+            backend="glm",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    """Agentic Codex worker: `codex exec` in the REAL cwd (NOT /private/tmp).
+
+    Reuses CODEX_EXEC_BASE_AGENTIC — the lean worker flags (no MCPs, low
+    reasoning, no plugins/hooks/memories/apps/multi_agent) EXCEPT the
+    sandbox-cwd flag (`-C /private/tmp`) and `--ignore-rules` are dropped so
+    the worker can edit the repo (spec 002 SC-6).
+    """
+    _validate_model_name(model)
+    started = time.perf_counter()
+    try:
+        result = subprocess.run(
+            # "--" ends option parsing so a prompt starting with "-" can't be
+            # read as a codex flag (same protection as call_codex).
+            CODEX_EXEC_BASE_AGENTIC + ["-m", model, "--", f"{CAVEMAN_SYSTEM}\n\n{prompt}"],
+            capture_output=True,
+            text=True,
+            timeout=AGENTIC_TIMEOUT_SECONDS,
+            check=False,
+            cwd=cwd or os.getcwd(),
+            env=_codex_env(),
+        )
+        if result.returncode != 0:
+            raise BackendError(
+                "Codex agentic subprocess failed",
+                backend="codex",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+        return {"content": result.stdout.strip(), "usage": None}
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "codex",
+            f"Codex agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "Codex binary not found on PATH",
+            backend="codex",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    """Agentic Anthropic (Opus/Sonnet/Haiku) worker: `cc-brain claude -p` in
+    the REAL cwd. This is the agentic-CLI fallback for: the codex-orchestrator
+    adversary case (codex can't be its own adversary) AND the GLM+codex-both-
+    exhausted final fallback (spec 002 SC-4, SC-8). The resolved candidate's
+    model id (e.g. claude-sonnet-5 / claude-opus-4-8) is passed via --model."""
+    _validate_model_name(model)
+    started = time.perf_counter()
+    argv = [
+        _CC_BRAIN_BIN,
+        "claude",
+        "-p",
+        f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+        "--model",
+        model,
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=AGENTIC_TIMEOUT_SECONDS,
+            check=False,
+            cwd=cwd or os.getcwd(),
+        )
+        if result.returncode != 0:
+            raise BackendError(
+                "cc-brain claude agentic subprocess failed",
+                backend="anthropic-cli",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+        return {"content": result.stdout.strip(), "usage": None}
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "anthropic-cli",
+            f"cc-brain claude agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "cc-brain binary not found on PATH",
+            backend="anthropic-cli",
             failure_kind="configuration_error",
             elapsed_ms=round((time.perf_counter() - started) * 1000),
         )

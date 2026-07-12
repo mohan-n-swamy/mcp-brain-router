@@ -32,8 +32,8 @@ class TestRouteFunction:
     """Test the route() async function."""
 
     @pytest.mark.asyncio
-    async def test_route_cheap_uses_deepseek(self):
-        """Test that complexity=CHEAP routes to DeepSeek."""
+    async def test_route_cheap_uses_glm(self):
+        """002: CHEAP tier now routes to GLM (DeepSeek removed from routing)."""
         config = Config(
             deepseek_key="test_key",
             glm_key="test_glm",
@@ -41,18 +41,18 @@ class TestRouteFunction:
         )
 
         with patch(
-            "mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock
-        ) as mock_ds:
-            mock_ds.return_value = {
+            "mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock
+        ) as mock_glm:
+            mock_glm.return_value = {
                 "content": "response",
                 "usage": {"input_tokens": 10, "output_tokens": 20},
             }
 
             result = await route(Complexity.CHEAP, "test prompt", config=config)
 
-            assert result.backend == "deepseek"
+            assert result.backend == "glm"
             assert result.content == "response"
-            assert mock_ds.called
+            assert mock_glm.called
 
     @pytest.mark.asyncio
     async def test_route_code_uses_glm(self):
@@ -141,7 +141,7 @@ class TestConfigPersistence:
             codex_enabled=True,
             headroom_base_url="http://localhost:8000",
             roles={
-                "worker": ["glm-5.2", "gpt-5.5", "sonnet-worker"],
+                "worker": ["glm-5.2", "gpt-5.6-sol", "sonnet-worker"],
                 "simple": ["glm-4.7", "luna-simple", "haiku-simple"],
             },
         )
@@ -169,18 +169,18 @@ class TestMissingKeyErrors:
     """Test that missing keys raise appropriate errors."""
 
     @pytest.mark.asyncio
-    async def test_missing_deepseek_key_raises_error(self):
-        """Test that missing DeepSeek key raises MissingCredentialError."""
+    async def test_missing_glm_key_raises_error_for_cheap(self):
+        """002: CHEAP tier now routes to GLM, so a missing GLM key is the error."""
         config = Config(
             deepseek_key=None,
-            glm_key="test_glm",
+            glm_key=None,
             codex_enabled=False,
         )
 
         with pytest.raises(MissingCredentialError) as exc_info:
             await route(Complexity.CHEAP, "test prompt", config=config)
 
-        assert "deepseek" in str(exc_info.value).lower()
+        assert "glm" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
     async def test_missing_glm_key_raises_error(self):
@@ -342,9 +342,9 @@ class TestIntegrationSmoke:
         )
 
         with patch(
-            "mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock
-        ) as mock_ds:
-            mock_ds.return_value = {
+            "mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock
+        ) as mock_glm:
+            mock_glm.return_value = {
                 "content": "test response",
                 "usage": {"input_tokens": 10, "output_tokens": 20},
             }
@@ -370,7 +370,7 @@ class TestModelValidation:
     def test_valid_model_names(self):
         """Test that valid model names pass validation."""
         valid_models = [
-            "gpt-5.5",
+            "gpt-5.6-sol",
             "deepseek-v4-flash",
             "glm-5.2",
             "gpt_5_5",
@@ -382,13 +382,13 @@ class TestModelValidation:
     def test_invalid_model_names_raise_error(self):
         """Test that models with shell metacharacters are rejected."""
         invalid_models = [
-            "gpt-5.5; rm -rf",
-            "gpt-5.5 || whoami",
-            "gpt-5.5`whoami`",
-            "gpt-5.5$(whoami)",
-            "gpt-5.5 --flag",
-            "gpt-5.5@special",
-            "gpt-5.5&whoami",
+            "gpt-5.6-sol; rm -rf",
+            "gpt-5.6-sol || whoami",
+            "gpt-5.6-sol`whoami`",
+            "gpt-5.6-sol$(whoami)",
+            "gpt-5.6-sol --flag",
+            "gpt-5.6-sol@special",
+            "gpt-5.6-sol&whoami",
         ]
         for model in invalid_models:
             with pytest.raises(backends.BackendError) as exc_info:
@@ -400,7 +400,7 @@ class TestModelValidation:
         """Test that Codex rejects injected model args."""
         # Try to inject a flag via model name
         with pytest.raises(backends.BackendError) as exc_info:
-            backends.call_codex("test prompt", "gpt-5.5; rm -rf /")
+            backends.call_codex("test prompt", "gpt-5.6-sol; rm -rf /")
 
         assert "Invalid model name" in str(exc_info.value)
 
@@ -544,19 +544,17 @@ class TestPureTierRouting:
             assert exc_info.value.backend == "codex"
 
     @pytest.mark.asyncio
-    async def test_cheap_deepseek_429_does_not_call_glm(self):
-        """CHEAP quota exhaustion never crosses into CODE."""
-        with (
-            patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds,
-            patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm,
-        ):
-            mds.side_effect = backends.BackendQuotaError("DeepSeek", 429, "limit")
+    async def test_cheap_glm_429_does_not_cross_tier(self):
+        """002: CHEAP now routes to GLM; a 429 returns exhausted without crossing."""
+        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
+            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit")
 
             result = await route(Complexity.CHEAP, "p", config=self._cfg())
 
             assert result.exhausted is True
-            assert result.tried == ["deepseek"]
-            assert not mglm.called
+            assert result.tried == ["glm"]
+            assert result.failure_kind == "quota_exhausted"
+            assert mglm.called
 
     @pytest.mark.asyncio
     async def test_adversarial_tier_is_codex_only(self):
@@ -647,7 +645,7 @@ class TestTerminalMetadata:
     async def test_claude_caller_may_use_adversarial_tier(self):
         result = RouteResult(
             content="PONG",
-            model="gpt-5.5",
+            model="gpt-5.6-sol",
             backend="codex",
             complexity=Complexity.ADVERSARIAL,
             headroom_used=False,
@@ -729,7 +727,7 @@ class TestCodexArgvSafety:
         "--" separator must sit between options and the prompt."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("-h --evil-flag", "gpt-5.5")
+            backends.call_codex("-h --evil-flag", "gpt-5.6-sol")
             argv = mrun.call_args[0][0]
         sep = argv.index("--")
         # Prompt is ONE positional arg after "--" (caveman system directive is
@@ -743,7 +741,7 @@ class TestCodexArgvSafety:
         server in ~/.codex/config.toml and blows the subprocess timeout."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("p", "gpt-5.5")
+            backends.call_codex("p", "gpt-5.6-sol")
             argv = mrun.call_args[0][0]
         assert "-c" in argv and "mcp_servers={}" in argv
         assert "--skip-git-repo-check" in argv
@@ -752,7 +750,7 @@ class TestCodexArgvSafety:
         """Delegated Codex must not load the full interactive user rig."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("p", "gpt-5.5")
+            backends.call_codex("p", "gpt-5.6-sol")
             argv = mrun.call_args[0][0]
 
         for flag in ("--ignore-user-config", "--ignore-rules", "--ephemeral"):
@@ -764,13 +762,13 @@ class TestCodexArgvSafety:
 
     def test_codex_timeout_carries_kind_reason_and_elapsed(self):
         """Timeout metadata must survive to the server; it is never quota."""
-        timeout = backends.subprocess.TimeoutExpired(cmd=["codex"], timeout=360)
+        timeout = backends.subprocess.TimeoutExpired(cmd=["codex"], timeout=180)
         with (
             patch("mcp_brain_router.backends.subprocess.run", side_effect=timeout),
             patch("mcp_brain_router.backends.time.perf_counter", side_effect=[10.0, 370.0]),
         ):
             with pytest.raises(backends.BackendTransientError) as exc_info:
-                backends.call_codex("p", "gpt-5.5")
+                backends.call_codex("p", "gpt-5.6-sol")
 
         err = exc_info.value
         assert err.backend == "codex"
@@ -787,6 +785,19 @@ class TestCodexArgvSafety:
 
         src = inspect.getsource(install._test_backend_codex)
         assert "CODEX_EXEC_BASE" in src
+
+    def test_installer_smokes_the_selected_codex_model(self):
+        """A Terra/Luna/custom selection must not be falsely validated by Sol."""
+        from mcp_brain_router import install
+
+        with (
+            patch.object(install, "_test_backend_glm", return_value=True),
+            patch.object(install, "_test_backend_deepseek", return_value=True),
+            patch.object(install, "_test_backend_codex", return_value=True) as codex,
+        ):
+            install.run_smoke_test("glm-key", "deepseek-key", True, "gpt-5.6-terra", None)
+
+        codex.assert_called_once_with("gpt-5.6-terra")
 
     def test_claude_registration_declares_caller_identity(self):
         """Fresh Claude registrations must activate the nested-Codex guard."""
@@ -821,7 +832,7 @@ class TestCavemanSystemDirective:
     def test_codex_prompt_prepends_caveman(self):
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("do X", "gpt-5.5")
+            backends.call_codex("do X", "gpt-5.6-sol")
             argv = mrun.call_args[0][0]
         assert argv[-1].startswith(backends.CAVEMAN_SYSTEM)  # directive leads
         assert argv[-1].endswith("do X")  # task preserved verbatim

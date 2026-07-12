@@ -105,6 +105,18 @@ _PROVIDER_TARGETS = {
 }
 
 
+def default_mode_for_role(role: Role) -> str:
+    """Code default for a role's execution mode (spec 002 SC-3).
+
+    Worker is permanently agentic (does the file work); every other role
+    defaults to chat (text-only). This mirrors Config.DEFAULT_ROLE_MODES but
+    lives in the router so resolve_role works without a config section.
+    """
+    if role is Role.WORKER:
+        return "agentic"
+    return "chat"
+
+
 def orchestrator_provider(value: str | Provider) -> Provider:
     """Resolve an orchestrator provider name or model id."""
     if isinstance(value, Provider):
@@ -121,8 +133,16 @@ def resolve_role(
     orchestrator: str | Provider,
     config: Config,
     exhausted_providers: Iterable[Provider] = (),
+    mode: str = "chat",
 ) -> Assignment:
-    """Resolve one configured role without calling any backend."""
+    """Resolve one configured role without calling any backend.
+
+    mode='agentic' (spec 002) changes ONE thing: an Anthropic candidate is NOT
+    handed back for native execution — it targets the anthropic-cli agentic
+    harness (cc-brain claude). This is the codex-orchestrator adversary case
+    AND the GLM+codex-exhausted final fallback worker, where there may be no
+    native Anthropic loop to hand back to. The adversary-differs-from-
+    orchestrator rule is preserved either way."""
     if role is Role.ORCHESTRATOR:
         raise ValueError("orchestrator is selected by the human, not the router")
 
@@ -139,7 +159,22 @@ def resolve_role(
         if role is Role.ADVERSARY and provider is orchestrator_owner:
             continue
         if provider is Provider.ANTHROPIC:
-            # floor: the MCP never calls Anthropic. Native orchestrator executes it.
+            if mode == "agentic":
+                # 002: no native hand-back — shell to the Anthropic CLI worker.
+                return Assignment(
+                    role=role,
+                    model=model,
+                    provider=provider,
+                    backend="anthropic-cli",
+                    execute_natively=False,
+                    reason=(
+                        "Anthropic agentic worker — shells to cc-brain claude in "
+                        "the real cwd (codex-orchestrator adversary / "
+                        "GLM+codex-exhausted fallback)"
+                    ),
+                )
+            # chat mode floor: the MCP never calls Anthropic. Native orchestrator
+            # executes it.
             return Assignment(
                 role=role,
                 model=model,
@@ -169,19 +204,35 @@ async def route_assignment(
     assignment: Assignment,
     prompt: str,
     config: Config,
+    mode: str = "chat",
+    cwd: Optional[str] = None,
 ) -> "RouteResult":
-    """Execute a non-native assignment through existing tier machinery."""
+    """Execute a non-native assignment through existing tier machinery.
+
+    cwd is the orchestrator-supplied working directory for agentic subprocesses
+    (see route()); threaded through so the worker writes into the caller's repo.
+    """
     if assignment.execute_natively or assignment.backend is None:
         raise ValueError("native assignment cannot be executed by the router")
+    # 002: the anthropic-cli agentic harness has no Complexity tier
+    # (it's the codex-orchestrator adversary / GLM+codex-exhausted fallback).
+    # Dispatch straight to the agentic router by backend name.
+    if assignment.backend == "anthropic-cli":
+        return await _route_agentic(
+            "anthropic-cli", prompt, assignment.model, config, cwd
+        )
     _, complexity = _PROVIDER_TARGETS[assignment.provider]
-    return await route(complexity, prompt, assignment.model, config)
+    return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd)
 
 
 # Pure tier ownership. The router selects exactly one backend and never crosses
 # tiers. The calling orchestrator owns any cascade (for example GLM -> Codex ->
 # native Claude). This keeps caller-specific fallback policy out of the MCP.
+# 002: DeepSeek removed from routing — `cheap` AND `code` both map to GLM (GLM
+# is the first port of call for worker AND cheap). DeepSeek stays a Provider
+# enum member for back-compat but no tier routes to it.
 _TIER_BACKENDS = {
-    Complexity.CHEAP: "deepseek",
+    Complexity.CHEAP: "glm",
     Complexity.CODE: "glm",
     Complexity.ADVERSARIAL: "codex",
 }
@@ -245,6 +296,8 @@ async def route(
     prompt: str,
     model_override: Optional[str] = None,
     config: Optional[Config] = None,
+    mode: str = "chat",
+    cwd: Optional[str] = None,
 ) -> RouteResult:
     """
     Route a request to the appropriate backend.
@@ -256,6 +309,15 @@ async def route(
                        for the selected backend. If None, uses config mapping
                        or backend default.
         config: Configuration object. If None, loads from ~/.config/mcp-brain-router/config.toml.
+        mode: Execution mode — 'chat' (text-only, the original path) or
+              'agentic' (spec 002: shells to the per-provider CLI harness in the
+              REAL cwd so the worker writes files / runs checks itself).
+        cwd: Working directory for agentic-mode subprocesses. REQUIRED for
+             correct agentic behaviour — the MCP server is a long-lived process
+             whose os.getcwd() is fixed at launch (whichever session first
+             spawned it), NOT the caller's repo. The orchestrator MUST pass its
+             own cwd so the worker writes files into the caller's directory, not
+             the server's launch dir. Ignored in chat mode (no subprocess cwd).
 
     Returns:
         RouteResult containing response, metadata, and backend info.
@@ -272,7 +334,9 @@ async def route(
     _validate_credentials(backend_name, config)
 
     try:
-        if backend_name == "deepseek":
+        if mode == "agentic":
+            result = await _route_agentic(backend_name, prompt, model, config, cwd)
+        elif backend_name == "deepseek":
             result = await _route_deepseek(prompt, model, config)
         elif backend_name == "glm":
             result = await _route_glm(prompt, model, config)
@@ -306,6 +370,52 @@ async def route(
     return result
 
 
+async def _route_agentic(
+    backend_name: str,
+    prompt: str,
+    model: str,
+    config: Config,
+    cwd: Optional[str] = None,
+) -> RouteResult:
+    """Agentic dispatch — shell to the per-provider CLI harness in the REAL cwd
+    (spec 002). GLM→cc-glm, codex→codex exec (real cwd), and an explicit
+    anthropic-cli target for the codex-orchestrator adversary + the
+    GLM+codex-exhausted final fallback. All three run blocking subprocess.run,
+    so offload to a worker thread (same reason as _route_codex).
+
+    cwd is the orchestrator-supplied working directory (see route()). Threaded
+    into every backend so the worker writes files into the caller's repo, not
+    the MCP server's fixed launch cwd. None → backend falls back to
+    os.getcwd() (server dir) — a caller that wants correct file placement MUST
+    pass cwd."""
+    if backend_name == "glm":
+        result = await asyncio.to_thread(
+            backends.call_glm_agentic, prompt, model, cwd
+        )
+        label = "glm"
+    elif backend_name == "codex":
+        result = await asyncio.to_thread(
+            backends.call_codex_agentic, prompt, model, cwd
+        )
+        label = "codex"
+    elif backend_name == "anthropic-cli":
+        result = await asyncio.to_thread(
+            backends.call_anthropic_agentic, prompt, model, cwd
+        )
+        label = "anthropic-cli"
+    else:  # pragma: no cover - agentic mode only targets these three
+        raise ValueError(f"No agentic harness for backend: {backend_name}")
+
+    return RouteResult(
+        content=result["content"],
+        model=model,
+        backend=label,
+        complexity=None,
+        headroom_used=False,
+        usage=result.get("usage"),
+    )
+
+
 def _resolve_backend_and_model(
     complexity: Complexity,
     model_override: Optional[str],
@@ -333,8 +443,10 @@ def _resolve_backend_and_model(
     elif config.model_overrides and complexity.value in config.model_overrides:
         model = config.model_overrides[complexity.value]
     else:
-        # Use backend default
-        model = _get_backend_default_model(backend_name, config)
+        # Use backend default. `cheap` and `code` both route to GLM (002) but
+        # select DIFFERENT GLM variants: cheap=glm-4.7 (FAST), code=glm-5.2.
+        default_key = "glm-cheap" if complexity is Complexity.CHEAP else backend_name
+        model = _get_backend_default_model(default_key, config)
 
     return backend_name, model
 
@@ -344,6 +456,12 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
     defaults = {
         "deepseek": "deepseek-v4-flash",
         "glm": "glm-5.2",
+        # 002: `cheap` tier now maps to GLM (DeepSeek removed). Its model is the
+        # FAST GLM (glm-4.7); the `code` tier keeps glm-5.2. The model override
+        # axis (config [model_overrides] cheap=) still wins over this default.
+        "glm-cheap": "glm-4.7",
+        # Keep production default until the representative adversarial eval
+        # promotes a GPT-5.6 candidate. Terra/Luna remain explicit overrides.
         "codex": "gpt-5.5",
     }
     return defaults.get(backend_name, "unknown")
@@ -470,6 +588,7 @@ def route_sync(
     prompt: str,
     model_override: Optional[str] = None,
     config: Optional[Config] = None,
+    mode: str = "chat",
 ) -> RouteResult:
     """Synchronous wrapper around route() for non-async contexts."""
-    return asyncio.run(route(complexity, prompt, model_override, config))
+    return asyncio.run(route(complexity, prompt, model_override, config, mode=mode))

@@ -23,6 +23,19 @@ class ConfigError(Exception):
 CONFIG_DIR = Path.home() / ".config" / "mcp-brain-router"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
+# Code default for per-role execution mode (spec 002). The worker role is
+# agentic by default (shells to a CLI harness that writes files); every other
+# role defaults to chat (text-only) so adversaries/refuters stay read-only.
+# A config.toml [role_modes] section is merged ON TOP of this — only non-default
+# roles need to be listed there. Worker is permanently agentic-for-workers so no
+# orchestrator ever re-asks "should the worker do the work".
+DEFAULT_ROLE_MODES: Dict[str, str] = {
+    "worker": "agentic",
+    "adversary": "chat",
+    "thinker": "chat",
+    "simple": "chat",
+}
+
 
 def ensure_config_dir() -> Path:
     """Create config directory with secure permissions if needed."""
@@ -39,6 +52,11 @@ class Config:
     headroom_base_url: Optional[str] = None
     model_overrides: Optional[Dict[str, str]] = None
     roles: Optional[Dict[str, List[str]]] = None
+    # Per-role default execution mode (spec 002): 'agentic' shells to a CLI
+    # harness in the real cwd (writes files); 'chat' is the text-only path.
+    # A code default is merged on load so a config.toml that omits the section
+    # still resolves worker->agentic, every other role->chat.
+    role_modes: Optional[Dict[str, str]] = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -71,6 +89,7 @@ class Config:
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
             roles=data.get("roles") or {},
+            role_modes=DEFAULT_ROLE_MODES | (data.get("role_modes") or {}),
         )
 
     def save(self) -> None:
@@ -100,6 +119,10 @@ class Config:
                     f'"{self._escape_toml(model)}"' for model in models
                 )
                 lines.append(f"{role} = [{encoded}]")
+        if self.role_modes:
+            lines.append("[role_modes]")
+            for role, mode in self.role_modes.items():
+                lines.append(f'{role} = "{self._escape_toml(mode)}"')
 
         content = "\n".join(lines)
 
