@@ -561,8 +561,12 @@ class TestPureTierRouting:
             assert not mds.called  # never fell through on a hard error
 
     @pytest.mark.asyncio
-    async def test_codex_timeout_is_not_quota_exhaustion(self):
-        """A Codex process timeout propagates as a typed transient error."""
+    async def test_codex_transient_advances_cascade_but_is_not_quota(self):
+        """A transient 5xx/timeout must ADVANCE the role cascade (exhausted=True
+        so the server loop fails over to the next candidate) WITHOUT being
+        mislabeled as quota exhaustion. This is the fix for the §9.6 cascade-abort
+        bug: route() previously only caught BackendQuotaError, so a sibling
+        BackendTransientError escaped and aborted the whole shard."""
         with patch("mcp_brain_router.router.backends.call_codex") as mcx:
             mcx.side_effect = backends.BackendTransientError(
                 "codex",
@@ -571,10 +575,16 @@ class TestPureTierRouting:
                 elapsed_ms=180000,
             )
 
-            with pytest.raises(backends.BackendTransientError) as exc_info:
-                await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
-            assert exc_info.value.failure_kind == "timeout"
-            assert exc_info.value.backend == "codex"
+            result = await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
+
+            # Advances the cascade — no unhandled exception, no abort.
+            assert result.exhausted is True
+            assert result.backend == "none"
+            assert result.tried == ["codex"]
+            # Honest label: transient, NOT quota_exhausted.
+            assert result.failure_kind == "transient_error"
+            assert result.failure_kind != "quota_exhausted"
+            assert result.reset_at is None  # transient carries no reset time
 
     @pytest.mark.asyncio
     async def test_cheap_glm_429_does_not_cross_tier(self):

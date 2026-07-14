@@ -1,9 +1,9 @@
 # mcp-brain-router — STATUS
 
 **Updated:** 2026-07-14
-**Branch:** feat/grok-backend-tier
-**HEAD:** 3ca6fae — fix(security): grok prompt via temp --prompt-file, not -p (injection-safe)
-**Tree:** dirty — provider-shard migration in progress
+**Branch:** main
+**HEAD:** 9f81c41 — status: park — §9.6 confirmed crash-on-transient bug on main, fix designed not applied
+**Tree:** clean
 
 ## Current goal
 
@@ -21,9 +21,23 @@ shard: GLM → Grok → Codex → Claude, quota-only advancement.
   - Worker-role via LIVE MCP (`delegate role='worker'` after server restart) → `WORKER_ROLE_OK` on disk, backend glm-5.2, 29.7s.
 - Install is **editable** (`Editable project location` → this repo) → restart serves the checked-out ref; post-merge `git checkout main` + MCP restart serves main, no reinstall.
 
-## Blocker
+## Fix landed (branch fix/transient-cascade — 2026-07-15)
 
-**main (`16fc2b8`) has a CONFIRMED crash-on-transient bug — shipped, unfixed.** §9.6
+The §9.6 cascade-abort bug is FIXED on branch `fix/transient-cascade` (pending PR+merge).
+Refined diagnosis (better than the refuters'): NOT an unhandled crash — server.py:440/:276
+catch the `BackendError` base gracefully. The real defect was a **cascade-abort**: a transient
+5xx/timeout escaped `route_assignment`/`route`'s `except BackendQuotaError`, broke the whole
+`while` cascade loop, and returned `exhausted=False` → the shard aborted instead of failing over
+GLM→Grok→Codex→Claude. Fix: catch `BackendTransientError` at router.py (anthropic-cli, grok,
+route() tier) → `RouteResult(exhausted=True, failure_kind="transient_error")` (advance cascade,
+honest label — user chose "advance on transient"). G-guards: `test_codex_transient_advances_cascade_but_is_not_quota`,
+`test_anthropic_cli_transient_advances_cascade_not_quota`, `test_worker_transient_on_glm_fails_over_to_next_provider`.
+V-gate: 128 pass (was 126, +2 net), ruff clean, diff-check clean, no drift.
+NEXT: PR → merge → restart MCP → V-gate served==built.
+
+## Blocker (pre-fix, historical)
+
+**main (`16fc2b8`) had a CONFIRMED crash-on-transient bug — now fixed on branch (above).** §9.6
 adversarial-verify (workflow `wf_2e970209-1ff`, 5 lenses, 23 agents) ran AFTER merge and
 CONFIRMED 6 findings (the manufacturing-gate was right to block the "shipped-clean" claim):
 
