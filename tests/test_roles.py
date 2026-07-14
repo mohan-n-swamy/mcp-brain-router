@@ -253,6 +253,72 @@ async def test_anthropic_cli_quota_becomes_exhausted_result(role_config, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_anthropic_cli_transient_advances_cascade_not_quota(role_config, tmp_path):
+    """§9.6 G-guard: a transient 5xx/timeout on the anthropic-cli agentic path
+    must ADVANCE the cascade (exhausted=True) WITHOUT being labeled quota. Before
+    the fix, BackendTransientError (a sibling of BackendQuotaError) escaped
+    route_assignment's `except BackendQuotaError` and aborted the whole shard."""
+    from mcp_brain_router.backends import BackendTransientError
+
+    assignment = resolve_role(Role.THINKER, "codex", role_config, mode="agentic")
+    with patch(
+        "mcp_brain_router.router._route_agentic",
+        new_callable=AsyncMock,
+        side_effect=BackendTransientError(
+            "Anthropic", "cc-brain agentic subprocess timed out after 360s",
+            failure_kind="timeout",
+        ),
+    ):
+        from mcp_brain_router.router import route_assignment
+
+        result = await route_assignment(
+            assignment, "think", role_config, mode="agentic", cwd=str(tmp_path)
+        )
+    assert result.exhausted is True  # advances, does not abort
+    assert result.failure_kind == "transient_error"
+    assert result.failure_kind != "quota_exhausted"
+    assert result.tried == ["anthropic-cli"]
+
+
+@pytest.mark.asyncio
+async def test_worker_transient_on_glm_fails_over_to_next_provider(role_config):
+    """§9.6 end-to-end G-guard: a transient error on the FIRST worker provider
+    (GLM) must fail over to the next (Grok), proving the cascade advances on
+    transient — the exact cascade-abort defect the fix repairs."""
+    glm_transient = RouteResult(
+        content="glm transient",
+        model="",
+        backend="none",
+        complexity=None,
+        headroom_used=False,
+        exhausted=True,
+        failure_kind="transient_error",
+        failure_reason="GLM provider error 503",
+    )
+    grok_ok = RouteResult(
+        content="PONG",
+        model="grok-4.5",
+        backend="grok",
+        complexity=None,
+        headroom_used=False,
+        exhausted=False,
+    )
+    with (
+        patch.object(server, "_load_config", return_value=role_config),
+        patch(
+            "mcp_brain_router.server.route_assignment",
+            new_callable=AsyncMock,
+            side_effect=[glm_transient, grok_ok],
+        ),
+    ):
+        response = await server._delegate_role_impl("worker", "build", "opus", cwd="/tmp")
+    assert response["exhausted"] is False  # a later provider succeeded
+    assert response["backend"] == "grok"
+    assert response["answer"] == "PONG"
+    assert response["tried"] == ["glm", "grok"]  # advanced past the transient GLM
+
+
+@pytest.mark.asyncio
 async def test_all_role_candidates_exhausted_keeps_quota_contract(role_config):
     exhausted = RouteResult(
         content="quota",

@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Dict, Iterable, Optional
 
 from . import backends
-from .backends import BackendQuotaError
+from .backends import BackendQuotaError, BackendTransientError
 from .config import Config
 
 
@@ -235,6 +235,22 @@ async def route_assignment(
                 failure_kind="quota_exhausted",
                 failure_reason=str(e),
             )
+        except BackendTransientError as e:
+            # A transient 5xx/timeout is NOT quota exhaustion, but the role
+            # cascade must still ADVANCE (exhausted=True) so a blip on this
+            # provider fails over to the next candidate instead of aborting the
+            # whole shard. failure_kind stays honest — not quota_exhausted.
+            return RouteResult(
+                content="anthropic transient error; advance to the next role candidate",
+                model="",
+                backend="none",
+                complexity=Complexity.CODE,
+                headroom_used=False,
+                exhausted=True,
+                tried=["anthropic-cli"],
+                failure_kind="transient_error",
+                failure_reason=str(e),
+            )
     # Grok is a coding provider inside the role candidate list, not a public
     # complexity tier. Dispatch it through the code machinery with its resolved
     # model/backend while preserving role-owned quota fallback.
@@ -258,6 +274,19 @@ async def route_assignment(
                 tried=["grok"],
                 reset_at=e.reset_at,
                 failure_kind="quota_exhausted",
+                failure_reason=str(e),
+            )
+        except BackendTransientError as e:
+            # Transient 5xx/timeout → advance the cascade (see anthropic-cli note).
+            return RouteResult(
+                content="grok transient error; advance to the next role candidate",
+                model="",
+                backend="none",
+                complexity=Complexity.CODE,
+                headroom_used=False,
+                exhausted=True,
+                tried=["grok"],
+                failure_kind="transient_error",
                 failure_reason=str(e),
             )
         result.complexity = Complexity.CODE
@@ -408,6 +437,26 @@ async def route(
             tried=[backend_name],
             reset_at=e.reset_at,
             failure_kind="quota_exhausted",
+            failure_reason=str(e),
+        )
+    except BackendTransientError as e:
+        # Transient provider error (5xx / timeout) is not quota exhaustion, but
+        # the role cascade must still advance (exhausted=True) so a blip fails
+        # over to the next candidate rather than aborting the shard. Kept honest
+        # via failure_kind="transient_error" (never labeled quota_exhausted).
+        return RouteResult(
+            content=(
+                f"{backend_name} transient error for tier {complexity.value}. "
+                f"Advance to the next role candidate or retry."
+            ),
+            model="",
+            backend="none",
+            complexity=complexity,
+            headroom_used=False,
+            usage=None,
+            exhausted=True,
+            tried=[backend_name],
+            failure_kind="transient_error",
             failure_reason=str(e),
         )
 
