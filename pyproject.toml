@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-brain-router"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP connector for multi-backend LLM routing (DeepSeek, GLM, Codex) with native Claude Code orchestration"
 readme = "README.md"
 requires-python = ">=3.10"
