@@ -72,6 +72,29 @@ def _load_config() -> Config | None:
 # Fail-OPEN: a logging error must never break a delegation.
 _DELEGATION_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
 
+# Trusted caller identities. install.py registers BRAIN_ROUTER_CALLER=<binary>
+# for each client (claude/codex/grok). Any other value is untrusted — an
+# attacker-controlled process could set the env var to anything — so it is
+# normalized to "unknown", which the downstream provider-match guard treats as
+# "no orchestrator trust" (standard role resolution, no privileged path).
+_KNOWN_CALLERS = frozenset({"claude", "codex", "grok"})
+
+
+def _read_caller() -> str:
+    """Read + validate the caller identity from the environment.
+
+    Whitelist at the trust boundary: an unrecognized (possibly spoofed) value
+    collapses to "unknown" so no policy check downstream can be fooled by an
+    arbitrary caller string."""
+    # Strip ONLY spaces (not bare .strip(), which also eats \f/\v/\r/\n — those
+    # would let "\fclaude" normalize to a trusted value). Then require the token
+    # be pure lowercase letters AND whitelisted. The trusted identities are pure
+    # lowercase letters, so any control char / metachar / digit → untrusted.
+    raw = os.getenv("BRAIN_ROUTER_CALLER", "unknown").strip(" ").lower()
+    if not raw.isalpha() or raw not in _KNOWN_CALLERS:
+        return "unknown"
+    return raw
+
 
 def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
     """Append one audit line for a completed delegate() call. Never raises."""
@@ -112,7 +135,7 @@ async def _delegate_impl(
     Returns a dict with result or error structure.
     """
     started = time.perf_counter()
-    caller = os.getenv("BRAIN_ROUTER_CALLER", "unknown").strip().lower() or "unknown"
+    caller = _read_caller()
 
     def complete(response: dict[str, Any]) -> dict[str, Any]:
         """Add terminal metadata and audit every result exactly once."""
@@ -310,7 +333,7 @@ async def _delegate_role_impl(
 ) -> dict[str, Any]:
     """Resolve and execute a role, walking candidates only on real quota exhaustion."""
     started = time.perf_counter()
-    caller = os.getenv("BRAIN_ROUTER_CALLER", "unknown").strip().lower() or "unknown"
+    caller = _read_caller()
 
     def complete(response: dict[str, Any]) -> dict[str, Any]:
         response.setdefault("caller", caller)

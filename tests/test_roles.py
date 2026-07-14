@@ -360,6 +360,51 @@ async def test_registered_caller_identity_cannot_be_spoofed(
     assert "does not match registered caller identity" in response["error"]
 
 
+def test_read_caller_normalizes_unknown_and_spoofed_values(monkeypatch):
+    """§9.6 G-guard: the caller-identity trust boundary. Only claude/codex/grok
+    are trusted; any other (possibly attacker-set) BRAIN_ROUTER_CALLER value
+    collapses to 'unknown' so no downstream policy check can be fooled."""
+    from mcp_brain_router.server import _read_caller
+
+    for trusted in ("claude", "codex", "grok", "CLAUDE", " Codex "):
+        monkeypatch.setenv("BRAIN_ROUTER_CALLER", trusted)
+        assert _read_caller() == trusted.strip().lower()
+
+    for spoofed in (
+        "attacker-process", "anthropic", "", "root", "grok; rm -rf",
+        "\fclaude", "\vcodex", "grok\n", "cla ude",  # control/space bypass attempts
+    ):
+        monkeypatch.setenv("BRAIN_ROUTER_CALLER", spoofed)
+        assert _read_caller() == "unknown"
+
+    monkeypatch.delenv("BRAIN_ROUTER_CALLER", raising=False)
+    assert _read_caller() == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_spoofed_caller_cannot_bypass_orchestrator_match(role_config, monkeypatch):
+    """A spoofed caller ('anthropic' — not in the whitelist) must NOT reach the
+    trusted provider-match path; it normalizes to 'unknown', which skips the
+    orchestrator-trust guard and follows standard role resolution (no privileged
+    exclusion granted to an untrusted caller)."""
+    monkeypatch.setenv("BRAIN_ROUTER_CALLER", "anthropic")
+    with (
+        patch.object(server, "_load_config", return_value=role_config),
+        patch(
+            "mcp_brain_router.server.route_assignment",
+            new_callable=AsyncMock,
+            return_value=RouteResult(
+                content="ok", model="glm-5.2", backend="glm",
+                complexity=None, headroom_used=False, exhausted=False,
+            ),
+        ),
+    ):
+        response = await server._delegate_role_impl("worker", "build", "opus", cwd="/tmp")
+    # Normalized to unknown → no validation_error from the caller-match guard.
+    assert response.get("failure_kind") != "validation_error"
+    assert response["caller"] == "unknown"
+
+
 @pytest.mark.asyncio
 async def test_delegate_role_requires_orchestrator(role_config):
     with patch.object(server, "_load_config", return_value=role_config):
