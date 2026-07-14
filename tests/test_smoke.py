@@ -450,9 +450,13 @@ class TestHttpxUsage:
 
     def test_no_aiohttp_in_backends(self):
         """Verify backends.py does NOT use aiohttp."""
-        with open(
-            "/Users/mohannarayanswamy/code workshop/claude projects/Personal/mcp-brain-router/src/mcp_brain_router/backends.py"
-        ) as f:
+        backends_py = (
+            Path(__file__).resolve().parent.parent
+            / "src"
+            / "mcp_brain_router"
+            / "backends.py"
+        )
+        with open(backends_py) as f:
             content = f.read()
             # Should not import aiohttp anywhere
             assert "import aiohttp" not in content

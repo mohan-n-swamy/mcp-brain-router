@@ -48,3 +48,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal handoff + design scratch — not for public repo
+STATUS.md
+.stress-test-temp/
