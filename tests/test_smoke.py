@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mcp_brain_router import backends, server
-from mcp_brain_router.config import Config, ConfigError, ensure_config_dir
+from mcp_brain_router.config import DEFAULT_ROLES, Config, ConfigError, ensure_config_dir
 from mcp_brain_router.router import (
     BackendUnavailableError,
     Complexity,
@@ -154,7 +154,7 @@ class TestConfigPersistence:
         assert loaded.glm_key == original.glm_key
         assert loaded.codex_enabled == original.codex_enabled
         assert loaded.headroom_base_url == original.headroom_base_url
-        assert loaded.roles == original.roles
+        assert loaded.roles == DEFAULT_ROLES | original.roles
 
     def test_config_without_roles_loads_empty(self, temp_config_dir, monkeypatch):
         config_file = temp_config_dir / "config.toml"
@@ -162,7 +162,40 @@ class TestConfigPersistence:
         config_file.chmod(0o600)
         monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", config_file)
 
-        assert Config.load().roles == {}
+        assert Config.load().roles == DEFAULT_ROLES
+
+    def test_installer_fresh_config_seeds_role_shards_and_grok(
+        self, temp_config_dir, monkeypatch
+    ):
+        from mcp_brain_router import config as config_module
+        from mcp_brain_router import install
+
+        config_file = temp_config_dir / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_FILE", config_file)
+        monkeypatch.setattr(install, "CONFIG_FILE", config_file)
+        monkeypatch.setattr(install.shutil, "which", lambda name: f"/bin/{name}")
+
+        install.write_config("glm", "ds", True, "gpt-5.5", None)
+        loaded = Config.load()
+        assert loaded.roles == DEFAULT_ROLES
+        assert loaded.grok_enabled is True
+
+    def test_installer_rerun_preserves_existing_grok_and_roles(
+        self, temp_config_dir, monkeypatch
+    ):
+        from mcp_brain_router import config as config_module
+        from mcp_brain_router import install
+
+        config_file = temp_config_dir / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_FILE", config_file)
+        monkeypatch.setattr(install, "CONFIG_FILE", config_file)
+        custom_roles = {"worker": ["glm-custom", "grok-custom"]}
+        Config(grok_enabled=True, roles=custom_roles).save()
+
+        install.write_config("glm-new", "ds-new", True, "gpt-5.5", None)
+        loaded = Config.load()
+        assert loaded.grok_enabled is True
+        assert loaded.roles["worker"] == custom_roles["worker"]
 
 
 class TestMissingKeyErrors:
@@ -566,38 +599,18 @@ class TestPureTierRouting:
             assert result.tried == ["codex"]
             assert result.exhausted is False
 
-    def test_grok_tier_maps_to_grok_backend_and_default_model(self):
-        """GROK is its own tier → grok backend, default model grok-4.5."""
+    def test_grok_is_coding_provider_not_complexity_tier(self):
+        """Grok resolves as XAI for role routing; no public Grok tier exists."""
         from mcp_brain_router.router import (
-            _TIER_BACKENDS,
             Provider,
             _get_backend_default_model,
             provider_for_model,
         )
 
-        assert _TIER_BACKENDS[Complexity.GROK] == "grok"
         assert provider_for_model("grok-4.5") is Provider.XAI
         assert _get_backend_default_model("grok", self._cfg()) == "grok-4.5"
-
-    @pytest.mark.asyncio
-    async def test_grok_tier_is_grok_only(self):
-        """GROK success returns only grok; never crosses to another tier."""
-        cfg = Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True, grok_enabled=True)
-        with patch("mcp_brain_router.router.backends.call_grok") as mgk:
-            mgk.return_value = {"content": "PONG", "usage": None}
-            result = await route(Complexity.GROK, "p", config=cfg)
-            assert result.backend == "grok"
-            assert result.tried == ["grok"]
-            assert result.exhausted is False
-
-    @pytest.mark.asyncio
-    async def test_grok_tier_disabled_raises_unavailable(self):
-        """grok_enabled=False → BackendUnavailableError, not a silent misroute."""
-        from mcp_brain_router.router import BackendUnavailableError
-
-        cfg = Config(deepseek_key="sk-ds", glm_key="glm-k", grok_enabled=False)
-        with pytest.raises(BackendUnavailableError):
-            await route(Complexity.GROK, "p", config=cfg)
+        with pytest.raises(ValueError):
+            Complexity("grok")
 
 
 class TestTerminalMetadata:
@@ -858,8 +871,18 @@ class TestCodexArgvSafety:
 
         from mcp_brain_router import install
 
-        src = inspect.getsource(install.register_in_claude_code)
+        src = inspect.getsource(install._registration_specs)
         assert "BRAIN_ROUTER_CALLER=claude" in src
+
+    def test_supported_client_registration_declares_all_caller_identities(self):
+        """Fresh installs must expose the same router to every orchestrator."""
+        import inspect
+
+        from mcp_brain_router import install
+
+        src = inspect.getsource(install._registration_specs)
+        for caller in ("claude", "codex", "grok"):
+            assert f"BRAIN_ROUTER_CALLER={caller}" in src
 
     def test_error_family_is_unified(self):
         """router's credential/availability errors must subclass

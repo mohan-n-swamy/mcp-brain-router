@@ -36,6 +36,13 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
     "simple": "agentic",
 }
 
+DEFAULT_ROLES: Dict[str, List[str]] = {
+    "thinker": ["claude-fable-5", "gpt-5.6-sol"],
+    "adversary": ["claude-opus-4-8", "gpt-5.6-sol"],
+    "worker": ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"],
+    "simple": ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"],
+}
+
 
 def ensure_config_dir() -> Path:
     """Create config directory with secure permissions if needed."""
@@ -90,8 +97,10 @@ class Config:
             grok_enabled=data.get("grok_enabled", False),
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
-            roles=data.get("roles") or {},
-            role_modes=DEFAULT_ROLE_MODES | (data.get("role_modes") or {}),
+            roles=DEFAULT_ROLES | (data.get("roles") or {}),
+            # Role delegation is agentic-only. Older config files may still
+            # contain chat overrides; normalize them during the shard migration.
+            role_modes=DEFAULT_ROLE_MODES.copy(),
         )
 
     def save(self) -> None:

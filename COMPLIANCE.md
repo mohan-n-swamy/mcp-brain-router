@@ -1,14 +1,26 @@
 # Compliance Analysis — mcp-brain-router
 
-**Last verified: 2026-06-29.** _(Terms can change; re-verify periodically)_
+**Invalidated by role-shard migration: 2026-07-14.** The June analysis below
+describes the former non-Anthropic-only architecture. It is retained as
+historical context, not a current compliance conclusion.
 
 ---
 
 ## TL;DR (BLUF)
 
-**PRODUCTION CAUTION:** Until Anthropic explicitly confirms, treat this tool as personal/testing use only. It is not market-facing and carries no endorsement from Anthropic.
+**PRODUCTION CAUTION:** Treat this tool as personal/testing use only. Role
+shards may now launch `cc-brain claude` as an automated subscription-backed CLI
+worker. That behavior invalidates the former claim that this MCP never accesses
+Anthropic Services by bot or script. No current policy approval has been
+verified for this architecture.
 
-This tool does not access Anthropic's Services by bot, script, or automated means. The orchestrator is Claude Code—a native, first-party Anthropic client—which never passes through any proxy or third-party software. The MCP itself only delegates to other LLM providers (DeepSeek, GLM, Codex) using their own API keys; that traffic never reaches Anthropic's infrastructure. The tool shares no Anthropic credentials and introduces no automated access patterns. Therefore, it falls outside the scope of Anthropic's Consumer Terms clause prohibiting automated access. Anthropic has not reviewed or approved this tool.
+Current safe statement: provider credentials remain inside their native CLI/API
+auth paths and are not copied into router configuration. Compliance of automated
+Claude subscription use is unresolved. Anthropic has not reviewed or approved
+this tool.
+
+> Historical analysis starts below. Any sentence asserting "no automated
+> Anthropic access" is superseded by this notice.
 
 ---
 
@@ -21,7 +33,7 @@ This tool does not access Anthropic's Services by bot, script, or automated mean
 | Delegates to other LLM providers using THEIR keys | ✓ Yes | DeepSeek key, GLM key, Codex CLI — independent |
 | Proxies or wraps Anthropic subscription traffic | ✗ No | Anthropic traffic is direct, client→Anthropic only |
 | Bypasses Anthropic's access controls | ✗ No | Uses MCP, an Anthropic-created standard for extensions |
-| Introduces automated/bot access to Anthropic Services | ✗ No | No bot; no script; no unattended access to Anthropic |
+| Introduces automated/bot access to Anthropic Services | ⚠ Yes | Role fallback can launch `cc-brain claude -p`; policy status unresolved |
 | Accepts third-party responses and forwards to Claude | ✓ Yes | Labeled as untrusted external data (prompt-injection guard) |
 
 ---

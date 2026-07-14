@@ -1,20 +1,21 @@
 # mcp-brain-router
 
-An MCP server for Claude Code that delegates sub-tasks to cheaper and adversarial LLMs by complexity tier, returning structured answers with metadata.
+An MCP server for Claude Code and Codex that delegates agentic sub-tasks to external CLI workers, returning structured answers with metadata.
 
 ## What It Is
 
-`mcp-brain-router` is a Model Context Protocol server that runs locally and sits between an orchestrator and three external LLM providers. The orchestrator delegates via the `delegate()` tool, specifying complexity (`cheap`, `code`, or `adversarial`). Each tier maps to exactly one backend; the router never crosses tiers. It returns the answer plus terminal metadata. Anthropic's services are never touched by this tool — only by native Claude Code.
+`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Codex, and Grok. Standard calls select a role (`worker`, `simple`, `thinker`, or `adversary`) and run an agentic CLI worker in the caller's absolute working directory. Each role owns an ordered provider shard and advances only on confirmed quota exhaustion. Legacy complexity calls (`cheap`, `code`, `adversarial`) remain single-provider.
 
 ## Why It Exists
 
-Cost. The orchestrator (Claude) excels at reasoning, planning, and judgment. Sub-tasks like brainstorming, code review, or adversarial second opinions don't require Claude's full power:
+Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker shard and its quota-only fallback policy:
 
-- **Cheap tier (DeepSeek V4)**: trivial tasks, brainstorming, high-volume fan-out. Haiku-equivalent speed, ~1/10th the cost.
-- **Code tier (GLM-5.2)**: algorithm design, code review, debugging. Sonnet-equivalent reasoning without subscription costs.
-- **Adversarial tier (Codex)**: security reviews, high-stakes refutation. Opus-level independent analysis to challenge the orchestrator's solution.
+- **Worker**: GLM 5.2 → Grok → Codex Terra → Claude Sonnet 5.
+- **Simple**: GLM 4.7 → Codex Luna → Claude Haiku.
+- **Thinker**: Claude Fable → Codex Sol.
+- **Adversary**: Claude Opus 4.8 → Codex Sol, excluding the orchestrator's provider.
 
-By splitting work this way, you keep your subscription token budget for planning and integration, offload grunt work to cheaper providers on *their* keys, and get a second opinion for risky decisions.
+Every role call is agentic-only and requires `cwd`. Timeouts, authentication errors, process errors, and empty output stop loud; they never trigger provider fallback.
 
 ## Install
 
@@ -28,9 +29,9 @@ mcp-brain-router-install
 ```
 
 The install script will:
-1. Interactively prompt for API keys (GLM and DeepSeek are required; Codex is optional if `codex` binary is present; headroom proxy is optional).
+1. Interactively prompt for API keys and detect installed Codex/Grok CLIs.
 2. Store secrets in `~/.config/mcp-brain-router/config.toml` (mode 0600, gitignored).
-3. Self-register with Claude Code by printing and offering to run:
+3. Register the same MCP in installed Claude Code, Codex, and Grok clients with distinct caller identity.
    ```
    claude mcp add brain-router -e BRAIN_ROUTER_CALLER=claude -- python -m mcp_brain_router.server
    ```
@@ -77,36 +78,43 @@ answer = delegate(
 
 ### Role-based routing
 
-Configure ordered candidates in `~/.config/mcp-brain-router/config.toml`, then call:
+Configure ordered candidates in `~/.config/mcp-brain-router/config.toml`, then call. This role-based path owns the standard agentic cascade; callers must not recreate it with repeated `complexity=` calls:
 
 ```python
-delegate(role="worker", orchestrator="opus", prompt="Implement this isolated task")
-delegate(role="adversary", orchestrator="codex", prompt="Refute this design")
+delegate(role="worker", orchestrator="claude", mode="agentic", cwd="/abs/repo", prompt="Implement this isolated task")
+delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo", prompt="Refute this design")
 ```
 
 Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
-router-selected. Candidate order comes only from `[roles]`. Genuine quota
-exhaustion advances to the next provider. Anthropic candidates return an
-`execute_natively=true` assignment stub; this MCP never calls Anthropic.
+router-selected. Candidate order comes only from `[roles]`. Standard worker
+order is GLM → Grok → Codex → Claude. Only genuine quota exhaustion advances;
+timeouts, process errors, authentication failures, and empty answers stop loud.
+All public role calls are agentic-only and require absolute `cwd`. Anthropic
+candidates run through `cc-brain claude`. Only the adversary role excludes the
+orchestrator's provider; every other role may use it.
 
 Legacy `delegate(complexity=..., prompt=...)` remains supported and single-tier.
+Use it only for an explicit one-provider request, not the standard cascade.
 
 ## Tier Map
 
 | Tier | Backend | Model | Use Case | Cost | Speed |
 |------|---------|-------|----------|------|-------|
-| `cheap` | DeepSeek | deepseek-v4-flash | Brainstorm, high-volume fan-out, quick checks | ~$0.07/1M tokens | Fastest |
+| `cheap` | GLM | glm-4.7 | Explicit fast single-provider request | — | Fastest |
 | `code` | GLM | glm-5.2 | Code review, algorithm design, debugging | ~$0.50/1M tokens | Fast |
 | `adversarial` | Codex | gpt-5.5, low effort (via Codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
 
-### Default orchestration policy
+### Enforced role policy
 
-- General self-contained work starts with `code` → GLM.
-- A Claude orchestrator may call `adversarial` → Codex only after GLM is unusable: `exhausted=true`, an error, or a missing/empty answer.
-- If Codex is exhausted, errors, or returns no answer, the orchestrator handles the task natively.
-- `cheap` → DeepSeek is an explicit side lane for mechanical/high-volume work.
+- `worker`: GLM 5.2 → Grok → Codex Terra → Claude Sonnet 5.
+- `simple`: GLM 4.7 → Codex Luna → Claude Haiku.
+- `thinker`: Claude Fable → Codex Sol.
+- `adversary`: Claude Opus 4.8 → Codex Sol; candidate matching the orchestrator provider is skipped.
+- Provider advancement happens only on confirmed quota exhaustion. Timeout,
+  process, authentication, permission, and empty-output failures stop loud.
 
-The MCP performs none of these cross-tier steps automatically. Set `BRAIN_ROUTER_CALLER=claude` in Claude's MCP entry and `BRAIN_ROUTER_CALLER=codex` in Codex's. The server deterministically rejects `adversarial` calls from a Codex caller with `failure_kind="nested_codex_blocked"`; after GLM, Codex must handle the task in its current native session.
+Claude, Codex, and Grok each register the same MCP with distinct
+`BRAIN_ROUTER_CALLER` identity. Orchestrator remains human-selected.
 
 Codex registration example:
 
@@ -121,30 +129,30 @@ env = { BRAIN_ROUTER_CALLER = "codex" }
 
 ```
 ┌──────────────────────────┐
-│   Claude Code (native)   │  Orchestrator
-│   (native Claude + MCP)  │  (your subscription)
+│ Claude / Codex / Grok    │  Human-selected orchestrator
+│ native CLI + same MCP    │
 └────────────┬─────────────┘
              │
-             │ MCP call: delegate(prompt, complexity)
+             │ MCP call: delegate(role, prompt, cwd)
              │
 ┌────────────▼──────────────────────────────────┐
 │     mcp-brain-router (this tool)               │  Local MCP server
-│     Routes by complexity tier                  │
+│     Routes by configured role candidates       │
 │     Returns answer + metadata                  │
 └──┬─────────────────┬───────────────┬───────────┘
    │                 │               │
-   │ (own API key)   │ (own key)     │ (subprocess)
+   │ (own API key)   │ (OAuth CLI)   │ (subscription CLI)
    │                 │               │
 ┌──▼──────────┐  ┌───▼────────┐  ┌──▼────────────┐
-│ DeepSeek    │  │ GLM (z.ai) │  │  Codex CLI    │  External providers
-│ Anthropic-  │  │ Anthropic- │  │  (local exec) │  (NOT Anthropic)
-│ compatible  │  │ compatible │  │               │
+│ GLM         │  │ Grok/Codex │  │  Claude CLI   │  Agentic workers
+│ API + CLI   │  │ local CLI  │  │  fallback     │
+│             │  │            │  │               │
 └─────────────┘  └────────────┘  └───────────────┘
 
 Key point:
-- Anthropic's services are ONLY touched by native Claude Code (left side).
-- This MCP only orchestrates traffic to external providers using THEIR keys.
-- No proxy, no credential sharing, no subscription traffic interception.
+- The router may launch native Claude CLI as a configured role fallback.
+- Provider credentials stay inside their native API/CLI auth paths.
+- Worker output is labeled external-untrusted regardless of provider.
 ```
 
 ## Configuration
@@ -155,10 +163,17 @@ After installation, your config lives at `~/.config/mcp-brain-router/config.toml
 deepseek_key = "sk-..."
 glm_key = "..."
 codex_enabled = true
+grok_enabled = true
 # headroom_base_url = "http://localhost:8282"
 
 [model_overrides]
 adversarial = "gpt-5.5"
+
+[roles]
+thinker = ["claude-fable-5", "gpt-5.6-sol"]
+adversary = ["claude-opus-4-8", "gpt-5.6-sol"]
+worker = ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
+simple = ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"]
 ```
 
 ### GPT-5.6 routing policy
@@ -188,7 +203,7 @@ delegate(complexity="code", prompt="Health check. Reply exactly PONG.")
 
 ## Compliance
 
-**Short version**: This tool uses Claude Code (a first-party Anthropic client) to orchestrate, and delegates to non-Anthropic providers (DeepSeek, GLM, Codex) on *their own keys*. Traffic to those providers never goes through Anthropic's servers or subscription. The orchestrator remains an unmodified native Claude Code instance.
+**Short version**: role shards can launch GLM, Grok, Codex, or native Claude CLI workers. The prior non-Anthropic-only compliance analysis is invalid after this migration. Treat subscription-backed automated workers as personal/testing-only pending explicit policy confirmation.
 
 **See `COMPLIANCE.md` for the full, sourced analysis** of how this design respects Anthropic's Consumer Terms and the third-party tool landscape.
 

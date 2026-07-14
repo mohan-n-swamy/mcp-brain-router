@@ -4,6 +4,7 @@ Each backend is isolated; router.py calls these functions.
 """
 
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -97,6 +98,8 @@ CODEX_EXEC_BASE = [
     "mcp_servers={}",
     "-c",
     'model_reasoning_effort="low"',
+    "-c",
+    'approval_policy="never"',
     "-C",
     "/private/tmp",
 ]
@@ -137,7 +140,9 @@ _CC_BRAIN_BIN = _resolve_bin("cc-brain")
 # xAI Grok CLI (grok.com OAuth login, no API key). A native Mach-O binary
 # (NOT a node shim like codex/cc-glm), so its subprocess needs only grok's own
 # bin dir on PATH — no node runtime resolution. Both the chat (`grok -p`) and
-# agentic (`grok -p --permission-mode acceptEdits`) paths shell to it.
+# agentic (`grok --permission-mode bypassPermissions --always-approve`) paths
+# shell to it. The caller-supplied absolute cwd controls placement; it is not
+# an OS-level filesystem sandbox.
 _GROK_BIN = _resolve_bin("grok")
 
 
@@ -170,6 +175,8 @@ CODEX_EXEC_BASE_AGENTIC = [
     "mcp_servers={}",
     "-c",
     'model_reasoning_effort="low"',
+    "-c",
+    'approval_policy="never"',
 ]
 
 
@@ -203,7 +210,7 @@ def _codex_env() -> Dict[str, str]:
     for d in (codex_bin, node_bin):
         if d and d not in extra:
             extra.append(d)
-    env = dict(os.environ)
+    env = _base_cli_env()
     current = env.get("PATH", "")
     env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
     return env
@@ -215,7 +222,7 @@ def _grok_env() -> Dict[str, str]:
     needs prepending for the empty-env MCP-process case (`"env": {}`) — there is
     no node-runtime shebang to resolve. Existing PATH is preserved; the dir is
     only prepended, so a normal shell launch is unaffected."""
-    env = dict(os.environ)
+    env = _base_cli_env()
     grok_bin = os.path.dirname(_GROK_BIN) if os.path.sep in _GROK_BIN else ""
     if grok_bin:
         current = env.get("PATH", "")
@@ -270,10 +277,63 @@ def _agentic_cli_env() -> Dict[str, str]:
     for d in (ccglm_bin, ccbrain_bin, claude_bin, node_bin):
         if d and d not in extra:
             extra.append(d)
-    env = dict(os.environ)
+    env = _base_cli_env()
     current = env.get("PATH", "")
     env["PATH"] = os.pathsep.join([*extra, current]) if current else os.pathsep.join(extra)
     return env
+
+
+_SAFE_CLI_ENV_KEYS = frozenset(
+    {
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "COLORTERM",
+        "PATH",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+    }
+)
+
+
+def _base_cli_env() -> Dict[str, str]:
+    """Minimal subprocess env: preserve CLI auth locations, not parent secrets."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _SAFE_CLI_ENV_KEYS or key.startswith("MOHAN_CC_")
+    }
+
+
+_CLI_QUOTA_MARKERS = (
+    "quota exhausted",
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "limit reached",
+    "you've hit your limit",
+    "too many requests",
+    "status 429",
+    "error 429",
+)
+
+
+def _cli_quota_error(
+    provider: str, stdout: str | None, stderr: str | None
+) -> BackendQuotaError | None:
+    """Convert a CLI's explicit quota message without exposing raw output."""
+    combined = f"{stdout or ''}\n{stderr or ''}".lower()
+    if not any(marker in combined for marker in _CLI_QUOTA_MARKERS):
+        return None
+    return BackendQuotaError(provider, 429, "CLI reported quota exhaustion")
 
 
 # Caveman-ultra system directive prepended to EVERY delegated backend call
@@ -700,6 +760,13 @@ def _resolve_agentic_cwd(cwd: Optional[str], backend: str) -> str:
     contract every other backend failure already follows.
     """
     resolved = cwd or os.getcwd()
+    if not os.path.isabs(resolved):
+        raise BackendError(
+            f"Working directory must be absolute: {resolved}",
+            backend=backend,
+            failure_kind="validation_error",
+        )
+    resolved = os.path.realpath(resolved)
     if not os.path.isdir(resolved):
         raise BackendError(
             f"Working directory does not exist or is not a directory: {resolved}",
@@ -748,6 +815,9 @@ def call_codex(
         )
 
         if result.returncode != 0:
+            quota = _cli_quota_error("Codex", result.stdout, result.stderr)
+            if quota:
+                raise quota
             raise BackendError(
                 "Codex subprocess failed",
                 backend="codex",
@@ -818,6 +888,9 @@ def call_grok(
             )
 
         if result.returncode != 0:
+            quota = _cli_quota_error("Grok", result.stdout, result.stderr)
+            if quota:
+                raise quota
             raise BackendError(
                 "Grok subprocess failed",
                 backend="grok",
@@ -880,6 +953,8 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
         "--no-session-persistence",
         "--tools",
         "default",
+        "--allowedTools",
+        "Read,Edit,Write,Bash",
         "--permission-mode",
         "acceptEdits",
     ]
@@ -894,6 +969,9 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
             env=_agentic_cli_env(),
         )
         if result.returncode != 0:
+            quota = _cli_quota_error("GLM", result.stdout, result.stderr)
+            if quota:
+                raise quota
             raise BackendError(
                 "cc-glm agentic subprocess failed",
                 backend="glm",
@@ -920,10 +998,10 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
 
 def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Grok worker: `grok --prompt-file - -m <model> --permission-mode
-    acceptEdits` in the REAL cwd.
+    auto --always-approve` in the REAL cwd.
 
-    Grok is xAI's Claude-Code-shaped CLI: `--permission-mode acceptEdits` lets it
-    write/edit files with its built-in tools, and `--cwd` roots it in the caller's
+    Grok is xAI's Claude-Code-shaped CLI: noninteractive approval lets it run built-in
+    tools non-interactively, and `--cwd` roots it in the caller's
     repo. The prompt (AGENTIC_SYSTEM-prefixed) is written to a private temp file
     read via `--prompt-file` — NOT `-p <value>`, because grok's clap parser
     rejects a `-p` value starting with "-" (live-verified 2026-07-13), breaking on
@@ -948,9 +1026,17 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                     "--cwd",
                     cwd,
                     "--permission-mode",
-                    "acceptEdits",
+                    "bypassPermissions",
+                    "--always-approve",
+                    "--tools",
+                    "Bash,Read,Write,Edit",
+                    "--no-plan",
+                    "--no-memory",
+                    "--no-subagents",
+                    "--max-turns",
+                    "10",
                     "--output-format",
-                    "plain",
+                    "json",
                 ],
                 capture_output=True,
                 text=True,
@@ -960,13 +1046,40 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                 env=_grok_env(),
             )
         if result.returncode != 0:
+            quota = _cli_quota_error("Grok", result.stdout, result.stderr)
+            if quota:
+                raise quota
             raise BackendError(
                 "grok agentic subprocess failed",
                 backend="grok",
                 failure_kind="process_error",
                 elapsed_ms=round((time.perf_counter() - started) * 1000),
             )
-        return {"content": result.stdout.strip(), "usage": None}
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise BackendError(
+                "grok agentic returned invalid JSON",
+                backend="grok",
+                failure_kind="invalid_output",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            ) from exc
+        content = str(payload.get("text", "")).strip()
+        stop_reason = payload.get("stopReason")
+        num_turns = payload.get("num_turns", 0)
+        if stop_reason != "EndTurn" or not content or num_turns < 2:
+            raise BackendError(
+                "grok agentic completed without confirmed tool execution",
+                backend="grok",
+                failure_kind="no_tool_effect",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+        raw_usage = payload.get("usage") or {}
+        usage = {
+            "input_tokens": raw_usage.get("input_tokens", 0),
+            "output_tokens": raw_usage.get("output_tokens", 0),
+        }
+        return {"content": content, "usage": usage}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
@@ -1009,6 +1122,9 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
             env=_codex_env(),
         )
         if result.returncode != 0:
+            quota = _cli_quota_error("Codex", result.stdout, result.stderr)
+            if quota:
+                raise quota
             raise BackendError(
                 "Codex agentic subprocess failed",
                 backend="codex",
@@ -1055,6 +1171,8 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         "--no-session-persistence",
         "--tools",
         "default",
+        "--allowedTools",
+        "Read,Edit,Write,Bash",
         "--permission-mode",
         "acceptEdits",
     ]
@@ -1069,6 +1187,9 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             env=_agentic_cli_env(),
         )
         if result.returncode != 0:
+            quota = _cli_quota_error("Anthropic", result.stdout, result.stderr)
+            if quota:
+                raise quota
             raise BackendError(
                 "cc-brain claude agentic subprocess failed",
                 backend="anthropic-cli",

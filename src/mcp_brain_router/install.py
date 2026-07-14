@@ -28,6 +28,8 @@ from typing import Dict, Optional
 # Import actual config module
 from mcp_brain_router.config import (
     CONFIG_FILE,
+    DEFAULT_ROLE_MODES,
+    DEFAULT_ROLES,
     Config,
     ConfigError,
     ensure_config_dir,
@@ -222,20 +224,26 @@ def write_config(
     if codex_enabled and codex_model:
         model_overrides = {"adversarial": codex_model}
 
-    existing_roles = None
+    existing = None
     if config_file.exists():
         try:
-            existing_roles = Config.load().roles
+            existing = Config.load()
         except ConfigError:
-            existing_roles = None
+            existing = None
 
     config = Config(
         deepseek_key=deepseek_key,
         glm_key=glm_key,
         codex_enabled=codex_enabled,
+        grok_enabled=(
+            existing.grok_enabled
+            if existing is not None
+            else shutil.which("grok") is not None
+        ),
         headroom_base_url=headroom_url,
         model_overrides=model_overrides,
-        roles=existing_roles,
+        roles=existing.roles if existing is not None else DEFAULT_ROLES.copy(),
+        role_modes=DEFAULT_ROLE_MODES.copy(),
     )
 
     # Use Config.save() (handles TOML format + 0600 permissions)
@@ -264,76 +272,90 @@ def is_claude_registered() -> bool:
 
 
 def register_in_claude_code() -> bool:
-    """
-    Self-register the MCP in Claude Code.
+    """Backward-compatible single-client registration entrypoint."""
+    return _register_client(*_registration_specs(sys.executable)[0])
 
-    Computes the exact 'claude mcp add' command and attempts to run it.
-    After registration, verifies the entry appears in 'claude mcp list'.
-    If 'claude' is not on PATH, prints the command for manual execution.
 
-    Returns:
-        True if successfully registered and verified, False otherwise
-    """
-    python_exe = sys.executable
-    command = [
-        "claude",
-        "mcp",
-        "add",
-        "brain-router",
-        "-e",
-        "BRAIN_ROUTER_CALLER=claude",
-        "--",
-        python_exe,
-        "-m",
-        "mcp_brain_router.server",
-    ]
-    command_str = " ".join(command)
+def _registration_specs(python_exe: str) -> tuple[tuple, ...]:
+    return (
+        (
+            "Claude Code", "claude", ["claude", "mcp", "list"],
+            ["claude", "mcp", "add", "--scope", "user", "brain-router", "-e",
+             "BRAIN_ROUTER_CALLER=claude", "--", python_exe, "-m",
+             "mcp_brain_router.server"],
+        ),
+        (
+            "Codex", "codex", ["codex", "mcp", "list"],
+            ["codex", "mcp", "add", "brain-router", "--env",
+             "BRAIN_ROUTER_CALLER=codex", "--", python_exe, "-m",
+             "mcp_brain_router.server"],
+        ),
+        (
+            "Grok", "grok", ["grok", "mcp", "list"],
+            ["grok", "mcp", "add", "--scope", "user", "brain-router", "-e",
+             "BRAIN_ROUTER_CALLER=grok", "--", python_exe, "-m",
+             "mcp_brain_router.server"],
+        ),
+    )
 
-    # Check if already registered
-    if is_claude_registered():
-        print(f"{Color.GREEN}✓{Color.RESET} brain-router is already registered in Claude Code")
+
+def _register_client(
+    label: str, binary: str, list_cmd: list[str], add_cmd: list[str]
+) -> bool:
+    if shutil.which(binary) is None:
         return True
-
-    # Try to run the registration command
-    print(f"\n{Color.BOLD}Registering MCP in Claude Code...{Color.RESET}")
-
-    if shutil.which("claude") is None:
-        print(f"{Color.YELLOW}Warning:{Color.RESET} 'claude' command not found on PATH.")
-        print("Please run this command manually:")
-        print(f"\n  {Color.BOLD}{command_str}{Color.RESET}\n")
-        return False
-
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            # Verify registration by checking 'claude mcp list'
-            verify_result = subprocess.run(
-                ["claude", "mcp", "list"],
+        listed = subprocess.run(list_cmd, capture_output=True, text=True, timeout=10)
+        already_listed = listed.returncode == 0 and "brain-router" in listed.stdout
+        if already_listed and binary != "grok":
+            detail = subprocess.run(
+                [binary, "mcp", "get", "brain-router"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=10,
             )
-            if verify_result.returncode == 0 and "brain-router" in verify_result.stdout:
-                print(f"{Color.GREEN}✓{Color.RESET} MCP registered and verified in Claude Code")
+            caller_marker = (
+                "BRAIN_ROUTER_CALLER=claude"
+                if binary == "claude"
+                else "BRAIN_ROUTER_CALLER="
+            )
+            python_marker = add_cmd[-3]
+            if (
+                detail.returncode == 0
+                and caller_marker in detail.stdout
+                and python_marker in detail.stdout
+                and "mcp_brain_router.server" in detail.stdout
+            ):
+                print(f"{Color.GREEN}✓{Color.RESET} brain-router verified in {label}")
                 return True
-            else:
-                print(f"{Color.YELLOW}Warning:{Color.RESET} Registration succeeded but verification failed.")
-                print("Run 'claude mcp list' to confirm manual registration if needed.\n")
-                return False
-        else:
-            print(f"{Color.YELLOW}Warning:{Color.RESET} Registration may have failed.")
-            print(f"If needed, run manually:\n  {Color.BOLD}{command_str}{Color.RESET}\n")
-            if result.stderr:
-                print(f"Error output: {result.stderr}")
+
+        # Grok's `mcp add` is explicitly add-or-update. For Claude/Codex this
+        # also installs a missing entry; a stale existing entry fails loud
+        # instead of being accepted by name alone.
+        added = subprocess.run(add_cmd, capture_output=True, text=True, timeout=15)
+        if added.returncode != 0:
+            print(
+                f"{Color.YELLOW}Warning:{Color.RESET} {label} registration is stale "
+                "or could not be updated; remove brain-router and rerun installer"
+            )
             return False
-    except subprocess.TimeoutExpired:
-        print(f"{Color.YELLOW}Warning:{Color.RESET} Registration command timed out.")
-        print(f"Please run manually:\n  {Color.BOLD}{command_str}{Color.RESET}\n")
+        verified = subprocess.run(list_cmd, capture_output=True, text=True, timeout=10)
+        if verified.returncode == 0 and "brain-router" in verified.stdout:
+            print(f"{Color.GREEN}✓{Color.RESET} brain-router verified in {label}")
+            return True
+        print(f"{Color.YELLOW}Warning:{Color.RESET} {label} verification failed")
         return False
-    except Exception as e:
-        print(f"{Color.YELLOW}Warning:{Color.RESET} Could not auto-register: {e}")
-        print(f"Please run manually:\n  {Color.BOLD}{command_str}{Color.RESET}\n")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"{Color.YELLOW}Warning:{Color.RESET} {label}: {exc}")
         return False
+
+
+def register_in_supported_clients() -> bool:
+    """Register and verify every installed orchestrator CLI."""
+    results = [
+        _register_client(*spec) for spec in _registration_specs(sys.executable)
+    ]
+    return all(results)
 
 
 def run_smoke_test(
@@ -552,9 +574,9 @@ def main():
             headroom_url=headroom_url,
         )
 
-        # Register in Claude Code
-        print(f"\n{Color.BOLD}Step 5: Claude Code Registration{Color.RESET}")
-        registered = register_in_claude_code()
+        # Register in every installed orchestrator CLI.
+        print(f"\n{Color.BOLD}Step 5: Claude/Codex/Grok Registration{Color.RESET}")
+        registered = register_in_supported_clients()
 
         # Smoke test
         print(f"\n{Color.BOLD}Step 6: Smoke Tests{Color.RESET}")

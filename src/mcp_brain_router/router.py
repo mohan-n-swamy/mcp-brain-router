@@ -19,7 +19,6 @@ class Complexity(str, Enum):
 
     CHEAP = "cheap"
     CODE = "code"
-    GROK = "grok"
     ADVERSARIAL = "adversarial"
 
 
@@ -104,7 +103,7 @@ class Assignment:
 _PROVIDER_TARGETS = {
     Provider.DEEPSEEK: ("deepseek", Complexity.CHEAP),
     Provider.ZHIPU: ("glm", Complexity.CODE),
-    Provider.XAI: ("grok", Complexity.GROK),
+    Provider.XAI: ("grok", Complexity.CODE),
     Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
 }
 
@@ -219,9 +218,52 @@ async def route_assignment(
     # (it's the codex-orchestrator adversary / GLM+codex-exhausted fallback).
     # Dispatch straight to the agentic router by backend name.
     if assignment.backend == "anthropic-cli":
-        return await _route_agentic(
-            "anthropic-cli", prompt, assignment.model, config, cwd
-        )
+        try:
+            return await _route_agentic(
+                "anthropic-cli", prompt, assignment.model, config, cwd
+            )
+        except BackendQuotaError as e:
+            return RouteResult(
+                content="anthropic quota exhausted; advance to the next role candidate",
+                model="",
+                backend="none",
+                complexity=Complexity.CODE,
+                headroom_used=False,
+                exhausted=True,
+                tried=["anthropic-cli"],
+                reset_at=e.reset_at,
+                failure_kind="quota_exhausted",
+                failure_reason=str(e),
+            )
+    # Grok is a coding provider inside the role candidate list, not a public
+    # complexity tier. Dispatch it through the code machinery with its resolved
+    # model/backend while preserving role-owned quota fallback.
+    if assignment.provider is Provider.XAI:
+        _validate_credentials("grok", config)
+        try:
+            if mode == "agentic":
+                result = await _route_agentic(
+                    "grok", prompt, assignment.model, config, cwd
+                )
+            else:
+                result = await _route_grok(prompt, assignment.model, config)
+        except BackendQuotaError as e:
+            return RouteResult(
+                content="grok quota exhausted; advance to the next role candidate",
+                model="",
+                backend="none",
+                complexity=Complexity.CODE,
+                headroom_used=False,
+                exhausted=True,
+                tried=["grok"],
+                reset_at=e.reset_at,
+                failure_kind="quota_exhausted",
+                failure_reason=str(e),
+            )
+        result.complexity = Complexity.CODE
+        result.backend = "grok"
+        result.tried = ["grok"]
+        return result
     _, complexity = _PROVIDER_TARGETS[assignment.provider]
     return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd)
 
@@ -235,7 +277,6 @@ async def route_assignment(
 _TIER_BACKENDS = {
     Complexity.CHEAP: "glm",
     Complexity.CODE: "glm",
-    Complexity.GROK: "grok",
     Complexity.ADVERSARIAL: "codex",
 }
 
@@ -331,6 +372,9 @@ async def route(
     """
     if config is None:
         config = Config.load()
+
+    if mode == "agentic" and not cwd:
+        raise ValueError("cwd is required for agentic routing")
 
     backend_name, model = _resolve_backend_and_model(complexity, model_override, config)
     _validate_credentials(backend_name, config)
@@ -469,8 +513,8 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # FAST GLM (glm-4.7); the `code` tier keeps glm-5.2. The model override
         # axis (config [model_overrides] cheap=) still wins over this default.
         "glm-cheap": "glm-4.7",
-        # xAI Grok agentic CLI worker (grok.com OAuth, no API key). Sits between
-        # the `code` (GLM) and `adversarial` (Codex) tiers in the caller's cascade.
+        # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
+        # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",
         # Keep production default until the representative adversarial eval
         # promotes a GPT-5.6 candidate. Terra/Luna remain explicit overrides.
@@ -591,7 +635,7 @@ async def _route_grok(
         content=result["content"],
         model=model,
         backend="grok",
-        complexity=Complexity.GROK,
+        complexity=Complexity.CODE,
         headroom_used=False,
         usage=result.get("usage"),
     )
