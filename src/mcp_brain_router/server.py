@@ -40,6 +40,13 @@ from .router import (
     route_assignment,
 )
 
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("mcp-brain-router")
+except Exception:  # editable/dev checkout without installed metadata
+    __version__ = "0.0.0.dev"
+
 # Configure logging to stderr so it doesn't pollute stdout (used by stdio transport).
 logging.basicConfig(
     level=logging.INFO,
@@ -756,7 +763,26 @@ def main():
     stays a plain sync function — matches the pyproject `server:main` script and
     avoids an asyncio.run wrapper. (mcp SDK 1.28: run_stdio() does not exist;
     the public surface is run(transport=...) / run_stdio_async().)
+
+    `--help`/`--version` short-circuit BEFORE the server starts, so a probe
+    (e.g. a Homebrew test) can confirm the install without hanging on the
+    blocking stdio loop.
     """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="mcp-brain-router",
+        description=(
+            "mcp-brain-router: MCP server that routes delegated LLM work across a "
+            "role-owned provider cascade (GLM, Grok, Codex) with native Claude Code "
+            "orchestration. Run with no arguments to start the stdio MCP server."
+        ),
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"mcp-brain-router {__version__}"
+    )
+    parser.parse_args()
+
     server = create_server()
     logger.info("Starting mcp-brain-router MCP server (stdio transport)...")
     server.run(transport="stdio")
