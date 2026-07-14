@@ -36,6 +36,13 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
     "simple": "agentic",
 }
 
+DEFAULT_ROLES: Dict[str, List[str]] = {
+    "thinker": ["claude-fable-5", "gpt-5.6-sol"],
+    "adversary": ["claude-opus-4-8", "gpt-5.6-sol"],
+    "worker": ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"],
+    "simple": ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"],
+}
+
 
 def ensure_config_dir() -> Path:
     """Create config directory with secure permissions if needed."""
@@ -49,6 +56,7 @@ class Config:
     deepseek_key: Optional[str] = None
     glm_key: Optional[str] = None
     codex_enabled: bool = False
+    grok_enabled: bool = False
     headroom_base_url: Optional[str] = None
     model_overrides: Optional[Dict[str, str]] = None
     roles: Optional[Dict[str, List[str]]] = None
@@ -86,10 +94,13 @@ class Config:
             deepseek_key=data.get("deepseek_key"),
             glm_key=data.get("glm_key"),
             codex_enabled=data.get("codex_enabled", False),
+            grok_enabled=data.get("grok_enabled", False),
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
-            roles=data.get("roles") or {},
-            role_modes=DEFAULT_ROLE_MODES | (data.get("role_modes") or {}),
+            roles=DEFAULT_ROLES | (data.get("roles") or {}),
+            # Role delegation is agentic-only. Older config files may still
+            # contain chat overrides; normalize them during the shard migration.
+            role_modes=DEFAULT_ROLE_MODES.copy(),
         )
 
     def save(self) -> None:
@@ -104,6 +115,8 @@ class Config:
             lines.append(f'glm_key = "{self._escape_toml(self.glm_key)}"')
         if self.codex_enabled:
             lines.append("codex_enabled = true")
+        if self.grok_enabled:
+            lines.append("grok_enabled = true")
         if self.headroom_base_url:
             lines.append(
                 f'headroom_base_url = "{self._escape_toml(self.headroom_base_url)}"'

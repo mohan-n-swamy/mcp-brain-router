@@ -16,6 +16,11 @@ glm_key = "sk-xxxxxxxxxxxxx"
 # Set to true only if 'codex' binary is installed and on PATH
 codex_enabled = false
 
+# Grok CLI availability (xAI coding provider for role-based worker cascades)
+# Set to true only if 'grok' binary is installed and on PATH. No API key: grok
+# authenticates via `grok login` (grok.com), so there is no grok_key field.
+grok_enabled = false
+
 # Headroom proxy base URL (optional)
 # If set, routes DeepSeek and GLM through this proxy for token caching/compression
 # Leave commented to use direct API calls
@@ -26,6 +31,7 @@ codex_enabled = false
 [model_overrides]
 # cheap = "deepseek-v4-flash"   # default
 # code = "glm-5.2"               # default
+# grok = "grok-4.5"              # default (grok-composer-2.5-fast is the fast variant)
 # adversarial = "gpt-5.5"        # current default
 # adversarial = "gpt-5.6-sol"    # capability-first candidate; promote after eval
 
@@ -33,8 +39,7 @@ codex_enabled = false
 # IDs with model IDs accepted by your native clients. The router never calls
 # Anthropic; Anthropic candidates return execute_natively=true assignments.
 [roles]
-thinker = ["sol-model-id", "fable-model-id"]
-adversary = ["terra-model-id", "opus-model-id"]
-worker = ["glm-5.2", "gpt-5.5", "sonnet-model-id"]
-# After representative eval promotion: ["glm-5.2", "gpt-5.6-sol", "sonnet-model-id"]
-simple = ["glm-4.7", "luna-model-id", "haiku-model-id"]
+thinker = ["claude-fable-5", "gpt-5.6-sol"]
+adversary = ["claude-opus-4-8", "gpt-5.6-sol"]
+worker = ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
+simple = ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"]
