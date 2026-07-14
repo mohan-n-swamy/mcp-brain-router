@@ -23,11 +23,43 @@ shard: GLM → Grok → Codex → Claude, quota-only advancement.
 
 ## Blocker
 
-None. All V-gates green.
+**main (`16fc2b8`) has a CONFIRMED crash-on-transient bug — shipped, unfixed.** §9.6
+adversarial-verify (workflow `wf_2e970209-1ff`, 5 lenses, 23 agents) ran AFTER merge and
+CONFIRMED 6 findings (the manufacturing-gate was right to block the "shipped-clean" claim):
+
+- **CRITICAL ×2 (same root cause) — the load-bearing bug:** `route()` (router.py:395) and
+  `route_assignment()` (router.py:221, +grok path :250) catch ONLY `BackendQuotaError`.
+  Backends raise `BackendTransientError` (backends.py:384, a SIBLING class not subclass) on
+  5xx/timeout. → transient error escapes UNHANDLED → GLM 503 or codex 360s-timeout CRASHES
+  the delegate instead of returning a clean failure. 126 green unit tests missed it (mock the boundary).
+- **CRITICAL ×2 (security, lower real-world sev):** `BRAIN_ROUTER_CALLER` read from env
+  (server.py:115, :313) with NO whitelist validation → spoofed caller bypasses
+  adversary-excludes-orchestrator (server.py:328 only gates known callers). Attacker needs
+  process-env compromise, so defer-able but confirmed.
+- **HIGH ×1:** same transient-escape at the classify layer (backends.py:445 classifies
+  correctly, caller drops it). **MEDIUM ×1:** BRAIN_ROUTER_CALLER single-point-of-failure, no G-guard.
+- 8 findings were adversarially triaged FALSE_POSITIVE; 1 UNVERIFIABLE_FROM_CODE (anthropic-cli
+  quota-marker match depends on runtime CLI output — flag, don't assert).
+
+Deploy also incomplete: MCP not restarted to serve main; served==built V-gate not run.
 
 ## Next action
 
-- [ ] Land: commit shard migration → PR → merge to main → `git checkout main` → restart MCP → V-gate served==built (`delegate role='worker'` from a fresh session).
+- [ ] **FIX the transient-escape bug (user approved "fix exception-handler now", interrupted before Edit).**
+  DESIGN (already traced): do NOT copy the refuter's "advance cascade same as quota" — backends.py:406-408
+  comment is explicit that transient ≠ exhausted (a 503 blip must NOT burn the whole cascade). Correct fix:
+  catch `BackendTransientError` at router.py:395 AND :221 AND :250 → return a structured `RouteResult`
+  with `exhausted=False`, `failure_kind="transient_error"`, `backend="none"` (clean failure, no false-advance).
+  Pattern: `except (BackendQuotaError, BackendTransientError) as e:` then branch on type for exhausted flag,
+  OR a second `except BackendTransientError` block. G-guard: `test_transient_does_not_crash_and_not_exhausted`
+  (unit test asserting a raised BackendTransientError → RouteResult exhausted=False, no exception).
+  WAS MID-TRACE: needed to read server.py cascade loop (how it reads `exhausted` vs an exception) to place fix — do that first.
+- [ ] Re-run suite (126+G-guard) + ruff + diff-check. Commit on a `fix/transient-cascade` branch → PR → merge.
+- [ ] Defer (or same session): caller-identity whitelist validation (server.py:115/313) + G-guard.
+- [ ] THEN deploy: restart brain-router MCP (editable install → serves main), V-gate `delegate role='worker'` → WORKER_ROLE_OK (served==built).
+- [ ] Optional: delete branch `feat/grok-backend-tier`; update [[mcp-brain-router]] wiki page.
+
+Full verify result: `/private/tmp/claude-502/-Users-mohannarayanswamy-code-workshop/2018fb71-702f-48b0-a4e8-d414a28ce886/tasks/wisewq394.output` (610 lines).
 
 ---
 _Refresh with `bin/gen-status.rb mcp-brain-router` before /save, /park, /wrap-up. Machine header (Updated/Branch/HEAD/Tree) is auto-filled; the prose is yours._
