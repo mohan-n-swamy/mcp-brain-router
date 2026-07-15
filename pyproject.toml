@@ -46,6 +46,19 @@ mcp-brain-router-install = "mcp_brain_router.install:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_brain_router"]
 
+[tool.hatch.build.targets.sdist]
+# Explicit allowlist — keep local tooling/scratch (.serena, .wrap-up-temp,
+# STATUS.md, specs) OUT of the published sdist.
+include = [
+    "src/mcp_brain_router",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "COMPLIANCE.md",
+    "config.example.toml",
+    "pyproject.toml",
+]
+
 [tool.black]
 line-length = 100
 target-version = ["py310", "py311", "py312"]
