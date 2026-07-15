@@ -19,7 +19,21 @@ Every role call is agentic-only and requires `cwd`. Timeouts, authentication err
 
 ## Install
 
-**Zero-friction setup:**
+**pipx (recommended — fast, isolated):**
+
+```bash
+pipx install mcp-brain-router
+mcp-brain-router-install
+```
+
+**Homebrew:**
+
+```bash
+brew install mohan-n-swamy/tap/mcp-brain-router
+mcp-brain-router-install
+```
+
+**From source (dev):**
 
 ```bash
 git clone https://github.com/mohan-n-swamy/mcp-brain-router.git
