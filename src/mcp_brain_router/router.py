@@ -47,6 +47,7 @@ class Provider(str, Enum):
     CODEX = "codex"           # every gpt-* / sol / terra / luna id (OpenAI Codex CLI)
     ZHIPU = "zhipu"           # glm-4.7 / glm-5.2
     XAI = "xai"               # grok-4.5 / grok-composer-* (xAI Grok CLI)
+    KIMI = "kimi"             # kimi (Kimi Code CLI, OAuth login)
     DEEPSEEK = "deepseek"
 
 
@@ -68,6 +69,7 @@ _MODEL_PROVIDER_PREFIXES = (
     ("o3", Provider.CODEX),
     ("glm", Provider.ZHIPU),
     ("grok", Provider.XAI),
+    ("kimi", Provider.KIMI),
     ("deepseek", Provider.DEEPSEEK),
 )
 
@@ -104,6 +106,7 @@ _PROVIDER_TARGETS = {
     Provider.DEEPSEEK: ("deepseek", Complexity.CHEAP),
     Provider.ZHIPU: ("glm", Complexity.CODE),
     Provider.XAI: ("grok", Complexity.CODE),
+    Provider.KIMI: ("kimi", Complexity.CODE),
     Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
 }
 
@@ -293,6 +296,48 @@ async def route_assignment(
         result.backend = "grok"
         result.tried = ["grok"]
         return result
+    # Kimi, like Grok, is a coding provider inside the role candidate list, not
+    # a public complexity tier. Dispatch it through the code machinery with its
+    # resolved model/backend while preserving role-owned quota fallback.
+    if assignment.provider is Provider.KIMI:
+        _validate_credentials("kimi", config)
+        try:
+            if mode == "agentic":
+                result = await _route_agentic(
+                    "kimi", prompt, assignment.model, config, cwd
+                )
+            else:
+                result = await _route_kimi(prompt, assignment.model, config)
+        except BackendQuotaError as e:
+            return RouteResult(
+                content="kimi quota exhausted; advance to the next role candidate",
+                model="",
+                backend="none",
+                complexity=Complexity.CODE,
+                headroom_used=False,
+                exhausted=True,
+                tried=["kimi"],
+                reset_at=e.reset_at,
+                failure_kind="quota_exhausted",
+                failure_reason=str(e),
+            )
+        except BackendTransientError as e:
+            # Transient 5xx/timeout → advance the cascade (see anthropic-cli note).
+            return RouteResult(
+                content="kimi transient error; advance to the next role candidate",
+                model="",
+                backend="none",
+                complexity=Complexity.CODE,
+                headroom_used=False,
+                exhausted=True,
+                tried=["kimi"],
+                failure_kind="transient_error",
+                failure_reason=str(e),
+            )
+        result.complexity = Complexity.CODE
+        result.backend = "kimi"
+        result.tried = ["kimi"]
+        return result
     _, complexity = _PROVIDER_TARGETS[assignment.provider]
     return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd)
 
@@ -417,6 +462,8 @@ async def route(
             result = await _route_glm(prompt, model, config)
         elif backend_name == "grok":
             result = await _route_grok(prompt, model, config)
+        elif backend_name == "kimi":
+            result = await _route_kimi(prompt, model, config)
         elif backend_name == "codex":
             result = await _route_codex(prompt, model, config)
         else:  # pragma: no cover - _TIER_BACKENDS is the closed set
@@ -495,6 +542,11 @@ async def _route_agentic(
             backends.call_grok_agentic, prompt, model, cwd
         )
         label = "grok"
+    elif backend_name == "kimi":
+        result = await asyncio.to_thread(
+            backends.call_kimi_agentic, prompt, model, cwd
+        )
+        label = "kimi"
     elif backend_name == "codex":
         result = await asyncio.to_thread(
             backends.call_codex_agentic, prompt, model, cwd
@@ -505,7 +557,7 @@ async def _route_agentic(
             backends.call_anthropic_agentic, prompt, model, cwd
         )
         label = "anthropic-cli"
-    else:  # pragma: no cover - agentic mode only targets these three
+    else:  # pragma: no cover - agentic mode only targets these harnesses
         raise ValueError(f"No agentic harness for backend: {backend_name}")
 
     return RouteResult(
@@ -565,6 +617,11 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",
+        # Kimi Code CLI agentic worker (OAuth login, no API key). It is a
+        # coding provider selected by role routing, not a public complexity
+        # tier. No -m flag is passed — the CLI runs its configured default
+        # model, so the router model id is just "kimi".
+        "kimi": "kimi",
         # Keep production default until the representative adversarial eval
         # promotes a GPT-5.6 candidate. Terra/Luna remain explicit overrides.
         "codex": "gpt-5.5",
@@ -590,6 +647,12 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
         # is a boolean enable flag like Codex, not a stored credential.
         if not config.grok_enabled:
             raise BackendUnavailableError("grok", "Grok not enabled or not available on PATH")
+    elif backend_name == "kimi":
+        # Kimi is a CLI worker (Kimi Code CLI OAuth login, no API key).
+        # Availability is a boolean enable flag like Grok/Codex, not a stored
+        # credential.
+        if not config.kimi_enabled:
+            raise BackendUnavailableError("kimi", "Kimi not enabled or not available on PATH")
     elif backend_name == "codex":
         if not config.codex_enabled:
             raise BackendUnavailableError("codex", "Codex not enabled or not available on PATH")
@@ -684,6 +747,34 @@ async def _route_grok(
         content=result["content"],
         model=model,
         backend="grok",
+        complexity=Complexity.CODE,
+        headroom_used=False,
+        usage=result.get("usage"),
+    )
+
+
+async def _route_kimi(
+    prompt: str,
+    model: str,
+    config: Config,
+) -> RouteResult:
+    """Route to Kimi backend (subprocess-based, chat mode).
+
+    Like Grok/Codex, the Kimi CLI is subprocess-based (BLOCKING
+    subprocess.run), so offload to a worker thread to keep the async MCP stdio
+    event loop responsive (same freeze/keepalive reasoning as _route_codex).
+    Kimi is not HTTP-based, so it never uses headroom.
+    """
+    result = await asyncio.to_thread(
+        backends.call_kimi,
+        prompt,
+        model,
+    )
+
+    return RouteResult(
+        content=result["content"],
+        model=model,
+        backend="kimi",
         complexity=Complexity.CODE,
         headroom_used=False,
         usage=result.get("usage"),

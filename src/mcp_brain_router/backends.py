@@ -144,6 +144,14 @@ _CC_BRAIN_BIN = _resolve_bin("cc-brain")
 # shell to it. The caller-supplied absolute cwd controls placement; it is not
 # an OS-level filesystem sandbox.
 _GROK_BIN = _resolve_bin("grok")
+# Kimi Code CLI (kimi.com OAuth device-code login, no API key). A bundled
+# binary (NOT a node shim like codex/cc-glm), so its subprocess needs only
+# kimi's own bin dir on PATH — no node runtime resolution. Both the chat
+# (`kimi -p`) and agentic (`kimi -p --auto`) paths shell to it. The
+# caller-supplied absolute cwd controls placement; it is not an OS-level
+# filesystem sandbox. Fallback dir is ~/.kimi-code/bin (the installer layout)
+# for the empty-PATH MCP-process case.
+_KIMI_BIN = _resolve_bin("kimi", ("~/.kimi-code/bin",))
 
 
 # Codex agentic base flags — SAME lean worker profile as CODEX_EXEC_BASE
@@ -227,6 +235,20 @@ def _grok_env() -> Dict[str, str]:
     if grok_bin:
         current = env.get("PATH", "")
         env["PATH"] = os.pathsep.join([grok_bin, current]) if current else grok_bin
+    return env
+
+
+def _kimi_env() -> Dict[str, str]:
+    """Env for the kimi subprocess. Kimi is a bundled binary (not an
+    `#!/usr/bin/env node` shim like codex/cc-glm), so ONLY kimi's own bin dir
+    needs prepending for the empty-env MCP-process case (`"env": {}`) — there is
+    no node-runtime shebang to resolve. Existing PATH is preserved; the dir is
+    only prepended, so a normal shell launch is unaffected."""
+    env = _base_cli_env()
+    kimi_bin = os.path.dirname(_KIMI_BIN) if os.path.sep in _KIMI_BIN else ""
+    if kimi_bin:
+        current = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([kimi_bin, current]) if current else kimi_bin
     return env
 
 
@@ -921,6 +943,85 @@ def call_grok(
 
 
 # ============================================================================
+# Kimi (subprocess-based, chat mode)
+# ============================================================================
+
+
+def call_kimi(
+    prompt: str,
+    model: str,
+) -> Dict[str, Any]:
+    """Call Kimi CLI via subprocess (chat mode): `kimi -p <prompt> --output-format text`.
+
+    The prompt (CAVEMAN_SYSTEM-prefixed) travels as ONE argv token after `-p`.
+    Unlike grok's clap (which rejects a `-p` value starting with "-"), kimi's
+    parser is only at risk from a dash-leading value — and the system directive
+    is ALWAYS prepended, so the token can never start with a dash; no
+    prompt-file indirection is needed. The `model` arg is accepted for
+    signature parity with the other backends but NOT passed to the CLI: kimi
+    runs its configured default model (the router model id is just "kimi").
+    Kimi is a bundled binary so only _kimi_env's kimi-bin PATH prepend is
+    needed. Auth is OAuth (device-code login done on the machine); no API key.
+
+    Returns:
+        {"content": "response text", "usage": None}  (kimi CLI exposes no token counts)
+
+    Raises:
+        BackendError / BackendTransientError on invalid model, non-zero exit, or timeout.
+    """
+    _validate_model_name(model)
+
+    started = time.perf_counter()
+    try:
+        result = subprocess.run(
+            [
+                _KIMI_BIN,
+                "-p",
+                f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+                "--output-format",
+                "text",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=CODEX_TIMEOUT_SECONDS,
+            check=False,
+            env=_kimi_env(),
+        )
+
+        if result.returncode != 0:
+            quota = _cli_quota_error("Kimi", result.stdout, result.stderr)
+            if quota:
+                raise quota
+            raise BackendError(
+                "Kimi subprocess failed",
+                backend="kimi",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+
+        return {
+            "content": result.stdout.strip(),
+            "usage": None,
+        }
+
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "kimi",
+            f"Kimi subprocess timed out after {CODEX_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "Kimi binary not found on PATH",
+            backend="kimi",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+# ============================================================================
 # Agentic worker backends (spec 002) — shell to a per-provider CLI harness in
 # the REAL working directory so the worker reads the spec, writes files, and
 # runs checks itself. Each returns the {content, ...} dict shape the chat
@@ -1092,6 +1193,70 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
         raise BackendError(
             "grok binary not found on PATH",
             backend="grok",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    """Agentic Kimi worker: `kimi -p <prompt> --output-format text` in the
+    REAL cwd.
+
+    Kimi's prompt mode already runs non-interactively and auto-approves its
+    tool calls — live-verified 2026-07-19: a `-p` file-write task wrote the
+    file in the subprocess cwd and exited 0 with no approval flag. `--auto` /
+    `--yolo` are interactive-session flags and are REJECTED when combined with
+    `-p` ("Cannot combine --prompt with --auto"), so none is passed; `cwd=`
+    roots the subprocess in the caller's repo. The prompt (AGENTIC_SYSTEM-
+    prefixed — the file write is the deliverable, and the chat-terse directive
+    suppresses tool use in weaker workers, root-caused 2026-07-12 for GLM)
+    travels as ONE argv token after `-p`; the directive guarantees the token
+    never starts with a dash. `model` is accepted for signature parity but NOT
+    passed: kimi runs its configured default model. Kimi is a bundled binary,
+    so only _kimi_env's kimi-bin PATH prepend is needed. Auth is OAuth; no API
+    key."""
+    _validate_model_name(model)
+    cwd = _resolve_agentic_cwd(cwd, "kimi")
+    started = time.perf_counter()
+    try:
+        result = subprocess.run(
+            [
+                _KIMI_BIN,
+                "-p",
+                f"{AGENTIC_SYSTEM}\n\n{prompt}",
+                "--output-format",
+                "text",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=AGENTIC_TIMEOUT_SECONDS,
+            check=False,
+            cwd=cwd,
+            env=_kimi_env(),
+        )
+        if result.returncode != 0:
+            quota = _cli_quota_error("Kimi", result.stdout, result.stderr)
+            if quota:
+                raise quota
+            raise BackendError(
+                "kimi agentic subprocess failed",
+                backend="kimi",
+                failure_kind="process_error",
+                elapsed_ms=round((time.perf_counter() - started) * 1000),
+            )
+        return {"content": result.stdout.strip(), "usage": None}
+    except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        raise BackendTransientError(
+            "kimi",
+            f"kimi agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
+            failure_kind="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "kimi binary not found on PATH",
+            backend="kimi",
             failure_kind="configuration_error",
             elapsed_ms=round((time.perf_counter() - started) * 1000),
         )

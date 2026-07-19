@@ -57,6 +57,7 @@ class Config:
     glm_key: Optional[str] = None
     codex_enabled: bool = False
     grok_enabled: bool = False
+    kimi_enabled: bool = False
     headroom_base_url: Optional[str] = None
     model_overrides: Optional[Dict[str, str]] = None
     roles: Optional[Dict[str, List[str]]] = None
@@ -95,6 +96,7 @@ class Config:
             glm_key=data.get("glm_key"),
             codex_enabled=data.get("codex_enabled", False),
             grok_enabled=data.get("grok_enabled", False),
+            kimi_enabled=data.get("kimi_enabled", False),
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
             roles=DEFAULT_ROLES | (data.get("roles") or {}),
@@ -117,6 +119,8 @@ class Config:
             lines.append("codex_enabled = true")
         if self.grok_enabled:
             lines.append("grok_enabled = true")
+        if self.kimi_enabled:
+            lines.append("kimi_enabled = true")
         if self.headroom_base_url:
             lines.append(
                 f'headroom_base_url = "{self._escape_toml(self.headroom_base_url)}"'
