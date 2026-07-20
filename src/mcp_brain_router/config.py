@@ -37,9 +37,9 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    "thinker": ["claude-fable-5", "gpt-5.6-sol"],
-    "adversary": ["claude-opus-4-8", "gpt-5.6-sol"],
-    "worker": ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"],
+    "thinker": ["kimi", "claude-fable-5", "gpt-5.6-sol"],
+    "adversary": ["kimi", "claude-opus-4-8", "gpt-5.6-sol"],
+    "worker": ["glm-5.2", "kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"],
     "simple": ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"],
 }
 
