@@ -41,5 +41,5 @@ grok_enabled = false
 [roles]
 thinker = ["claude-fable-5", "gpt-5.6-sol"]
 adversary = ["claude-opus-4-8", "gpt-5.6-sol"]
-worker = ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
-simple = ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"]
+worker = ["kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
+simple = ["gpt-5.6-luna", "claude-haiku-4-5-20251001"]

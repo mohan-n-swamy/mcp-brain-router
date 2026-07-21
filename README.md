@@ -101,7 +101,7 @@ delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo"
 
 Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
 router-selected. Candidate order comes only from `[roles]`. Standard worker
-order is GLM → Grok → Codex → Claude. Only genuine quota exhaustion advances;
+order is Kimi → Grok → Codex → Claude. Only genuine quota exhaustion advances;
 timeouts, process errors, authentication failures, and empty answers stop loud.
 All public role calls are agentic-only and require absolute `cwd`. Anthropic
 candidates run through `cc-brain claude`. Only the adversary role excludes the
@@ -109,21 +109,23 @@ orchestrator's provider; every other role may use it.
 
 Legacy `delegate(complexity=..., prompt=...)` remains supported and single-tier.
 Use it only for an explicit one-provider request, not the standard cascade.
+(`cheap`/`code` still map to GLM when you ask for that tier explicitly — GLM is
+off the role cascades.)
 
 ## Tier Map
 
 | Tier | Backend | Model | Use Case | Cost | Speed |
 |------|---------|-------|----------|------|-------|
 | `cheap` | GLM | glm-4.7 | Explicit fast single-provider request | — | Fastest |
-| `code` | GLM | glm-5.2 | Code review, algorithm design, debugging | ~$0.50/1M tokens | Fast |
+| `code` | GLM | glm-5.2 | Explicit single-provider code request | ~$0.50/1M tokens | Fast |
 | `adversarial` | Codex | gpt-5.5, low effort (via Codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
 
 ### Enforced role policy
 
-- `worker`: GLM 5.2 → Grok → Codex Terra → Claude Sonnet 5.
-- `simple`: GLM 4.7 → Codex Luna → Claude Haiku.
-- `thinker`: Claude Fable → Codex Sol.
-- `adversary`: Claude Opus 4.8 → Codex Sol; candidate matching the orchestrator provider is skipped.
+- `worker`: Kimi → Grok → Codex Terra → Claude Sonnet 5.
+- `simple`: Codex Luna → Claude Haiku.
+- `thinker`: Kimi → Claude Fable → Codex Sol.
+- `adversary`: Kimi → Claude Opus 4.8 → Codex Sol; candidate matching the orchestrator provider is skipped.
 - Provider advancement happens only on confirmed quota exhaustion. Timeout,
   process, authentication, permission, and empty-output failures stop loud.
 
@@ -187,8 +189,8 @@ adversarial = "gpt-5.5"
 [roles]
 thinker = ["kimi", "claude-fable-5", "gpt-5.6-sol"]
 adversary = ["kimi", "claude-opus-4-8", "gpt-5.6-sol"]
-worker = ["glm-5.2", "kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
-simple = ["glm-4.7", "gpt-5.6-luna", "claude-haiku-4-5-20251001"]
+worker = ["kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
+simple = ["gpt-5.6-luna", "claude-haiku-4-5-20251001"]
 ```
 
 ### GPT-5.6 routing policy
