@@ -1,0 +1,22 @@
+{
+  "generatedAt": "2026-07-30T04:47:26Z",
+  "local": {
+    "head": "e5524eb",
+    "branch": "main",
+    "clean": false,
+    "lastCommit": "2026-07-21 13:12:11 +0530 feat: yank GLM from default role cascades",
+    "versions": {
+      "package": "0.1.1"
+    },
+    "workingTreeNote": "DIRTY: budget-optimized DEFAULT_ROLES + universal skip-self uncommitted (config.py/router.py/server.py/tests/test_roles.py/README/STATUS). Docs pin working-tree truth; snapshot HEAD remains e5524eb.",
+    "safetyTag": "rebase-pre-20260730-1016"
+  },
+  "vps": {
+    "checked": true,
+    "host": "kamakshi",
+    "hostname": "vultr",
+    "brainRouterDeployed": false,
+    "note": "ssh BatchMode OK. No mcp-brain-router container/config/state on host. openbrain-* containers unrelated. Project is local stdio MCP on Mac clients.",
+    "head": null
+  }
+}

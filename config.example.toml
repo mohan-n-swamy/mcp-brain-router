@@ -6,13 +6,13 @@
 # API keys are stored securely (user-read-only, 0600 permissions).
 # Never check real keys into git — only this example template.
 
-# DeepSeek API key (for "cheap" complexity tier)
+# DeepSeek API key (legacy HTTP path / install smoke; not a default role candidate)
 deepseek_key = "sk-xxxxxxxxxxxxx"
 
-# GLM (Zhipu) API key (for "code" complexity tier)
+# GLM (Zhipu) API key — used by explicit complexity cheap|code (not default role shards)
 glm_key = "sk-xxxxxxxxxxxxx"
 
-# Codex CLI availability (for "adversarial" complexity tier)
+# Codex CLI availability (role cascades + complexity=adversarial)
 # Set to true only if 'codex' binary is installed and on PATH
 codex_enabled = false
 
@@ -21,25 +21,26 @@ codex_enabled = false
 # authenticates via `grok login` (grok.com), so there is no grok_key field.
 grok_enabled = false
 
-# Headroom proxy base URL (optional)
-# If set, routes DeepSeek and GLM through this proxy for token caching/compression
+# Kimi CLI availability (volume lead on worker/simple; mid cascade on thinker/adversary)
+# Set to true only if 'kimi' binary is installed and on PATH. OAuth via kimi login.
+kimi_enabled = false
+
+# Headroom proxy base URL (optional) — only matters for HTTP chat DeepSeek/GLM paths
 # Leave commented to use direct API calls
 # headroom_base_url = "http://localhost:8282"
 
 # Model overrides per complexity tier (optional)
-# Overrides the default model for each tier
 [model_overrides]
-# cheap = "deepseek-v4-flash"   # default
-# code = "glm-5.2"               # default
-# grok = "grok-4.5"              # default (grok-composer-2.5-fast is the fast variant)
+# cheap = "glm-4.7"
+# code = "glm-5.2"
 # adversarial = "gpt-5.5"        # current default
 # adversarial = "gpt-5.6-sol"    # capability-first candidate; promote after eval
 
-# Ordered candidates for role-based routing. Replace Codex/Anthropic placeholder
-# IDs with model IDs accepted by your native clients. The router never calls
-# Anthropic; Anthropic candidates return execute_natively=true assignments.
+# Ordered candidates for role-based routing (budget-optimized 2026-07-26).
+# Every role skips the orchestrator's own provider (skip-self).
+# GLM is intentionally absent from role lists — use complexity=cheap|code instead.
 [roles]
-thinker = ["claude-fable-5", "gpt-5.6-sol"]
-adversary = ["claude-opus-4-8", "gpt-5.6-sol"]
-worker = ["kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
-simple = ["gpt-5.6-luna", "claude-haiku-4-5-20251001"]
+thinker = ["claude-fable-5", "kimi", "gpt-5.6-sol"]
+adversary = ["claude-opus-4-8", "kimi", "gpt-5.6-sol"]
+worker = ["kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"]
+simple = ["kimi", "claude-haiku-4-5-20251001", "gpt-5.6-luna"]

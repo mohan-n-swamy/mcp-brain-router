@@ -8,14 +8,14 @@ An MCP server for Claude Code and Codex that delegates agentic sub-tasks to exte
 
 ## Why It Exists
 
-Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker shard and its quota-only fallback policy:
+Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker shard and its quota/transient fallback policy (budget-optimized defaults, 2026-07-26):
 
-- **Worker**: GLM 5.2 → Grok → Codex Terra → Claude Sonnet 5.
-- **Simple**: GLM 4.7 → Codex Luna → Claude Haiku.
-- **Thinker**: Claude Fable → Codex Sol.
-- **Adversary**: Claude Opus 4.8 → Codex Sol, excluding the orchestrator's provider.
+- **Worker**: Kimi → Grok 4.5 → Claude Sonnet 5 → Codex Terra.
+- **Simple**: Kimi → Claude Haiku → Codex Luna.
+- **Thinker**: Claude Fable 5 → Kimi → Codex Sol.
+- **Adversary**: Claude Opus 4.8 → Kimi → Codex Sol.
 
-Every role call is agentic-only and requires `cwd`. Timeouts, authentication errors, process errors, and empty output stop loud; they never trigger provider fallback.
+Every role skips the orchestrator's own provider (skip-self). Every role call is agentic-only and requires `cwd`. Timeouts, authentication errors, process errors, and empty output stop loud; they never trigger provider fallback. Only confirmed quota exhaustion or transient backend errors advance the shard.
 
 ## Install
 
@@ -101,11 +101,12 @@ delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo"
 
 Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
 router-selected. Candidate order comes only from `[roles]`. Standard worker
-order is Kimi → Grok → Codex → Claude. Only genuine quota exhaustion advances;
+order is Kimi → Grok → Claude → Codex. Only genuine quota exhaustion advances;
 timeouts, process errors, authentication failures, and empty answers stop loud.
 All public role calls are agentic-only and require absolute `cwd`. Anthropic
-candidates run through `cc-brain claude`. Only the adversary role excludes the
-orchestrator's provider; every other role may use it.
+candidates run through `cc-brain claude`. Every role skips the orchestrator's
+own provider (skip-self): a role routes work AWAY from the brain you are
+already running, so e.g. a Kimi orchestrator's worker starts at Grok.
 
 Legacy `delegate(complexity=..., prompt=...)` remains supported and single-tier.
 Use it only for an explicit one-provider request, not the standard cascade.
@@ -122,12 +123,14 @@ off the role cascades.)
 
 ### Enforced role policy
 
-- `worker`: Kimi → Grok → Codex Terra → Claude Sonnet 5.
-- `simple`: Codex Luna → Claude Haiku.
-- `thinker`: Kimi → Claude Fable → Codex Sol.
-- `adversary`: Kimi → Claude Opus 4.8 → Codex Sol; candidate matching the orchestrator provider is skipped.
-- Provider advancement happens only on confirmed quota exhaustion. Timeout,
-  process, authentication, permission, and empty-output failures stop loud.
+- `worker`: Kimi → Grok 4.5 → Claude Sonnet 5 → Codex Terra.
+- `simple`: Kimi → Claude Haiku → Codex Luna.
+- `thinker`: Claude Fable 5 → Kimi → Codex Sol.
+- `adversary`: Claude Opus 4.8 → Kimi → Codex Sol.
+- Every role skips the orchestrator's own provider (skip-self).
+- Provider advancement happens only on confirmed quota exhaustion or transient
+  backend errors. Timeout/process/authentication/permission/empty-output
+  failures stop loud.
 
 Claude, Codex, and Grok each register the same MCP with distinct
 `BRAIN_ROUTER_CALLER` identity. Orchestrator remains human-selected.
@@ -159,11 +162,11 @@ env = { BRAIN_ROUTER_CALLER = "codex" }
    │                 │               │
    │ (own API key)   │ (OAuth CLI)   │ (subscription CLI)
    │                 │               │
-┌──▼──────────┐  ┌───▼────────┐  ┌──▼────────────┐
-│ GLM         │  │ Grok/Codex │  │  Claude CLI   │  Agentic workers
-│ API + CLI   │  │ local CLI  │  │  fallback     │
-│             │  │            │  │               │
-└─────────────┘  └────────────┘  └───────────────┘
+┌──▼──────────┐  ┌───▼────────────┐  ┌──▼────────────┐
+│ Kimi/Grok   │  │ Codex / GLM    │  │  Claude CLI   │  Agentic workers
+│ local CLI   │  │ CLI (+ HTTP    │  │  (fallback /  │
+│             │  │  cheap|code)   │  │   think/adv)  │
+└─────────────┘  └────────────────┘  └───────────────┘
 
 Key point:
 - The router may launch native Claude CLI as a configured role fallback.
@@ -187,10 +190,10 @@ kimi_enabled = true
 adversarial = "gpt-5.5"
 
 [roles]
-thinker = ["kimi", "claude-fable-5", "gpt-5.6-sol"]
-adversary = ["kimi", "claude-opus-4-8", "gpt-5.6-sol"]
-worker = ["kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"]
-simple = ["gpt-5.6-luna", "claude-haiku-4-5-20251001"]
+thinker = ["claude-fable-5", "kimi", "gpt-5.6-sol"]
+adversary = ["claude-opus-4-8", "kimi", "gpt-5.6-sol"]
+worker = ["kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"]
+simple = ["kimi", "claude-haiku-4-5-20251001", "gpt-5.6-luna"]
 ```
 
 ### GPT-5.6 routing policy

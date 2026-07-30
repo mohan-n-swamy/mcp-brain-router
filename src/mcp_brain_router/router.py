@@ -28,7 +28,7 @@ class Role(str, Enum):
     Each role is a distinct job in an orchestrated build loop, filled from a
     config-ordered candidate list. ORCHESTRATOR is NOT resolved by the router —
     it is whoever the human launched (an input), used to enforce the
-    adversary-differs-in-provider rule.
+    skip-self rule (no role resolves to the orchestrator's own provider).
     """
 
     ORCHESTRATOR = "orchestrator"
@@ -39,9 +39,10 @@ class Role(str, Enum):
 
 
 class Provider(str, Enum):
-    """Model provider — used to enforce 'adversary differs from orchestrator'
-    and to decide whether a resolved role is handed back for native (Anthropic)
-    execution vs called directly by the router."""
+    """Model provider — used to enforce the skip-self rule (a role never
+    resolves to the orchestrator's own provider; adversary has always required
+    this) and to decide whether a resolved role is handed back for native
+    (Anthropic) execution vs called directly by the router."""
 
     ANTHROPIC = "anthropic"   # opus / sonnet / haiku / fable — NEVER called by the router
     CODEX = "codex"           # every gpt-* / sol / terra / luna id (OpenAI Codex CLI)
@@ -144,8 +145,8 @@ def resolve_role(
     handed back for native execution — it targets the anthropic-cli agentic
     harness (cc-brain claude). This is the codex-orchestrator adversary case
     AND the GLM+codex-exhausted final fallback worker, where there may be no
-    native Anthropic loop to hand back to. The adversary-differs-from-
-    orchestrator rule is preserved either way."""
+    native Anthropic loop to hand back to. The skip-self rule (a role never
+    resolves to the orchestrator's own provider) applies either way."""
     if role is Role.ORCHESTRATOR:
         raise ValueError("orchestrator is selected by the human, not the router")
 
@@ -159,7 +160,11 @@ def resolve_role(
         provider = provider_for_model(model)
         if provider in exhausted:
             continue
-        if role is Role.ADVERSARY and provider is orchestrator_owner:
+        # Skip-self: a role must route work AWAY from the orchestrator's own
+        # provider. Self-delegation shells to a nested CLI of the same brain —
+        # slow, hook-polluted, and spends the same quota pool the orchestrator
+        # is already on. (Adversary has always had this rule; now universal.)
+        if provider is orchestrator_owner:
             continue
         if provider is Provider.ANTHROPIC:
             if mode == "agentic":
@@ -200,7 +205,10 @@ def resolve_role(
         raise ValueError(
             "no eligible adversary differs from the orchestrator provider"
         )
-    raise ValueError(f"all configured providers exhausted for role: {role.value}")
+    raise ValueError(
+        f"no eligible candidate for role: {role.value} "
+        "(all providers exhausted or owned by the orchestrator)"
+    )
 
 
 async def route_assignment(

@@ -504,16 +504,16 @@ def create_server():
             - 'adversarial': Codex CLI (configured model; gpt-5.5 default, GPT-5.6 candidates require eval).
 
             Legacy tiers map to one backend and never cascade. The agentic
-            role='worker' path owns GLM → Grok → Codex → Claude and advances
+            role='worker' path owns Kimi → Grok → Claude → Codex and advances
             only on confirmed quota exhaustion. Grok is a coding provider in
             that role list, not a separate complexity tier.
 
             Enforced role candidates:
-            - worker: GLM 5.2 → Grok → Codex Terra → Claude Sonnet 5
-            - simple: GLM 4.7 → Codex Luna → Claude Haiku
-            - thinker: Claude Fable → Codex Sol
-            - adversary: Claude Opus 4.8 → Codex Sol
-            Only adversary excludes the orchestrator's provider.
+            - worker: Kimi K3 → Grok 4.5 → Claude Sonnet 5 → Codex Terra
+            - simple: Kimi K3 → Claude Haiku → Codex Luna
+            - thinker: Claude Fable 5 → Kimi K3 → Codex Sol
+            - adversary: Claude Opus 4.8 → Kimi K3 → Codex Sol
+            Every role skips the orchestrator's own provider (skip-self).
 
             Execution mode (spec 002):
             - 'agentic' (default and only public mode): the router shells to the
@@ -563,8 +563,8 @@ def create_server():
                 - exhausted: false.
                 - failure_kind/failure_reason/elapsed_ms: Terminal diagnostics.
 
-            Claude, Codex, and Grok callers use the same role policy. Only an
-            adversary candidate matching the caller's provider is skipped.
+            Claude, Codex, Grok, and Kimi callers use the same role policy. A
+            candidate matching the caller's own provider is always skipped.
             """
             if role is not None and complexity is not None:
                 return {
@@ -605,16 +605,16 @@ def create_server():
             - 'adversarial': Codex CLI (configured model; gpt-5.5 default, GPT-5.6 candidates require eval).
 
             Legacy tiers map to one backend and never cascade. The agentic
-            role='worker' path owns GLM → Grok → Codex → Claude and advances
+            role='worker' path owns Kimi → Grok → Claude → Codex and advances
             only on confirmed quota exhaustion. Grok is a coding provider in
             that role list, not a separate complexity tier.
 
             Enforced role candidates:
-            - worker: GLM 5.2 → Grok → Codex Terra → Claude Sonnet 5
-            - simple: GLM 4.7 → Codex Luna → Claude Haiku
-            - thinker: Claude Fable → Codex Sol
-            - adversary: Claude Opus 4.8 → Codex Sol
-            Only adversary excludes the orchestrator's provider.
+            - worker: Kimi K3 → Grok 4.5 → Claude Sonnet 5 → Codex Terra
+            - simple: Kimi K3 → Claude Haiku → Codex Luna
+            - thinker: Claude Fable 5 → Kimi K3 → Codex Sol
+            - adversary: Claude Opus 4.8 → Kimi K3 → Codex Sol
+            Every role skips the orchestrator's own provider (skip-self).
 
             Execution mode (spec 002):
             - 'agentic' (default and only public mode): the router shells to the
@@ -662,8 +662,8 @@ def create_server():
                 - exhausted: false.
                 - failure_kind/failure_reason/elapsed_ms: Terminal diagnostics.
 
-            Claude, Codex, and Grok callers use the same role policy. Only an
-            adversary candidate matching the caller's provider is skipped.
+            Claude, Codex, Grok, and Kimi callers use the same role policy. A
+            candidate matching the caller's own provider is always skipped.
             """
             if role is not None and complexity is not None:
                 result = {
@@ -692,8 +692,8 @@ def create_server():
                 description=(
                     "Delegate a task by legacy complexity tier or configured orchestration role. "
                     "Role calls own the quota-only provider cascade; legacy tiers remain single-provider. "
-                    "Worker processes may be GLM, Grok, Codex, or native Claude CLI and are untrusted. "
-                    "Only adversary excludes the registered orchestrator provider. "
+                    "Worker processes may be GLM, Grok, Codex, Kimi, or native Claude CLI and are untrusted. "
+                    "Every role skips the registered orchestrator's own provider (skip-self). "
                     "mode='agentic' shells to the per-provider CLI harness (cc-glm / codex exec / "
                     "cc-brain claude) in the real working directory so the worker writes files / "
                     "runs checks itself (spec 002); role chat mode is removed."

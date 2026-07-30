@@ -37,7 +37,7 @@ def role_config():
 @pytest.mark.parametrize(
     ("role", "orchestrator", "provider", "native"),
     [
-        (Role.THINKER, "opus", Provider.ANTHROPIC, True),
+        (Role.THINKER, "opus", Provider.CODEX, False),
         (Role.THINKER, "codex", Provider.ANTHROPIC, True),
         (Role.ADVERSARY, "opus", Provider.CODEX, False),
         (Role.ADVERSARY, "codex", Provider.ANTHROPIC, True),
@@ -61,12 +61,19 @@ def test_adversary_always_differs(role_config, orchestrator):
     assert assignment.provider is not orchestrator
 
 
-@pytest.mark.parametrize("orchestrator", ["claude", "codex", "grok"])
-def test_only_adversary_excludes_orchestrator_provider(role_config, orchestrator):
+@pytest.mark.parametrize("orchestrator", ["claude", "codex", "grok", "kimi"])
+def test_every_role_skips_orchestrator_provider(role_config, orchestrator):
     adversary = resolve_role(Role.ADVERSARY, orchestrator, role_config)
     worker = resolve_role(Role.WORKER, orchestrator, role_config)
     assert adversary.provider is not orchestrator_provider(orchestrator)
-    assert worker.provider is Provider.ZHIPU
+    assert worker.provider is not orchestrator_provider(orchestrator)
+
+
+def test_worker_skip_self_lands_on_next_provider(role_config):
+    # glm-5.2 leads the fixture worker shard; a zhipu orchestrator must skip it.
+    assignment = resolve_role(Role.WORKER, "zhipu", role_config)
+    assert assignment.provider is Provider.XAI
+    assert assignment.model == "grok-4.5"
 
 
 def test_exhaustion_walks_candidate_providers(role_config):
@@ -197,7 +204,7 @@ async def test_delegate_role_walks_quota_through_full_worker_cascade(role_config
         ) as route_call,
     ):
         response = await server._delegate_role_impl(
-            "worker", "build", "opus", cwd="/tmp"
+            "worker", "build", "kimi", cwd="/tmp"
         )
 
     assert response["answer"] == "built"
@@ -339,7 +346,7 @@ async def test_all_role_candidates_exhausted_keeps_quota_contract(role_config):
         ),
     ):
         response = await server._delegate_role_impl(
-            "worker", "build", "opus", cwd="/tmp"
+            "worker", "build", "kimi", cwd="/tmp"
         )
     assert response["exhausted"] is True
     assert response["failure_kind"] == "quota_exhausted"

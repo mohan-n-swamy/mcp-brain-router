@@ -37,12 +37,15 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    "thinker": ["kimi", "claude-fable-5", "gpt-5.6-sol"],
-    "adversary": ["kimi", "claude-opus-4-8", "gpt-5.6-sol"],
+    # Budget-optimized 2026-07-26 (pools: Claude $200 > Kimi $100 > Grok/GLM $30 > Codex $20,
+    # Codex seat ~91% burnt → Codex last everywhere; Kimi K3 near-free → leads volume roles).
+    # Fable 5 = coding ceiling (95.0% SWE-bench Verified) → thinker lead on the biggest pool.
+    "thinker": ["claude-fable-5", "kimi", "gpt-5.6-sol"],
+    "adversary": ["claude-opus-4-8", "kimi", "gpt-5.6-sol"],
     # GLM yanked from cascades 2026-07-21 — quality regression on agentic workers.
     # Still available via explicit complexity='code'/'cheap' if needed.
-    "worker": ["kimi", "grok-4.5", "gpt-5.6-terra", "claude-sonnet-5"],
-    "simple": ["gpt-5.6-luna", "claude-haiku-4-5-20251001"],
+    "worker": ["kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"],
+    "simple": ["kimi", "claude-haiku-4-5-20251001", "gpt-5.6-luna"],
 }
 
 

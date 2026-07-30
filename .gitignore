@@ -53,3 +53,6 @@ Thumbs.db
 STATUS.md
 .stress-test-temp/
 PUBLISH-RUNBOOK.md
+
+# rebase-to-latest quarantine (tarballs / superseded local cruft — restore via RESTORE.sh)
+.rebase-quarantine/
