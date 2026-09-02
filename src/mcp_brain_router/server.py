@@ -79,6 +79,26 @@ def _load_config() -> Config | None:
 # Fail-OPEN: a logging error must never break a delegation.
 _DELEGATION_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
 
+# Fail-open cascade (rig-consolidation D-R-01, 2026-09-02). A backend that fails
+# for ANY reason is skipped and the next role candidate runs; only quota and
+# transient results were advancing before, so one dead first tier (glm,
+# process_error after ~190 s, 35 rows in 48 h) blocked every `simple` call.
+# One retry on the SAME provider is allowed only when the failure was fast —
+# spawn/connect/auth shaped, well under the agentic timeout — because an
+# agentic worker that ran for minutes may already have written files, and a
+# retry would repeat that side effect. tokens_out is NOT a usable "no output"
+# signal: CLI workers report 0 on every success.
+RETRY_FAST_MS = 15_000
+RETRYABLE_KINDS = frozenset({"process_error", "network_error"})
+
+
+def _retryable(failure_kind: str | None, elapsed_ms: int | None) -> bool:
+    return (
+        failure_kind in RETRYABLE_KINDS
+        and isinstance(elapsed_ms, (int, float))
+        and 0 <= elapsed_ms < RETRY_FAST_MS
+    )
+
 # Trusted caller identities. install.py registers BRAIN_ROUTER_CALLER=<binary>
 # for each client (claude/codex/grok). Any other value is untrusted — an
 # attacker-controlled process could set the env var to anything — so it is
@@ -110,11 +130,13 @@ def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
             "ts": datetime.now(timezone.utc).isoformat(),
             "caller": response.get("caller"),
             "complexity": response.get("complexity"),
+            "role": response.get("role"),
             "backend": response.get("backend"),
             "model": response.get("model"),
             "exhausted": bool(response.get("exhausted", False)),
             "fell_back": bool(response.get("fell_back", False)),
             "tried": response.get("tried") or [],
+            "retried": response.get("retried") or [],
             "reset_at": response.get("reset_at"),
             "failure_kind": response.get("failure_kind"),
             "failure_reason": response.get("failure_reason"),
@@ -338,7 +360,13 @@ async def _delegate_role_impl(
     mode: str | None = None,
     cwd: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve and execute a role, walking candidates only on real quota exhaustion."""
+    """Resolve and execute a role, walking candidates on any backend failure.
+
+    Quota and transient results advance as before. A raised BackendError (process,
+    network, configuration, validation) now also advances instead of ending the
+    call, with one same-provider retry only for a fast failure (see _retryable).
+    The terminal result reports the LAST real failure kind; quota_exhausted is
+    claimed only when every candidate failed on quota."""
     started = time.perf_counter()
     caller = _read_caller()
 
@@ -390,26 +418,52 @@ async def _delegate_role_impl(
                 "directory so the worker writes files where you expect."
             )
 
-        exhausted: set[Provider] = set()
+        exhausted: set[Provider] = set()  # quota / transient (router-signalled)
+        failed: set[Provider] = set()  # any other backend failure class
+        attempts: dict[Provider, int] = {}
         tried: list[str] = []
+        retried: list[str] = []
+        kinds: list[str] = []
         last_reset_at: str | None = None
         last_failure_reason: str | None = None
+        last_failure_kind: str | None = None
         while True:
             try:
                 assignment = resolve_role(
-                    role_enum, orchestrator, config, exhausted, mode=resolved_mode
+                    role_enum,
+                    orchestrator,
+                    config,
+                    exhausted | failed,
+                    mode=resolved_mode,
                 )
             except ValueError:
-                if exhausted:
+                if exhausted or failed:
+                    all_quota = bool(kinds) and all(
+                        k == "quota_exhausted" for k in kinds
+                    )
+                    # Mixed failures: report the last kind that was NOT quota,
+                    # so a dead backend never hides behind a quota label.
+                    real_kinds = [k for k in kinds if k != "quota_exhausted"]
+                    if real_kinds:
+                        last_failure_kind = real_kinds[-1]
                     response = {
-                        "error": "all eligible role providers exhausted quota",
+                        "error": (
+                            "all eligible role providers exhausted quota"
+                            if all_quota
+                            else "all eligible role providers failed"
+                        ),
                         "backend": "none",
                         "role": role_enum.value,
                         "tried": tried,
+                        "retried": retried,
                         "exhausted": True,
-                        "failure_kind": "quota_exhausted",
+                        "failure_kind": (
+                            "quota_exhausted"
+                            if all_quota
+                            else (last_failure_kind or "backend_error")
+                        ),
                         "failure_reason": last_failure_reason
-                        or "all eligible role providers exhausted quota",
+                        or "all eligible role providers failed",
                     }
                     if last_reset_at:
                         response["reset_at"] = last_reset_at
@@ -429,12 +483,36 @@ async def _delegate_role_impl(
                     }
                 )
 
-            result = await route_assignment(
-                assignment, prompt, config, mode=resolved_mode, cwd=cwd
-            )
-            tried.append(assignment.backend or assignment.provider.value)
+            name = assignment.backend or assignment.provider.value
+            try:
+                result = await route_assignment(
+                    assignment, prompt, config, mode=resolved_mode, cwd=cwd
+                )
+            except BackendError as e:
+                tried.append(name)
+                kind = getattr(e, "failure_kind", None) or "backend_error"
+                elapsed = getattr(e, "elapsed_ms", None)
+                kinds.append(kind)
+                last_failure_kind = kind
+                last_failure_reason = str(e)
+                n = attempts.get(assignment.provider, 0) + 1
+                attempts[assignment.provider] = n
+                if n == 1 and _retryable(kind, elapsed):
+                    retried.append(name)
+                    logger.warning(
+                        f"delegate() {name} failed fast ({kind}, {elapsed} ms); one retry"
+                    )
+                    continue
+                failed.add(assignment.provider)
+                logger.warning(
+                    f"delegate() {name} failed ({kind}); advancing to the next candidate"
+                )
+                continue
+            tried.append(name)
             if result.exhausted:
                 exhausted.add(assignment.provider)
+                kinds.append(result.failure_kind or "quota_exhausted")
+                last_failure_kind = result.failure_kind or "quota_exhausted"
                 last_reset_at = result.reset_at or last_reset_at
                 last_failure_reason = result.failure_reason or last_failure_reason
                 continue
@@ -449,6 +527,7 @@ async def _delegate_role_impl(
                 "execute_natively": False,
                 "headroom_used": result.headroom_used,
                 "tried": tried,
+                "retried": retried,
                 "exhausted": False,
                 "source": "external-untrusted",
             }

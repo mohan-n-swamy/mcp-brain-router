@@ -433,7 +433,10 @@ def _cli_snippet(*parts: Optional[str], limit: int = 240) -> str:
     raw = " ".join(raw.split())
     raw = _SECRETISH.sub("[redacted]", raw)
     if len(raw) > limit:
-        return raw[: limit - 1] + "…"
+        # Keep the TAIL: CLIs print banners first and the real error last. Live
+        # 2026-09-02 the cc-glm banner ate the whole snippet and the failure
+        # reason ended in "t…" (rig-consolidation D-R-01).
+        return "…" + raw[-(limit - 1) :]
     return raw
 
 
@@ -965,6 +968,8 @@ def call_codex(
             # prints CLI help instead of delegating).
             CODEX_EXEC_BASE + ["-m", model, "-"],
             input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=CODEX_TIMEOUT_SECONDS,
@@ -1035,6 +1040,8 @@ def call_grok(
         with _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
             result = subprocess.run(
                 [_GROK_BIN, "--prompt-file", pf, "-m", model, "--output-format", "plain"],
+                # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=CODEX_TIMEOUT_SECONDS,
@@ -1111,6 +1118,8 @@ def call_kimi(
                 "--output-format",
                 "text",
             ],
+            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=CODEX_TIMEOUT_SECONDS,
@@ -1189,6 +1198,8 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
     try:
         result = subprocess.run(
             argv,
+            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
@@ -1257,6 +1268,8 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                     "--output-format",
                     "json",
                 ],
+                # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=AGENTIC_TIMEOUT_SECONDS,
@@ -1349,6 +1362,8 @@ def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                 "--output-format",
                 "text",
             ],
+            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
@@ -1398,6 +1413,8 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
             # read as a codex flag (same protection as call_codex).
             CODEX_EXEC_BASE_AGENTIC + ["-m", model, "-"],
             input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
+            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,
@@ -1460,6 +1477,8 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
     try:
         result = subprocess.run(
             argv,
+            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,

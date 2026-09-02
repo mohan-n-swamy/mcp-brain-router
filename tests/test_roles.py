@@ -217,26 +217,41 @@ async def test_delegate_role_walks_quota_through_full_worker_cascade(role_config
 
 
 @pytest.mark.asyncio
-async def test_delegate_role_does_not_advance_on_non_quota_error(role_config):
+async def test_delegate_role_advances_on_non_quota_error(role_config):
+    """Inverted 2026-09-02 (rig-consolidation D-R-01): a process error on the
+    first tier no longer ends the call; the next candidate runs. The
+    all-candidates-failed shape is covered in tests/test_failover.py."""
+    success = RouteResult(
+        content="built",
+        model="grok-4.5",
+        backend="grok",
+        complexity=None,
+        headroom_used=False,
+    )
     with (
         patch.object(server, "_load_config", return_value=role_config),
         patch(
             "mcp_brain_router.server.route_assignment",
             new_callable=AsyncMock,
-            side_effect=BackendError(
-                "GLM process failed",
-                backend="glm",
-                failure_kind="process_error",
-            ),
+            side_effect=[
+                BackendError(
+                    "GLM process failed",
+                    backend="glm",
+                    failure_kind="process_error",
+                    elapsed_ms=190_000,
+                ),
+                success,
+            ],
         ) as route_call,
     ):
         response = await server._delegate_role_impl(
             "worker", "build", "opus", cwd="/tmp"
         )
 
-    assert response["failure_kind"] == "process_error"
-    assert response["backend"] == "glm"
-    assert route_call.await_count == 1
+    assert response["answer"] == "built"
+    assert response["backend"] == "grok"
+    assert response["tried"] == ["glm", "grok"]
+    assert route_call.await_count == 2
 
 
 @pytest.mark.asyncio
