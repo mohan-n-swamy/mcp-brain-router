@@ -131,7 +131,7 @@ mcp-brain-router --help
 ```
 thinker:    claude-fable-5 → kimi → gpt-5.6-sol
 adversary:  claude-opus-4-8 → kimi → gpt-5.6-sol
-worker:     kimi → grok-4.5 → claude-sonnet-5 → gpt-5.6-terra
+worker:     glm-5.2 → kimi → grok-4.5 → claude-sonnet-5 → gpt-5.6-terra
 simple:     kimi → claude-haiku-4-5-20251001 → gpt-5.6-luna
 ```
 

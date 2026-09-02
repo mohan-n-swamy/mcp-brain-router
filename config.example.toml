@@ -31,8 +31,8 @@ kimi_enabled = false
 
 # Model overrides per complexity tier (optional)
 [model_overrides]
-# cheap = "glm-4.7"
-# code = "glm-5.2"
+# cheap = "glm-5.3"
+# code = "glm-5.3"
 # adversarial = "gpt-5.5"        # current default
 # adversarial = "gpt-5.6-sol"    # capability-first candidate; promote after eval
 

@@ -59,7 +59,7 @@ class TestSC2CheapRoutesToGlm:
             mglm.return_value = {"content": "ok", "usage": {}}
             result = await route(Complexity.CHEAP, "p", config=config)
         assert result.backend == "glm"
-        assert result.model == "glm-4.7"  # cheap default = FAST glm
+        assert result.model == "glm-5.3"  # cheap default = latest GLM
 
     @pytest.mark.asyncio
     async def test_chat_mode_unchanged_returns_text_no_subprocess(self):
@@ -233,11 +233,12 @@ class TestSC6AgenticArgv:
 
     def test_grok_agentic_uses_prompt_file_acceptedits(self):
         """Grok agentic: `grok --prompt-file <f> -m <model> --cwd <cwd>
-        --permission-mode auto --always-approve`. Prompt goes via --prompt-file (a real
-        temp file), NOT `-p` — grok's clap rejects a `-p` value starting with "-"
-        (live-verified 2026-07-13). File write is the deliverable so AGENTIC_SYSTEM
-        (not caveman) is prepended. The temp file is written + cleaned up, so we
-        capture its content by reading it inside the mocked subprocess call."""
+        --permission-mode bypassPermissions --always-approve`. Prompt goes via
+        --prompt-file (a real temp file), NOT `-p` — grok's clap rejects a `-p`
+        value starting with "-" (live-verified 2026-07-13). Lean worker: no
+        Claude-ID `--tools` allowlist, no `--max-turns 10` (live 2026-08-25:
+        114 workers cancelled at max_turns_reached), no `--no-memory` (not a
+        grok flag; GROK_MEMORY=0 in env instead)."""
         seen = {}
 
         def _capture(argv, **kwargs):
@@ -246,7 +247,7 @@ class TestSC6AgenticArgv:
                 seen["content"] = f.read()
             return MagicMock(
                 returncode=0,
-                stdout='{"text":"ok","stopReason":"EndTurn","num_turns":2}',
+                stdout='{"text":"ok","stopReason":"end_turn","num_turns":2}',
             )
 
         with patch("mcp_brain_router.backends.subprocess.run", side_effect=_capture) as mrun, patch(
@@ -254,19 +255,22 @@ class TestSC6AgenticArgv:
         ):
             backends.call_grok_agentic("do G", "grok-4.5", "/tmp")
             argv = mrun.call_args[0][0]
+            env = mrun.call_args.kwargs.get("env") or {}
         assert isinstance(argv, list)
         assert argv[0] == "grok" or argv[0].endswith("/grok")
         assert argv[argv.index("-m") + 1] == "grok-4.5"
         assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
         assert "--always-approve" in argv
-        assert argv[argv.index("--tools") + 1] == "Bash,Read,Write,Edit"
+        assert "--tools" not in argv  # Claude IDs were a silent-drop mismatch
         assert "--no-plan" in argv
-        assert "--no-memory" in argv
+        assert "--no-memory" not in argv
         assert "--no-subagents" in argv
-        assert argv[argv.index("--max-turns") + 1] == "10"
+        assert "--disable-web-search" in argv
+        assert "--max-turns" not in argv
         assert argv[argv.index("--output-format") + 1] == "json"
         assert argv[argv.index("--cwd") + 1] == "/tmp"
-        # prompt is NOT an argv token (never injectable); it's file content
+        assert env.get("GROK_MEMORY") == "0"
+        assert env.get("GROK_HOME")
         assert "-p" not in argv
         assert "do G" not in " ".join(argv)
         assert seen["content"].endswith("do G")
@@ -285,6 +289,82 @@ class TestSC6AgenticArgv:
             with pytest.raises(backends.BackendError) as exc:
                 backends.call_grok_agentic("do G", "grok-4.5", "/tmp")
         assert exc.value.failure_kind == "no_tool_effect"
+
+    def test_grok_agentic_accepts_live_end_turn_json(self):
+        """Broken fixture for the 2026-08-25 parser: live grok CLI emits
+        snake_case stopReason=end_turn. An EndTurn-only check classified a
+        real file-write as no_tool_effect."""
+        live = '{"text":"Wrote OK","stopReason":"end_turn","num_turns":3}'
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+            "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+        ):
+            mrun.return_value = MagicMock(returncode=0, stdout=live)
+            out = backends.call_grok_agentic("do G", "grok-4.5", "/tmp")
+        assert out["content"] == "Wrote OK"
+
+    def test_grok_agentic_still_accepts_legacy_endturn_casing(self):
+        legacy = '{"text":"ok","stopReason":"EndTurn","num_turns":2}'
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+            "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+        ):
+            mrun.return_value = MagicMock(returncode=0, stdout=legacy)
+            out = backends.call_grok_agentic("do G", "grok-4.5", "/tmp")
+        assert out["content"] == "ok"
+
+    def test_process_error_includes_stderr_snippet_all_cli_workers(self):
+        """Opaque 'subprocess failed' with discarded stderr was the 2026-08-25
+        diagnosis hole across grok/glm/kimi/codex/anthropic-cli."""
+        cases = (
+            (backends.call_glm_agentic, ("p", "glm-5.3", "/tmp"), "cc-glm"),
+            (backends.call_grok_agentic, ("p", "grok-4.5", "/tmp"), "max_turns_reached"),
+            (backends.call_kimi_agentic, ("p", "kimi", "/tmp"), "kimi boom"),
+            (backends.call_codex_agentic, ("p", "gpt-5.6-terra", "/tmp"), "codex boom"),
+            (
+                backends.call_anthropic_agentic,
+                ("p", "claude-sonnet-5", "/tmp"),
+                "claude boom",
+            ),
+        )
+        for fn, args, marker in cases:
+            with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+                "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+            ):
+                mrun.return_value = MagicMock(
+                    returncode=1, stdout="", stderr=marker
+                )
+                with pytest.raises(backends.BackendError) as exc:
+                    fn(*args)
+            assert exc.value.failure_kind == "process_error"
+            assert marker in str(exc.value)
+
+    def test_process_error_redacts_secretish_stderr(self):
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+            "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+        ):
+            mrun.return_value = MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="boom sk-abc123def and Bearer tok.fail",
+            )
+            with pytest.raises(backends.BackendError) as exc:
+                backends.call_glm_agentic("p", "glm-5.3", "/tmp")
+        text = str(exc.value)
+        assert "sk-abc123def" not in text
+        assert "[redacted]" in text
+        assert "boom" in text
+
+    def test_grok_process_error_surfaces_json_stop_reason(self):
+        payload = '{"stopReason":"max_turns_reached","message":"hit cap"}'
+        with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(
+            "mcp_brain_router.backends._resolve_agentic_cwd", return_value="/tmp"
+        ):
+            mrun.return_value = MagicMock(returncode=1, stdout=payload, stderr="")
+            with pytest.raises(backends.BackendError) as exc:
+                backends.call_grok_agentic("p", "grok-4.5", "/tmp")
+        text = str(exc.value)
+        assert exc.value.failure_kind == "process_error"
+        assert "max_turns_reached" in text
+        assert "hit cap" in text
 
     def test_grok_chat_uses_prompt_file_and_plain_output(self):
         """Grok chat: `grok --prompt-file <f> -m <model> --output-format plain`,
@@ -416,7 +496,7 @@ class TestSC6AgenticArgv:
             ):
                 assert flag in argv
             assert argv[argv.index("--tools") + 1] == "default"
-            assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+            assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
             assert argv[argv.index("--allowedTools") + 1] == "Read,Edit,Write,Bash"
 
     def test_no_api_key_in_agentic_argv(self):

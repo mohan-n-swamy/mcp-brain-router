@@ -504,7 +504,7 @@ def create_server():
             - 'adversarial': Codex CLI (configured model; gpt-5.5 default, GPT-5.6 candidates require eval).
 
             Legacy tiers map to one backend and never cascade. The agentic
-            role='worker' path owns Kimi → Grok → Claude → Codex and advances
+            role='worker' path owns GLM → Kimi → Grok → Claude → Codex and advances
             only on confirmed quota exhaustion. Grok is a coding provider in
             that role list, not a separate complexity tier.
 
@@ -605,7 +605,7 @@ def create_server():
             - 'adversarial': Codex CLI (configured model; gpt-5.5 default, GPT-5.6 candidates require eval).
 
             Legacy tiers map to one backend and never cascade. The agentic
-            role='worker' path owns Kimi → Grok → Claude → Codex and advances
+            role='worker' path owns GLM → Kimi → Grok → Claude → Codex and advances
             only on confirmed quota exhaustion. Grok is a coding provider in
             that role list, not a separate complexity tier.
 
@@ -726,7 +726,7 @@ def create_server():
                             "type": "string",
                             "description": (
                                 "Optional model override. If not provided, uses tier default. "
-                                "E.g., 'glm-5.2', 'gpt-5.6-sol'."
+                                "E.g., 'glm-5.3', 'gpt-5.6-sol'."
                             ),
                         },
                         "mode": {

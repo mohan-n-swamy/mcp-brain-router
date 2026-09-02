@@ -101,7 +101,8 @@ delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo"
 
 Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
 router-selected. Candidate order comes only from `[roles]`. Standard worker
-order is Kimi → Grok → Claude → Codex. Only genuine quota exhaustion advances;
+order is GLM → Kimi → Grok → Claude → Codex (Claude+Codex protected, last resort).
+Only genuine quota exhaustion advances;
 timeouts, process errors, authentication failures, and empty answers stop loud.
 All public role calls are agentic-only and require absolute `cwd`. Anthropic
 candidates run through `cc-brain claude`. Every role skips the orchestrator's
@@ -117,14 +118,14 @@ off the role cascades.)
 
 | Tier | Backend | Model | Use Case | Cost | Speed |
 |------|---------|-------|----------|------|-------|
-| `cheap` | GLM | glm-4.7 | Explicit fast single-provider request | — | Fastest |
-| `code` | GLM | glm-5.2 | Explicit single-provider code request | ~$0.50/1M tokens | Fast |
+| `cheap` | GLM | glm-5.3 | Explicit fast single-provider request | — | Fastest |
+| `code` | GLM | glm-5.3 | Explicit single-provider code request | ~$0.50/1M tokens | Fast |
 | `adversarial` | Codex | gpt-5.5, low effort (via Codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
 
 ### Enforced role policy
 
-- `worker`: Kimi → Grok 4.5 → Claude Sonnet 5 → Codex Terra.
-- `simple`: Kimi → Claude Haiku → Codex Luna.
+- `worker`: GLM 5.3 → Kimi → Grok 4.5 → Claude Sonnet 5 → Codex Terra.
+- `simple`: GLM 5.3 → Kimi → Grok 4.5 → Claude Haiku → Codex Luna.
 - `thinker`: Claude Fable 5 → Kimi → Codex Sol.
 - `adversary`: Claude Opus 4.8 → Kimi → Codex Sol.
 - Every role skips the orchestrator's own provider (skip-self).
@@ -192,8 +193,8 @@ adversarial = "gpt-5.5"
 [roles]
 thinker = ["claude-fable-5", "kimi", "gpt-5.6-sol"]
 adversary = ["claude-opus-4-8", "kimi", "gpt-5.6-sol"]
-worker = ["kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"]
-simple = ["kimi", "claude-haiku-4-5-20251001", "gpt-5.6-luna"]
+worker = ["glm-5.3", "kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"]
+simple = ["glm-5.3", "kimi", "grok-4.5", "claude-haiku-4-5-20251001", "gpt-5.6-luna"]
 ```
 
 ### GPT-5.6 routing policy

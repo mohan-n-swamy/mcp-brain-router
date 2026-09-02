@@ -37,15 +37,21 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    # Budget-optimized 2026-07-26 (pools: Claude $200 > Kimi $100 > Grok/GLM $30 > Codex $20,
-    # Codex seat ~91% burnt → Codex last everywhere; Kimi K3 near-free → leads volume roles).
-    # Fable 5 = coding ceiling (95.0% SWE-bench Verified) → thinker lead on the biggest pool.
-    "thinker": ["claude-fable-5", "kimi", "gpt-5.6-sol"],
-    "adversary": ["claude-opus-4-8", "kimi", "gpt-5.6-sol"],
-    # GLM yanked from cascades 2026-07-21 — quality regression on agentic workers.
-    # Still available via explicit complexity='code'/'cheap' if needed.
-    "worker": ["kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"],
-    "simple": ["kimi", "claude-haiku-4-5-20251001", "gpt-5.6-luna"],
+    # Protection-ordered 2026-08-14 (Mohan): burn the cheap/large pools first,
+    # protect the scarce ones. Cascade shape is the same in every role:
+    #   GLM → Kimi → Grok → Claude → Codex.
+    # Rationale: GLM pro sat at ~2% weekly and Kimi at ~22% while Claude was the
+    # pool actually being drained. Claude and Codex are now last-resort tiers,
+    # reached only after GLM/Kimi/Grok confirm quota exhaustion.
+    # TRADE-OFF: GLM was yanked from cascades 2026-07-21 for a quality
+    # regression on agentic workers. It leads again by explicit budget
+    # instruction — expect weaker worker output than the Kimi-first order.
+    # Reasoning roles are quality-gated, not budget-gated (2026-08-14): GLM and
+    # Kimi are excluded entirely — Grok leads, Claude is the real fallback.
+    "thinker": ["grok-4.5", "claude-fable-5", "gpt-5.6-sol"],
+    "adversary": ["grok-4.5", "claude-opus-4-8", "gpt-5.6-sol"],
+    "worker": ["glm-5.3", "kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"],
+    "simple": ["glm-5.3", "kimi", "grok-4.5", "claude-haiku-4-5-20251001", "gpt-5.6-luna"],
 }
 
 

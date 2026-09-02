@@ -414,7 +414,7 @@ def _test_backend_glm(api_key: str, headroom_url: Optional[str]) -> bool:
             url = "https://api.z.ai/api/anthropic/v1/messages"
 
         payload = {
-            "model": "glm-5.2",
+            "model": "glm-5.3",
             "max_tokens": 10,
             "messages": [{"role": "user", "content": "OK"}],
         }

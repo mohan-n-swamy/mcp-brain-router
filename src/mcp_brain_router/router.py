@@ -46,7 +46,7 @@ class Provider(str, Enum):
 
     ANTHROPIC = "anthropic"   # opus / sonnet / haiku / fable — NEVER called by the router
     CODEX = "codex"           # every gpt-* / sol / terra / luna id (OpenAI Codex CLI)
-    ZHIPU = "zhipu"           # glm-4.7 / glm-5.2
+    ZHIPU = "zhipu"           # glm-5.3
     XAI = "xai"               # grok-4.5 / grok-composer-* (xAI Grok CLI)
     KIMI = "kimi"             # kimi (Kimi Code CLI, OAuth login)
     DEEPSEEK = "deepseek"
@@ -605,8 +605,8 @@ def _resolve_backend_and_model(
     elif config.model_overrides and complexity.value in config.model_overrides:
         model = config.model_overrides[complexity.value]
     else:
-        # Use backend default. `cheap` and `code` both route to GLM (002) but
-        # select DIFFERENT GLM variants: cheap=glm-4.7 (FAST), code=glm-5.2.
+        # Use backend default. `cheap` and `code` both route to GLM-5.3
+        # (2026-08-15: latest Coding Plan model for worker + simple).
         default_key = "glm-cheap" if complexity is Complexity.CHEAP else backend_name
         model = _get_backend_default_model(default_key, config)
 
@@ -617,11 +617,11 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
     """Get the default model for a backend."""
     defaults = {
         "deepseek": "deepseek-v4-flash",
-        "glm": "glm-5.2",
-        # 002: `cheap` tier now maps to GLM (DeepSeek removed). Its model is the
-        # FAST GLM (glm-4.7); the `code` tier keeps glm-5.2. The model override
-        # axis (config [model_overrides] cheap=) still wins over this default.
-        "glm-cheap": "glm-4.7",
+        "glm": "glm-5.3",
+        # 2026-08-15: worker + simple both burn GLM-5.3. cheap/code stay on
+        # the same id so an explicit complexity call matches the role shards.
+        # [model_overrides] cheap= / code= still wins over this default.
+        "glm-cheap": "glm-5.3",
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",

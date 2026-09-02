@@ -6,6 +6,7 @@ Each backend is isolated; router.py calls these functions.
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -238,6 +239,69 @@ def _grok_env() -> Dict[str, str]:
     return env
 
 
+# Isolated GROK_HOME so the agentic worker does not inherit the user's MCP
+# servers, skills, hooks, or compat scans. Codex's equivalent is
+# `--ignore-user-config` + `mcp_servers={}`. Grok has no such flag (live
+# 2026-08-25 CLI 1.0.5). A failed worker in itam-orange started 10 MCP
+# servers (4 failed), inherited `grok-build-plan` + high reasoning, then
+# died at `--max-turns 10`.
+_GROK_LEAN_HOME = os.path.expanduser("~/.local/state/brain-router-grok-home")
+_GROK_LEAN_CONFIG = """\
+# brain-router lean grok worker. No MCP, no skills, no hooks, no compat scans.
+[cli]
+auto_update = false
+[compat.claude]
+skills = false
+hooks = false
+rules = false
+agents = false
+mcps = false
+[compat.cursor]
+skills = false
+mcps = false
+[skills]
+paths = []
+[ui]
+permission_mode = "always-approve"
+"""
+
+
+def _ensure_grok_lean_home() -> str:
+    """Create/refresh a stripped GROK_HOME with only auth.json copied over."""
+    dest = _GROK_LEAN_HOME
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    src_auth = os.path.expanduser("~/.grok/auth.json")
+    dest_auth = os.path.join(dest, "auth.json")
+    if os.path.exists(src_auth) and (
+        not os.path.exists(dest_auth)
+        or os.path.getmtime(src_auth) > os.path.getmtime(dest_auth)
+    ):
+        shutil.copy2(src_auth, dest_auth)
+        os.chmod(dest_auth, 0o600)
+    cfg_path = os.path.join(dest, "config.toml")
+    existing = ""
+    if os.path.exists(cfg_path):
+        with open(cfg_path, encoding="utf-8") as fh:
+            existing = fh.read()
+    if existing != _GROK_LEAN_CONFIG:
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            fh.write(_GROK_LEAN_CONFIG)
+        os.chmod(cfg_path, 0o600)
+    return dest
+
+
+def _grok_agentic_env() -> Dict[str, str]:
+    """Chat `_grok_env` plus lean-home isolation. GROK_MEMORY=0 is the
+    documented memory kill switch (`--no-memory` is not a grok CLI flag)."""
+    env = _grok_env()
+    env["GROK_HOME"] = _ensure_grok_lean_home()
+    env["GROK_MEMORY"] = "0"
+    env["GROK_DISABLE_AUTOUPDATER"] = "1"
+    env["GROK_CLAUDE_MCPS_ENABLED"] = "false"
+    env["GROK_CURSOR_MCPS_ENABLED"] = "false"
+    return env
+
+
 def _kimi_env() -> Dict[str, str]:
     """Env for the kimi subprocess. Kimi is a bundled binary (not an
     `#!/usr/bin/env node` shim like codex/cc-glm), so ONLY kimi's own bin dir
@@ -356,6 +420,78 @@ def _cli_quota_error(
     if not any(marker in combined for marker in _CLI_QUOTA_MARKERS):
         return None
     return BackendQuotaError(provider, 429, "CLI reported quota exhaustion")
+
+
+_SECRETISH = re.compile(
+    r"(?i)(sk-[A-Za-z0-9]+|xai-[A-Za-z0-9]+|Bearer\s+\S+|api[_-]?key\s*[:=]\s*\S+)"
+)
+
+
+def _cli_snippet(*parts: Optional[str], limit: int = 240) -> str:
+    """Bounded one-line stderr/stdout for process_error. Secrets stripped."""
+    raw = " ".join(p.strip() for p in parts if p and str(p).strip())
+    raw = " ".join(raw.split())
+    raw = _SECRETISH.sub("[redacted]", raw)
+    if len(raw) > limit:
+        return raw[: limit - 1] + "…"
+    return raw
+
+
+def _raise_cli_failure(
+    *,
+    provider: str,
+    backend: str,
+    default_msg: str,
+    result: subprocess.CompletedProcess,
+    started: float,
+) -> None:
+    """Non-zero CLI exit → quota if marked, else process_error WITH a snippet.
+
+    Live 2026-08-25: grok `max_turns_reached` and cc-glm failures were logged
+    as opaque '<cli> subprocess failed' because stdout/stderr were discarded.
+    114 grok + 76 glm process_errors in the audit log, none diagnosable.
+    """
+    if result.returncode == 0:
+        return
+    quota = _cli_quota_error(provider, result.stdout, result.stderr)
+    if quota:
+        raise quota
+    msg = default_msg
+    stdout = (result.stdout or "").strip()
+    if stdout.startswith("{") or stdout.startswith("["):
+        try:
+            payload = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            stop = payload.get("stopReason") or payload.get("stop_reason")
+            err = payload.get("message")
+            nested = payload.get("error")
+            if isinstance(nested, dict):
+                err = nested.get("message") or err
+            elif isinstance(nested, str):
+                err = nested
+            if stop:
+                msg = f"{default_msg} (stopReason={stop})"
+            if err:
+                msg = f"{msg}: {err}" if stop else f"{default_msg}: {err}"
+    snippet = _cli_snippet(
+        result.stderr, None if msg != default_msg else result.stdout
+    )
+    if snippet and snippet not in msg:
+        msg = f"{msg}: {snippet}"
+    raise BackendError(
+        msg,
+        backend=backend,
+        failure_kind="process_error",
+        elapsed_ms=round((time.perf_counter() - started) * 1000),
+    )
+
+
+def _normalize_stop_reason(value: object) -> str:
+    """Grok JSON stopReason is snake_case `end_turn` (live 2026-08-25 CLI
+    1.0.5). Older mocks used Claude-shaped `EndTurn`. Alnum-fold both."""
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
 
 # Caveman-ultra system directive prepended to EVERY delegated backend call
@@ -836,16 +972,13 @@ def call_codex(
             env=_codex_env(),
         )
 
-        if result.returncode != 0:
-            quota = _cli_quota_error("Codex", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "Codex subprocess failed",
-                backend="codex",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Codex",
+            backend="codex",
+            default_msg="Codex subprocess failed",
+            result=result,
+            started=started,
+        )
 
         return {
             "content": result.stdout.strip(),
@@ -909,16 +1042,13 @@ def call_grok(
                 env=_grok_env(),
             )
 
-        if result.returncode != 0:
-            quota = _cli_quota_error("Grok", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "Grok subprocess failed",
-                backend="grok",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Grok",
+            backend="grok",
+            default_msg="Grok subprocess failed",
+            result=result,
+            started=started,
+        )
 
         return {
             "content": result.stdout.strip(),
@@ -988,16 +1118,13 @@ def call_kimi(
             env=_kimi_env(),
         )
 
-        if result.returncode != 0:
-            quota = _cli_quota_error("Kimi", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "Kimi subprocess failed",
-                backend="kimi",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Kimi",
+            backend="kimi",
+            default_msg="Kimi subprocess failed",
+            result=result,
+            started=started,
+        )
 
         return {
             "content": result.stdout.strip(),
@@ -1036,7 +1163,7 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
 
     cc-glm is the rig's headless GLM CLI; it has file + shell tools and writes
     into the caller's working directory. The resolved model (the tier's glm id,
-    e.g. glm-5.2 / glm-4.7) is passed via --model so the caller decides which
+    e.g. glm-5.3) is passed via --model so the caller decides which
     GLM variant runs.
     """
     _validate_model_name(model)
@@ -1057,7 +1184,7 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
         "--allowedTools",
         "Read,Edit,Write,Bash",
         "--permission-mode",
-        "acceptEdits",
+        "bypassPermissions",
     ]
     try:
         result = subprocess.run(
@@ -1069,16 +1196,13 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
             cwd=cwd,
             env=_agentic_cli_env(),
         )
-        if result.returncode != 0:
-            quota = _cli_quota_error("GLM", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "cc-glm agentic subprocess failed",
-                backend="glm",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="GLM",
+            backend="glm",
+            default_msg="cc-glm agentic subprocess failed",
+            result=result,
+            started=started,
+        )
         return {"content": result.stdout.strip(), "usage": None}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
@@ -1098,20 +1222,18 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
 
 
 def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
-    """Agentic Grok worker: `grok --prompt-file - -m <model> --permission-mode
-    auto --always-approve` in the REAL cwd.
+    """Agentic Grok worker: `grok --prompt-file <f> -m <model>` in the REAL cwd.
 
-    Grok is xAI's Claude-Code-shaped CLI: noninteractive approval lets it run built-in
-    tools non-interactively, and `--cwd` roots it in the caller's
-    repo. The prompt (AGENTIC_SYSTEM-prefixed) is written to a private temp file
-    read via `--prompt-file` — NOT `-p <value>`, because grok's clap parser
-    rejects a `-p` value starting with "-" (live-verified 2026-07-13), breaking on
-    any dash-leading prompt; file content is opaque so dashes/--flags/newlines are
-    literal, which is the injection-safe path. AGENTIC_SYSTEM (NOT CAVEMAN_SYSTEM)
-    is used — the file write is the deliverable, and the chat-terse directive
-    suppresses tool use in weaker workers (root-caused 2026-07-12 for GLM). Grok
-    is a native binary, so only _grok_env's grok-bin PATH prepend is needed.
-    Live V-gate 2026-07-13: this path wrote a file in a real cwd via the real CLI."""
+    Lean profile (Codex-parity): isolated GROK_HOME (no user MCP/skills/hooks),
+    GROK_MEMORY=0, --no-plan --no-subagents --disable-web-search, full
+    bypassPermissions. No `--max-turns 10` — that cancelled real workers
+    (live 2026-08-25: 114 `process_error` with turn_ended max_turns_reached).
+    No `--tools Bash,Read,Write,Edit` — those are Claude Code IDs; grok's
+    shell tool is `run_terminal_cmd` (docs). Default built-ins + lean home is
+    the allowlist. JSON stopReason is snake_case `end_turn`, not `EndTurn`.
+    Prompt still goes via `--prompt-file` (clap rejects `-p` values starting
+    with "-"). AGENTIC_SYSTEM, not CAVEMAN_SYSTEM — file write is the
+    deliverable (root-caused 2026-07-12 for GLM)."""
     _validate_model_name(model)
     cwd = _resolve_agentic_cwd(cwd, "grok")
     started = time.perf_counter()
@@ -1129,13 +1251,9 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                     "--permission-mode",
                     "bypassPermissions",
                     "--always-approve",
-                    "--tools",
-                    "Bash,Read,Write,Edit",
                     "--no-plan",
-                    "--no-memory",
                     "--no-subagents",
-                    "--max-turns",
-                    "10",
+                    "--disable-web-search",
                     "--output-format",
                     "json",
                 ],
@@ -1144,18 +1262,15 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                 timeout=AGENTIC_TIMEOUT_SECONDS,
                 check=False,
                 cwd=cwd,
-                env=_grok_env(),
+                env=_grok_agentic_env(),
             )
-        if result.returncode != 0:
-            quota = _cli_quota_error("Grok", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "grok agentic subprocess failed",
-                backend="grok",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Grok",
+            backend="grok",
+            default_msg="grok agentic subprocess failed",
+            result=result,
+            started=started,
+        )
         try:
             payload = json.loads(result.stdout)
         except (json.JSONDecodeError, TypeError) as exc:
@@ -1167,10 +1282,17 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
             ) from exc
         content = str(payload.get("text", "")).strip()
         stop_reason = payload.get("stopReason")
-        num_turns = payload.get("num_turns", 0)
-        if stop_reason != "EndTurn" or not content or num_turns < 2:
+        num_turns = int(payload.get("num_turns") or 0)
+        # Live grok CLI 1.0.5 emits snake_case `end_turn`. Treating only
+        # `EndTurn` as success classified real file-writes as no_tool_effect.
+        if (
+            _normalize_stop_reason(stop_reason) != "endturn"
+            or not content
+            or num_turns < 2
+        ):
             raise BackendError(
-                "grok agentic completed without confirmed tool execution",
+                "grok agentic completed without confirmed tool execution"
+                f" (stopReason={stop_reason!r}, num_turns={num_turns})",
                 backend="grok",
                 failure_kind="no_tool_effect",
                 elapsed_ms=round((time.perf_counter() - started) * 1000),
@@ -1234,16 +1356,13 @@ def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
             cwd=cwd,
             env=_kimi_env(),
         )
-        if result.returncode != 0:
-            quota = _cli_quota_error("Kimi", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "kimi agentic subprocess failed",
-                backend="kimi",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Kimi",
+            backend="kimi",
+            default_msg="kimi agentic subprocess failed",
+            result=result,
+            started=started,
+        )
         return {"content": result.stdout.strip(), "usage": None}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
@@ -1286,16 +1405,13 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
             cwd=cwd,
             env=_codex_env(),
         )
-        if result.returncode != 0:
-            quota = _cli_quota_error("Codex", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "Codex agentic subprocess failed",
-                backend="codex",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Codex",
+            backend="codex",
+            default_msg="Codex agentic subprocess failed",
+            result=result,
+            started=started,
+        )
         return {"content": result.stdout.strip(), "usage": None}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
@@ -1339,7 +1455,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         "--allowedTools",
         "Read,Edit,Write,Bash",
         "--permission-mode",
-        "acceptEdits",
+        "bypassPermissions",
     ]
     try:
         result = subprocess.run(
@@ -1351,16 +1467,13 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             cwd=cwd,
             env=_agentic_cli_env(),
         )
-        if result.returncode != 0:
-            quota = _cli_quota_error("Anthropic", result.stdout, result.stderr)
-            if quota:
-                raise quota
-            raise BackendError(
-                "cc-brain claude agentic subprocess failed",
-                backend="anthropic-cli",
-                failure_kind="process_error",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
+        _raise_cli_failure(
+            provider="Anthropic",
+            backend="anthropic-cli",
+            default_msg="cc-brain claude agentic subprocess failed",
+            result=result,
+            started=started,
+        )
         return {"content": result.stdout.strip(), "usage": None}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
