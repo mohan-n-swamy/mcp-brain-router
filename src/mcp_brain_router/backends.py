@@ -1167,6 +1167,52 @@ def call_kimi(
 # ============================================================================
 
 
+def _cc_family_output(stdout: str) -> tuple[str, Optional[Dict[str, int]]]:
+    """C16: split a Claude-Code-family CLI's stdout into (content, usage).
+
+    With `--output-format json` these CLIs emit a result envelope carrying token
+    usage; without it, plain text. Both are accepted, and anything unparseable
+    falls back to today's behaviour -- treat the whole of stdout as the answer
+    and report no usage. That fallback is the safety property: the worst case is
+    exactly where the rig already was, never a lost answer.
+
+    Usage is returned ONLY when the envelope actually carried it. A zero-filled
+    dict would be indistinguishable from a real zero, and R38 lets a stand-in
+    cost exist precisely because measured and seeded numbers stay tellable apart.
+    """
+    text = (stdout or "").strip()
+    if not text.startswith("{"):
+        return text, None
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text, None
+    if not isinstance(payload, dict):
+        return text, None
+    content = payload.get("result")
+    if not isinstance(content, str):
+        return text, None
+    raw = payload.get("usage") or {}
+    cost = payload.get("total_cost_usd")
+    if not raw and cost is None:
+        return content.strip(), None
+    usage: Dict[str, Any] = {
+        "input_tokens": int(raw.get("input_tokens") or 0),
+        "output_tokens": int(raw.get("output_tokens") or 0),
+        # Cache reads dominate the real bill: two identical probes of the same
+        # trivial job cost $0.237 and $0.070 purely because the second read
+        # 37,056 cached tokens. Recorded so a cost swing is explainable rather
+        # than mysterious -- and it is why C07 takes a median of 3 (R30).
+        "cache_read_input_tokens": int(raw.get("cache_read_input_tokens") or 0),
+        "source": "cli-json",
+    }
+    if isinstance(cost, (int, float)):
+        # The CLI reports its own dollar cost. That is a DIRECT measurement, so
+        # these cards need no tokens-x-price computation and no stand-in (R38).
+        usage["cost_usd"] = float(cost)
+    return content.strip(), usage
+
+
 def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     """Agentic GLM worker: `cc-glm -p <prompt> --model <model>` in the REAL cwd.
 
@@ -1190,6 +1236,8 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
         "--no-session-persistence",
         "--tools",
         "default",
+        "--output-format",
+        "json",
         "--allowedTools",
         "Read,Edit,Write,Bash",
         "--permission-mode",
@@ -1214,7 +1262,8 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
             result=result,
             started=started,
         )
-        return {"content": result.stdout.strip(), "usage": None}
+        _content, _usage = _cc_family_output(result.stdout)
+        return {"content": _content, "usage": _usage}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
@@ -1360,7 +1409,7 @@ def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                 "-p",
                 f"{AGENTIC_SYSTEM}\n\n{prompt}",
                 "--output-format",
-                "text",
+                "json",
             ],
             # inherited stdin is the MCP stdio pipe; the CLIs wait on it
             stdin=subprocess.DEVNULL,
@@ -1378,7 +1427,8 @@ def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
             result=result,
             started=started,
         )
-        return {"content": result.stdout.strip(), "usage": None}
+        _content, _usage = _cc_family_output(result.stdout)
+        return {"content": _content, "usage": _usage}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
@@ -1429,7 +1479,8 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
             result=result,
             started=started,
         )
-        return {"content": result.stdout.strip(), "usage": None}
+        _content, _usage = _cc_family_output(result.stdout)
+        return {"content": _content, "usage": _usage}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
@@ -1469,6 +1520,8 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         "--no-session-persistence",
         "--tools",
         "default",
+        "--output-format",
+        "json",
         "--allowedTools",
         "Read,Edit,Write,Bash",
         "--permission-mode",
@@ -1493,7 +1546,8 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             result=result,
             started=started,
         )
-        return {"content": result.stdout.strip(), "usage": None}
+        _content, _usage = _cc_family_output(result.stdout)
+        return {"content": _content, "usage": _usage}
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(

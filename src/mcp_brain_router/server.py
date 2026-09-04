@@ -141,7 +141,16 @@ def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
             "failure_kind": response.get("failure_kind"),
             "failure_reason": response.get("failure_reason"),
             "elapsed_ms": response.get("elapsed_ms"),
-            "tokens_out": response.get("tokens_out", 0),
+            # C16: tokens_in was already SET on the response but never persisted
+            # here, so 2,319 audit records carried no input count and cost was
+            # uncomputable. Provenance is mandatory: a token count of unknown
+            # origin cannot be told apart from a guess, and R38 permits a
+            # stand-in cost ONLY while measured and seeded stay distinguishable.
+            "tokens_in": response.get("tokens_in"),
+            "tokens_out": response.get("tokens_out"),
+            "usage_source": response.get("usage_source"),
+            "cost_usd": response.get("cost_usd"),
+            "cache_read_input_tokens": response.get("cache_read_input_tokens"),
             "prompt_len": prompt_len,
         }
         _DELEGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -305,6 +314,14 @@ async def _delegate_impl(
         if result.usage:
             response["tokens_in"] = result.usage.get("input_tokens", 0)
             response["tokens_out"] = result.usage.get("output_tokens", 0)
+            response["usage_source"] = result.usage.get("source", "api")
+            response["cache_read_input_tokens"] = result.usage.get(
+                "cache_read_input_tokens"
+            )
+            if result.usage.get("cost_usd") is not None:
+                # The CLI reports its own dollar cost: a DIRECT measurement,
+                # so these cards need no tokens-x-price step and no stand-in.
+                response["cost_usd"] = result.usage["cost_usd"]
 
         logger.info(
             f"delegate() success: backend={result.backend}, "
@@ -534,6 +551,14 @@ async def _delegate_role_impl(
             if result.usage:
                 response["tokens_in"] = result.usage.get("input_tokens", 0)
                 response["tokens_out"] = result.usage.get("output_tokens", 0)
+                response["usage_source"] = result.usage.get("source", "api")
+                response["cache_read_input_tokens"] = result.usage.get(
+                    "cache_read_input_tokens"
+                )
+                if result.usage.get("cost_usd") is not None:
+                    # The CLI reports its own dollar cost: a DIRECT measurement,
+                    # so these cards need no tokens-x-price step and no stand-in.
+                    response["cost_usd"] = result.usage["cost_usd"]
             return complete(response)
     except (ValueError, ConfigError) as e:
         return complete(
