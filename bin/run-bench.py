@@ -31,6 +31,7 @@ import statistics
 import subprocess
 import sys
 import pathlib
+import shutil
 import tempfile
 import time
 import uuid
@@ -117,14 +118,34 @@ def git_head() -> str:
 
 # ---------------------------------------------------------------- execution
 
-def _attachment_text(fixture: dict) -> str:
+def _attachment_text(fixture: dict, scratch: str) -> str:
     """Attachments are paths, resolved against the vault. Keep them as paths in the
     prompt where the executor has a cwd -- it Reads them itself."""
+    # COPY each attachment into the trial's scratch dir and reference the COPY.
+    # A scratch cwd alone does not contain these jobs: passing an absolute vault
+    # path invites the worker to write back to it, and that is exactly what
+    # happened -- b4-security-review was asked to REVIEW bin/fetch-provider-table.py
+    # and instead rewrote it in place, 76 insertions into a production file, while
+    # b3-write-test added a test to the repo. Both runs did it. The job stays real
+    # because the content is identical; only the path it can reach changes.
     vault = pathlib.Path.home() / "code workshop"
+    box = pathlib.Path(scratch)
     out = []
     for a in fixture["input"].get("attachments", []):
         q = pathlib.Path(a)
-        out.append(f"- {q if q.is_absolute() else (vault / q)}")
+        src = q if q.is_absolute() else (vault / q)
+        dst = box / src.name
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        elif src.is_file():
+            shutil.copy2(src, dst)
+        else:
+            # A job whose source document is absent measures nothing, and it will
+            # still score: b2-read-doc-answer pointed at a path that does not exist
+            # and returned a P0 PASS in two consecutive runs, answering from the
+            # model rather than from the document it was supposed to read.
+            raise Refused(f"{fixture['id']}: attachment not found: {src}")
+        out.append(f"- {dst}")
     return "\n".join(out)
 
 
@@ -140,9 +161,9 @@ def scratch_cwd(run_id: str) -> str:
     return str(d)
 
 
-def build_prompt(fixture: dict) -> str:
+def build_prompt(fixture: dict, scratch: str) -> str:
     body = fixture["input"]["prompt"]
-    att = _attachment_text(fixture)
+    att = _attachment_text(fixture, scratch)
     return f"{body}\n\nFiles:\n{att}" if att else body
 
 
@@ -151,7 +172,7 @@ async def run_role(fixture: dict, role: str, cwd: str) -> dict:
     from mcp_brain_router.server import _delegate_role_impl
     t0 = time.perf_counter()
     r = await _delegate_role_impl(
-        role=role, prompt=build_prompt(fixture),
+        role=role, prompt=build_prompt(fixture, cwd),
         orchestrator="claude", mode="agentic", cwd=cwd,
     )
     answer = (r.get("answer") or "").strip()
@@ -175,7 +196,7 @@ def run_native(fixture: dict, cwd: str) -> dict:
     t0 = time.perf_counter()
     try:
         p = subprocess.run(
-            ["claude", "-p", build_prompt(fixture), "--output-format", "json"],
+            ["claude", "-p", build_prompt(fixture, cwd), "--output-format", "json"],
             capture_output=True, text=True, cwd=cwd, timeout=900,
         )
         d = json.loads(p.stdout) if p.returncode == 0 else {}
