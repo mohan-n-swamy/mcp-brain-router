@@ -968,8 +968,12 @@ def call_codex(
             # prints CLI help instead of delegating).
             CODEX_EXEC_BASE + ["-m", model, "-"],
             input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+            # NOTE: no stdin= here. `input=` already opens a stdin pipe and
+            # closes it, which is exactly what stops the CLI waiting on the
+            # inherited MCP pipe. Passing stdin= as well raises ValueError:
+            # "stdin and input arguments may not both be used" -- which killed
+            # every codex call and shows up as 308 validation_errors in the log.
             # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=CODEX_TIMEOUT_SECONDS,
@@ -1463,8 +1467,12 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
             # read as a codex flag (same protection as call_codex).
             CODEX_EXEC_BASE_AGENTIC + ["-m", model, "-"],
             input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
+            # NOTE: no stdin= here. `input=` already opens a stdin pipe and
+            # closes it, which is exactly what stops the CLI waiting on the
+            # inherited MCP pipe. Passing stdin= as well raises ValueError:
+            # "stdin and input arguments may not both be used" -- which killed
+            # every codex call and shows up as 308 validation_errors in the log.
             # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=AGENTIC_TIMEOUT_SECONDS,

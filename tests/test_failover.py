@@ -186,7 +186,15 @@ def test_every_cli_spawn_closes_stdin():
     src = inspect.getsource(backends)
     calls = src.count("result = subprocess.run(")
     assert calls == 8, calls
-    assert src.count("stdin=subprocess.DEVNULL,") == calls
+    # The invariant is the docstring's: a child must NOT inherit the MCP stdio
+    # pipe. Two mechanisms satisfy it -- stdin=DEVNULL, or input=, which opens a
+    # stdin pipe and closes it. The original assertion demanded DEVNULL
+    # specifically, and the two codex adapters passed BOTH, which raises
+    # ValueError("stdin and input arguments may not both be used") and killed
+    # every codex call: 308 validation_errors, the commonest failure in the log.
+    # Asserting the property instead of one mechanism is what lets that be fixed.
+    closed = src.count("stdin=subprocess.DEVNULL,") + src.count("input=f\"")
+    assert closed == calls, f"{closed} spawns close stdin, expected {calls}"
     cases = (
         (backends.call_glm_agentic, ("p", "glm-5.3", "/tmp")),
         (backends.call_grok_agentic, ("p", "grok-4.5", "/tmp")),
@@ -203,7 +211,13 @@ def test_every_cli_spawn_closes_stdin():
                 fn(*args)
             except BackendError:
                 pass  # some workers validate the stdout shape; the spawn kwargs are what we check
-            assert mrun.call_args.kwargs.get("stdin") is subprocess.DEVNULL, fn.__name__
+            kw = mrun.call_args.kwargs
+            # Same property, same reason as above: DEVNULL or input=, never both.
+            closed = kw.get("stdin") is subprocess.DEVNULL or kw.get("input") is not None
+            assert closed, f"{fn.__name__} inherits the MCP stdio pipe"
+            assert not (kw.get("stdin") is not None and kw.get("input") is not None), (
+                f"{fn.__name__} passes BOTH stdin and input -> ValueError at runtime"
+            )
 
 
 def test_cli_snippet_keeps_tail():
