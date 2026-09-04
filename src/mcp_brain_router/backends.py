@@ -1412,8 +1412,14 @@ def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                 _KIMI_BIN,
                 "-p",
                 f"{AGENTIC_SYSTEM}\n\n{prompt}",
+                # NOT "json". Kimi's CLI accepts only text and stream-json, and
+                # rejects json with exit 1 in ~450ms. C16 switched this to json to
+                # harvest the usage envelope the Claude-family CLIs emit; kimi has no
+                # such envelope, so every agentic kimi call has failed since. Kimi is
+                # first candidate for worker AND simple, so the fail-open cascade sent
+                # the whole rig to glm without anything appearing to break.
                 "--output-format",
-                "json",
+                "text",
             ],
             # inherited stdin is the MCP stdio pipe; the CLIs wait on it
             stdin=subprocess.DEVNULL,
