@@ -180,8 +180,19 @@ def run_native(fixture: dict, cwd: str) -> dict:
 
 # ---------------------------------------------------------------- scoring
 
+def mechanically_scorable(fixture: dict) -> bool:
+    """Mechanical scoring is legal ONLY where the reference is a list of strings and
+    the acceptance items are set relations. b1 is that shape. The other reference
+    fixtures carry PROSE checks -- "answers NO", "names the RTK proxy as the cause",
+    "does not name a caller as the definition" -- which a subset test cannot evaluate.
+    Scoring those mechanically would produce a number with nothing behind it, which is
+    the thing must-not #9 exists to prevent, so they go to the judge instead."""
+    return (fixture["scoring"] == "reference"
+            and isinstance(fixture.get("reference", {}).get("answer"), list))
+
+
 def score_reference(fixture: dict, answer: str) -> list[dict]:
-    """B1-B2 only: one right answer genuinely exists, so this is mechanical."""
+    """Set comparison. Guarded by mechanically_scorable() -- never called otherwise."""
     ref = fixture["reference"]["answer"]
     want = [str(x).strip().lower() for x in (ref if isinstance(ref, list) else [ref])]
     got = [l.strip().lower() for l in answer.splitlines() if l.strip()]
@@ -243,34 +254,89 @@ def plan(fixtures: list[dict], routing: dict) -> dict:
     for f in fixtures:
         route = routing["jobs"][f["id"]]["route"]
         jc = TRIALS
-        kc = TRIALS if f["scoring"] == "rubric" else 0
+        kc = 0 if mechanically_scorable(f) else TRIALS
         job_calls += jc
         judge_calls += kc
         rows.append({"id": f["id"], "band": f["band"], "size_class": f["size_class"],
-                     "scoring": f["scoring"], "route": route,
+                     "scoring": f["scoring"],
+                     "scored_by": "mechanical" if mechanically_scorable(f) else "judge",
+                     "route": route,
                      "job_calls": jc, "judge_calls": kc,
                      "why": routing["jobs"][f["id"]]["why"]})
     return {"rows": rows, "job_calls": job_calls, "judge_calls": judge_calls,
             "total_calls": job_calls + judge_calls}
 
 
+# The router and the deck name the same providers differently: the router's Provider
+# enum says kimi/codex, while cards.json and headroom.json say moonshot/openai. C03 is
+# unaffected (it looks up Card.provider against headroom, and both say moonshot), but
+# anything crossing the two namespaces must translate or it silently reads nothing --
+# which is how kimi at 68% first displayed here as "n/a". C04 owns the real fix.
+ROUTER_TO_DECK = {"kimi": "moonshot", "codex": "openai"}
+
+
+def first_candidate_load(p: dict) -> dict[str, int]:
+    """Which provider absorbs each planned call, per the router's OWN resolution.
+    resolve_role touches no backend, so this is free. Falls back to naming the role
+    rather than guessing a provider if the config cannot be read."""
+    from mcp_brain_router.config import Config
+    from mcp_brain_router.router import Role, resolve_role
+    try:
+        cfg = Config.load()
+    except Exception:
+        cfg = None
+    load: dict[str, int] = {}
+
+    def first(role_name: str) -> str:
+        if cfg is None:
+            return f"?{role_name}"
+        try:
+            a = resolve_role(Role(role_name), "claude", cfg, mode="agentic")
+            v = getattr(a.provider, "value", str(a.provider))
+            return ROUTER_TO_DECK.get(v, v)
+        except Exception:
+            return f"?{role_name}"
+
+    for r in p["rows"]:
+        if r["job_calls"]:
+            key = "native (claude -p)" if r["route"] == "native" else first(r["route"])
+            load[key] = load.get(key, 0) + r["job_calls"]
+        if r["judge_calls"]:
+            key = first("adversary")
+            load[key] = load.get(key, 0) + r["judge_calls"]
+    return load
+
+
 def print_plan(p: dict, fixtures: list[dict], routing: dict) -> None:
     print("\nPLANNED RUN — nothing has been spent.\n")
-    print(f"{'job':24} {'band':5} {'size':6} {'scoring':9} {'route':7} {'calls':>5}")
-    print("-" * 66)
+    print(f"{'job':24} {'band':5} {'size':6} {'scoring':9} {'scored by':10} {'route':7} {'calls':>5}")
+    print("-" * 77)
     for r in p["rows"]:
         print(f"{r['id']:24} {r['band']:5} {r['size_class']:6} {r['scoring']:9} "
-              f"{r['route']:7} {r['job_calls'] + r['judge_calls']:>5}")
-    print("-" * 66)
+              f"{r['scored_by']:10} {r['route']:7} {r['job_calls'] + r['judge_calls']:>5}")
+    print("-" * 77)
     print(f"{'job calls (n=3 each)':<52}{p['job_calls']:>6}")
-    print(f"{'judge calls (rubric jobs only, n=3 each)':<52}{p['judge_calls']:>6}")
+    print(f"{'judge calls (every non-mechanical job, n=3 each)':<52}{p['judge_calls']:>6}")
     print(f"{'TOTAL PROVIDER CALLS':<52}{p['total_calls']:>6}\n")
     print("Routing today — must-not #2, review this against ~/.agents/skills/delegate/SKILL.md:")
     for r in p["rows"]:
         print(f"  {r['id']:24} -> {r['route']:7}  {r['why']}")
+    # must-not #10: an exhaustion mid-run changes which shard answers, so the "before"
+    # stops being today's routing. Printing headroom does not surface that -- what
+    # matters is WHICH provider absorbs the calls, resolved by the router's own
+    # skip-self logic (resolve_role calls no backend, so this spends nothing).
     h = read_headroom()
-    print("\nHeadroom at plan time:")
-    for prov, v in (h.get("providers") or {}).items():
+    load = first_candidate_load(p)
+    print("\nWhere these calls actually land, and the quota they land on:")
+    provs = h.get("providers") or {}
+    for prov, n in sorted(load.items(), key=lambda kv: -kv[1]):
+        uw = (provs.get(prov) or {}).get("used_week")
+        shown = "n/a" if uw is None else f"{uw:.0%}"
+        warn = "  <-- HIGH" if isinstance(uw, (int, float)) and uw >= 0.60 else ""
+        print(f"  {prov:10} first-candidate for {n:>3} of {p['total_calls']} calls"
+              f"   used_week={shown}{warn}")
+    print("\nFull headroom:")
+    for prov, v in provs.items():
         uw = v.get("used_week")
         print(f"  {prov:10} used_week={'n/a' if uw is None else f'{uw:.0%}'}")
     print(f"\nfixture-set hash: {fixture_set_hash(fixtures)}")
@@ -285,11 +351,29 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "router_head": git_head(), "fixture_set_hash": fixture_set_hash(fixtures),
         "trials_per_cell": TRIALS, "planned": len(fixtures),
+        # `claude -p` has a smaller context and no conversation history, so a native
+        # row is the honest measurable stand-in for in-session work -- not its cost.
+        # Named here so nobody later reads these rows as the live session's spend.
+        "native_proxy": "claude -p --output-format json",
         "planned_calls": p["total_calls"],
         "headroom_at_start": read_headroom(),
         "routing_reviewed_by": routing.get("reviewed_by"),
         "complete": False,
     }
+    def flush(rows: list, complete: bool) -> None:
+        """Persist after every fixture. Money already spent must survive a crash on the
+        next row -- and a partial file that SAYS it is partial is exactly what must-not
+        #3 asks for. Same atomic temp+replace; a reader never sees a half-written file."""
+        meta["complete"] = complete
+        meta["finished_at"] = datetime.now(timezone.utc).isoformat()
+        meta["headroom_at_end"] = read_headroom()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix=".bench.")
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"meta": meta, "results": rows}, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, out_path)
+
     results = []
     for f in fixtures:
         route = routing["jobs"][f["id"]]["route"]
@@ -299,7 +383,7 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
             t = run_native(f, cwd) if route == "native" else await run_role(f, route, cwd)
             if t["ok"]:
                 t["acceptance"] = (score_reference(f, t["answer"])
-                                   if f["scoring"] == "reference"
+                                   if mechanically_scorable(f)
                                    else await score_rubric(f, t["answer"], cwd))
             else:
                 t["acceptance"] = None
@@ -327,18 +411,9 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
             "trials": trials, "trials_ok": sum(1 for t in trials if t["ok"]),
             "acceptance": scored[0] if scored else None, "p0_pass": p0,
         })
+        # must-not #3: complete is derived from the data, never set by hand.
+        flush(results, complete=len(results) == meta["planned"])
 
-    meta["finished_at"] = datetime.now(timezone.utc).isoformat()
-    meta["headroom_at_end"] = read_headroom()
-    # must-not #3: complete is set from the data, never by hand.
-    meta["complete"] = len(results) == meta["planned"]
-    doc = {"meta": meta, "results": results}
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix=".bench.")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(doc, fh, indent=2)
-        fh.write("\n")
-    os.replace(tmp, out_path)
     print(f"\nwrote {out_path}  complete={meta['complete']}  rows={len(results)}")
     return 0 if meta["complete"] else 1
 
