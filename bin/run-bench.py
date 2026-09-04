@@ -47,6 +47,9 @@ TRIALS = 3  # R30: median of 3. One run lets a 534s hang or a lucky 48s call dec
 sys.path.insert(0, str(REPO / "src"))
 
 
+_JUDGE_SPEND: list[dict] = []  # scoring calls: real spend, never folded into job cost
+
+
 class Refused(Exception):
     """A STOP condition from C07. Raised at load, before anything is spent."""
 
@@ -227,6 +230,8 @@ async def score_rubric(fixture: dict, answer: str, cwd: str) -> list[dict]:
     r = await _delegate_role_impl(role="adversary", prompt=prompt,
                                  orchestrator="claude", mode="agentic", cwd=cwd)
     raw = (r.get("answer") or "").strip()
+    _JUDGE_SPEND.append({"backend": r.get("backend"), "cost_usd": r.get("cost_usd"),
+                         "tokens_in": r.get("tokens_in")})
     verdicts = {}
     try:
         start, end = raw.find("{"), raw.rfind("}")
@@ -355,6 +360,10 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         # row is the honest measurable stand-in for in-session work -- not its cost.
         # Named here so nobody later reads these rows as the live session's spend.
         "native_proxy": "claude -p --output-format json",
+        # Measured, not assumed: kimi is first candidate for worker AND simple but is
+        # failing fast (process_error) as of this run, so calls advance to glm. That IS
+        # today's routing and is recorded as such, not corrected for.
+        "shard_note": "kimi first-candidate; failing process_error at run time",
         "planned_calls": p["total_calls"],
         "headroom_at_start": read_headroom(),
         "routing_reviewed_by": routing.get("reviewed_by"),
@@ -365,6 +374,13 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         next row -- and a partial file that SAYS it is partial is exactly what must-not
         #3 asks for. Same atomic temp+replace; a reader never sees a half-written file."""
         meta["complete"] = complete
+        meta["judge_calls_spend"] = {
+            "calls": len(_JUDGE_SPEND),
+            "measured_usd": sum(x["cost_usd"] for x in _JUDGE_SPEND
+                                if isinstance(x["cost_usd"], (int, float))),
+            "unmeasured_calls": sum(1 for x in _JUDGE_SPEND if x["cost_usd"] is None),
+            "note": "scoring spend, never folded into any job's cost",
+        }
         meta["finished_at"] = datetime.now(timezone.utc).isoformat()
         meta["headroom_at_end"] = read_headroom()
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,6 +418,12 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
             "id": f["id"], "band": f["band"], "size_class": f["size_class"],
             "scoring": f["scoring"], "rotating": f["rotating"], "route": route,
             "backend": next((t["backend"] for t in trials if t["ok"]), None),
+            # The median blends three trials. If the shard advances mid-row -- kimi is
+            # currently failing fast, so a recovery would send some trials to kimi and
+            # some to glm -- the median stops describing one provider. Recording every
+            # backend touched makes that visible instead of hiding it behind the first.
+            "backends_all": sorted({t["backend"] for t in trials if t["ok"]}),
+            "mixed_backends": len({t["backend"] for t in trials if t["ok"]}) > 1,
             "model": next((t["model"] for t in trials if t["ok"]), None),
             # must-not #1: no estimate, ever. Unmeasurable is a state, not a gap to fill.
             "total_cost_usd": statistics.median(costs) if costs else None,
@@ -418,12 +440,50 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
     return 0 if meta["complete"] else 1
 
 
+async def probe(by_id: dict, routing: dict, cwd: str, run_id: str) -> int:
+    """One role call and one native call, scored the way the real run scores them."""
+    picks = [("b1-list-wikilinks", "role"), ("b2-find-symbol", "native")]
+    ok_all = True
+    for jid, kind in picks:
+        f = by_id[jid]
+        route = routing["jobs"][jid]["route"]
+        print(f"\n=== {jid}  route={route}  ({kind} path)")
+        t = run_native(f, cwd) if route == "native" else await run_role(f, route, cwd)
+        print(f"  ok={t['ok']} backend={t['backend']} model={t['model']}")
+        print(f"  tokens_in={t['tokens_in']} tokens_out={t['tokens_out']} "
+              f"cache_read={t['cache_read_input_tokens']}")
+        print(f"  usage_source={t['usage_source']} cost_usd={t['cost_usd']} "
+              f"elapsed_ms={t['elapsed_ms']}")
+        if not t["ok"]:
+            print(f"  FAILED: failure_kind={t['failure_kind']}")
+            ok_all = False
+            continue
+        print(f"  answer[:200]: {t['answer'][:200]!r}")
+        acc = (score_reference(f, t["answer"]) if mechanically_scorable(f)
+               else await score_rubric(f, t["answer"], cwd))
+        for a in acc:
+            print(f"    {a['id']} p0={a['p0']} passed={a['passed']} "
+                  f"via={a['scored_by']}  ({a['check']})")
+        if any(a["passed"] is None for a in acc):
+            print("  NOTE: an item came back unscored — the judge did not parse.")
+            ok_all = False
+        if t["cost_usd"] is None:
+            print("  NOTE: no cost measured on this path.")
+            ok_all = False
+    print(f"\nprobe {run_id}: {'all paths returned measurable, scored results'
+                              if ok_all else 'SOMETHING DID NOT WORK — see NOTE/FAILED above'}")
+    print("Nothing was written. baseline.json untouched.")
+    return 0 if ok_all else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="C07 benchmark harness")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--dry-run", action="store_true", help="print the plan, spend nothing")
     g.add_argument("--baseline", action="store_true",
                    help="run the 8 frozen fixtures on TODAY's routing")
+    g.add_argument("--probe", action="store_true",
+                   help="2 calls: one role trial, one native trial. Writes nothing.")
     ap.add_argument("--cwd", default=str(Path.home() / "code workshop"))
     args = ap.parse_args()
 
@@ -435,6 +495,15 @@ def main() -> int:
     except Refused as e:
         print(f"REFUSED: {e}", file=sys.stderr)
         return 2
+
+    if args.probe:
+        # The guards all exit at load, so run_role / run_native / score_* have never
+        # executed. Two calls through the REAL functions, before committing 45 to a
+        # path nobody has seen work. C16's own lesson: probe before wiring.
+        run_id = f"probe-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+        os.environ["BRAIN_ROUTER_BENCH_RUN_ID"] = run_id
+        by_id = {f["id"]: f for f in fixtures}
+        return asyncio.run(probe(by_id, routing, args.cwd, run_id))
 
     p = plan(fixtures, routing)
     if args.dry_run:
