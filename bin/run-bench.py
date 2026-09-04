@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""run-bench.py — C07, the benchmark harness (specs/001-agent-capability-routing).
+
+Runs real jobs against real routing and records MEASURED cost and SCORED quality.
+Owns bench/baseline.json and bench/results.json. Writes neither deck.json nor
+cards.json -- C07's boundary: the benchmark feeds ranking, it must not perform it,
+or the measurement and the thing measured become one artifact.
+
+--baseline is the reason this exists and the reason it runs first. It measures the
+8 frozen fixtures on TODAY's routing. prd.md R6 makes the headline result a delta,
+and a delta needs a before; today's routing stops existing the moment C04 ships,
+so this number is unrecoverable if skipped (execution-plan.md slice 0b).
+
+Governed by specs/001-agent-capability-routing/.rigor.md. The must-not rows are
+mechanised here, not merely intended:
+  #1 no estimated cost      -> cost_basis has no default; unmeasurable writes "unmeasured"
+  #3 no partial as whole    -> meta.planned set before the first call, meta.complete last
+  #4 no rotating in a delta -> --baseline filters rotating and takes no job list
+  #5 no similarity at B4/B5 -> refused at LOAD, before any spend
+  #8 no log pollution       -> BRAIN_ROUTER_BENCH_RUN_ID stamps every record
+ #11 no unapproved spend    -> --dry-run and --baseline are separate invocations
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SPEC = Path.home() / "code workshop" / "specs" / "001-agent-capability-routing"
+JOBS = SPEC / "bench" / "jobs"
+ROUTING = SPEC / "bench" / "routing-today.json"
+HEADROOM = Path.home() / ".local" / "state" / "headroom.json"
+DELEG_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
+TRIALS = 3  # R30: median of 3. One run lets a 534s hang or a lucky 48s call decide a band.
+
+sys.path.insert(0, str(REPO / "src"))
+
+
+class Refused(Exception):
+    """A STOP condition from C07. Raised at load, before anything is spent."""
+
+
+# ---------------------------------------------------------------- load + refuse
+
+def load_fixtures(frozen_only: bool) -> list[dict]:
+    fx = [json.loads(p.read_text()) for p in sorted(JOBS.glob("*.json"))]
+    if not fx:
+        raise Refused(f"no fixtures under {JOBS}")
+    for f in fx:
+        # C07 STOP: the runner must REFUSE a B4/B5 job scored by similarity. At those
+        # bands the reference is an answer Opus produced, so similarity measures
+        # Opus-likeness and marks a different-but-valid finding set wrong (R29).
+        if f["band"] in ("B4", "B5") and f["scoring"] not in ("rubric",):
+            raise Refused(
+                f"{f['id']}: band {f['band']} scored by {f['scoring']!r}. "
+                "B4/B5 score on rubric only (R29) -- refusing before any spend."
+            )
+        # C07 STOP: a job with no reference answer measures nothing and cannot be scored.
+        if f["scoring"] == "reference" and not f.get("reference", {}).get("answer"):
+            raise Refused(f"{f['id']}: scoring=reference but no reference answer.")
+        if not any(a.get("p0") for a in f.get("acceptance", [])):
+            raise Refused(f"{f['id']}: no P0 acceptance item (R28).")
+    if frozen_only:
+        fx = [f for f in fx if not f["rotating"]]
+    return fx
+
+
+def load_routing(fixtures: list[dict]) -> dict:
+    """The 'before' routing table. Must-not #2: a job is never silently re-routed,
+    so the table is a reviewed file, not a heuristic buried in this script."""
+    if not ROUTING.exists():
+        raise Refused(f"missing {ROUTING} -- the baseline cannot guess today's routing.")
+    r = json.loads(ROUTING.read_text())
+    missing = [f["id"] for f in fixtures if f["id"] not in r["jobs"]]
+    if missing:
+        raise Refused(f"routing-today.json has no row for: {missing}")
+    return r
+
+
+def fixture_set_hash(fixtures: list[dict]) -> str:
+    """A changed prompt invalidates the series (bench/README.md). The hash makes
+    that detectable rather than a thing someone has to remember."""
+    blob = json.dumps([{"id": f["id"], "prompt": f["input"]["prompt"]} for f in fixtures],
+                      sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def read_headroom() -> dict:
+    try:
+        return json.loads(HEADROOM.read_text())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def git_head() -> str:
+    try:
+        return subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+# ---------------------------------------------------------------- execution
+
+def _attachment_text(fixture: dict) -> str:
+    """Attachments are paths, resolved against the vault. Keep them as paths in the
+    prompt where the executor has a cwd -- it Reads them itself."""
+    return "\n".join(f"- {a}" for a in fixture["input"].get("attachments", []))
+
+
+def build_prompt(fixture: dict) -> str:
+    body = fixture["input"]["prompt"]
+    att = _attachment_text(fixture)
+    return f"{body}\n\nFiles:\n{att}" if att else body
+
+
+async def run_role(fixture: dict, role: str, cwd: str) -> dict:
+    """One trial through the router, today's shards, unmodified."""
+    from mcp_brain_router.server import _delegate_role_impl
+    t0 = time.perf_counter()
+    r = await _delegate_role_impl(
+        role=role, prompt=build_prompt(fixture),
+        orchestrator="claude", mode="agentic", cwd=cwd,
+    )
+    answer = (r.get("answer") or "").strip()
+    # memory rig_brain_router_simple_lane_dead_on_glm: the lane returned rc 0 with
+    # answer=null after 190s. An empty answer is a FAILED trial, never a cheap success.
+    ok = bool(answer) and not r.get("error") and not r.get("exhausted")
+    return {
+        "ok": ok, "answer": answer, "backend": r.get("backend"), "model": r.get("model"),
+        "tokens_in": r.get("tokens_in"), "tokens_out": r.get("tokens_out"),
+        "cache_read_input_tokens": r.get("cache_read_input_tokens"),
+        "usage_source": r.get("usage_source"), "cost_usd": r.get("cost_usd"),
+        "elapsed_ms": r.get("elapsed_ms") or round((time.perf_counter() - t0) * 1000),
+        "failure_kind": r.get("failure_kind"), "fell_back": bool(r.get("fell_back")),
+    }
+
+
+def run_native(fixture: dict, cwd: str) -> dict:
+    """A job the rig does NOT route today. Measured the same way, through the
+    Claude CLI's own JSON envelope, which carries total_cost_usd directly (C16).
+    Recording this as a role would flatter the after-number (must-not #2)."""
+    t0 = time.perf_counter()
+    try:
+        p = subprocess.run(
+            ["claude", "-p", build_prompt(fixture), "--output-format", "json"],
+            capture_output=True, text=True, cwd=cwd, timeout=900,
+        )
+        d = json.loads(p.stdout) if p.returncode == 0 else {}
+    except Exception as e:
+        return {"ok": False, "answer": "", "backend": "native", "model": None,
+                "cost_usd": None, "usage_source": None, "tokens_in": None,
+                "tokens_out": None, "cache_read_input_tokens": None,
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+                "failure_kind": type(e).__name__, "fell_back": False}
+    u = d.get("usage") or {}
+    answer = (d.get("result") or "").strip()
+    return {
+        "ok": bool(answer), "answer": answer, "backend": "native",
+        "model": d.get("model") or "claude-cli",
+        "tokens_in": u.get("input_tokens"), "tokens_out": u.get("output_tokens"),
+        "cache_read_input_tokens": u.get("cache_read_input_tokens"),
+        "usage_source": "cli-json" if u else None,
+        "cost_usd": d.get("total_cost_usd"),
+        "elapsed_ms": d.get("duration_ms") or round((time.perf_counter() - t0) * 1000),
+        "failure_kind": None, "fell_back": False,
+    }
+
+
+# ---------------------------------------------------------------- scoring
+
+def score_reference(fixture: dict, answer: str) -> list[dict]:
+    """B1-B2 only: one right answer genuinely exists, so this is mechanical."""
+    ref = fixture["reference"]["answer"]
+    want = [str(x).strip().lower() for x in (ref if isinstance(ref, list) else [ref])]
+    got = [l.strip().lower() for l in answer.splitlines() if l.strip()]
+    got_set, want_set = set(got), set(want)
+    out = []
+    for item in fixture["acceptance"]:
+        cid = item["id"]
+        if cid == "a1":
+            passed = want_set.issubset(got_set)
+        elif cid == "a2":
+            passed = not (got_set - want_set)
+        else:
+            passed = got == sorted(set(got)) and len(got) == len(set(got))
+        out.append({"id": cid, "p0": bool(item["p0"]), "check": item["check"],
+                    "passed": bool(passed), "scored_by": "mechanical"})
+    return out
+
+
+async def score_rubric(fixture: dict, answer: str, cwd: str) -> list[dict]:
+    """B3-B5: judged against the acceptance items, never against the reference text.
+    A separate call, so its cost is never mixed into the job's cost."""
+    from mcp_brain_router.server import _delegate_role_impl
+    items = [{"id": a["id"], "check": a["check"]} for a in fixture["acceptance"]]
+    prompt = (
+        "Score an answer against binary acceptance items. Judge ONLY against the items.\n"
+        "Do not reward resemblance to any particular style or author.\n\n"
+        f"TASK GIVEN:\n{fixture['input']['prompt']}\n\n"
+        f"ANSWER TO SCORE:\n{answer}\n\n"
+        f"ACCEPTANCE ITEMS:\n{json.dumps(items, indent=2)}\n\n"
+        'Reply with JSON only: {"results":[{"id":"a1","passed":true,"why":"..."}]}'
+    )
+    r = await _delegate_role_impl(role="adversary", prompt=prompt,
+                                 orchestrator="claude", mode="agentic", cwd=cwd)
+    raw = (r.get("answer") or "").strip()
+    verdicts = {}
+    try:
+        start, end = raw.find("{"), raw.rfind("}")
+        for v in json.loads(raw[start:end + 1])["results"]:
+            verdicts[v["id"]] = v
+    except Exception:
+        verdicts = {}
+    out = []
+    for item in fixture["acceptance"]:
+        v = verdicts.get(item["id"])
+        out.append({"id": item["id"], "p0": bool(item["p0"]), "check": item["check"],
+                    # An unparseable judge is NOT a pass. It is an unscored item, and
+                    # SC15 makes an unscored run unrankable rather than optimistic.
+                    "passed": (None if v is None else bool(v.get("passed"))),
+                    "why": (v or {}).get("why"),
+                    "scored_by": f"judge:{r.get('backend')}"})
+    return out
+
+
+# ---------------------------------------------------------------- plan + run
+
+def plan(fixtures: list[dict], routing: dict) -> dict:
+    rows = []
+    job_calls = judge_calls = 0
+    for f in fixtures:
+        route = routing["jobs"][f["id"]]["route"]
+        jc = TRIALS
+        kc = TRIALS if f["scoring"] == "rubric" else 0
+        job_calls += jc
+        judge_calls += kc
+        rows.append({"id": f["id"], "band": f["band"], "size_class": f["size_class"],
+                     "scoring": f["scoring"], "route": route,
+                     "job_calls": jc, "judge_calls": kc,
+                     "why": routing["jobs"][f["id"]]["why"]})
+    return {"rows": rows, "job_calls": job_calls, "judge_calls": judge_calls,
+            "total_calls": job_calls + judge_calls}
+
+
+def print_plan(p: dict, fixtures: list[dict], routing: dict) -> None:
+    print("\nPLANNED RUN — nothing has been spent.\n")
+    print(f"{'job':24} {'band':5} {'size':6} {'scoring':9} {'route':7} {'calls':>5}")
+    print("-" * 66)
+    for r in p["rows"]:
+        print(f"{r['id']:24} {r['band']:5} {r['size_class']:6} {r['scoring']:9} "
+              f"{r['route']:7} {r['job_calls'] + r['judge_calls']:>5}")
+    print("-" * 66)
+    print(f"{'job calls (n=3 each)':<52}{p['job_calls']:>6}")
+    print(f"{'judge calls (rubric jobs only, n=3 each)':<52}{p['judge_calls']:>6}")
+    print(f"{'TOTAL PROVIDER CALLS':<52}{p['total_calls']:>6}\n")
+    print("Routing today — must-not #2, review this against ~/.agents/skills/delegate/SKILL.md:")
+    for r in p["rows"]:
+        print(f"  {r['id']:24} -> {r['route']:7}  {r['why']}")
+    h = read_headroom()
+    print("\nHeadroom at plan time:")
+    for prov, v in (h.get("providers") or {}).items():
+        uw = v.get("used_week")
+        print(f"  {prov:10} used_week={'n/a' if uw is None else f'{uw:.0%}'}")
+    print(f"\nfixture-set hash: {fixture_set_hash(fixtures)}")
+    print(f"reviewed_by: {routing.get('reviewed_by')!r}")
+    print("\nNothing was spent. To run for real: python3 bin/run-bench.py --baseline\n")
+
+
+async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
+                  out_path: Path, run_id: str) -> int:
+    meta = {
+        "mode": "baseline", "run_id": run_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "router_head": git_head(), "fixture_set_hash": fixture_set_hash(fixtures),
+        "trials_per_cell": TRIALS, "planned": len(fixtures),
+        "planned_calls": p["total_calls"],
+        "headroom_at_start": read_headroom(),
+        "routing_reviewed_by": routing.get("reviewed_by"),
+        "complete": False,
+    }
+    results = []
+    for f in fixtures:
+        route = routing["jobs"][f["id"]]["route"]
+        trials = []
+        for i in range(TRIALS):
+            print(f"  {f['id']} trial {i + 1}/{TRIALS} via {route} ...", flush=True)
+            t = run_native(f, cwd) if route == "native" else await run_role(f, route, cwd)
+            if t["ok"]:
+                t["acceptance"] = (score_reference(f, t["answer"])
+                                   if f["scoring"] == "reference"
+                                   else await score_rubric(f, t["answer"], cwd))
+            else:
+                t["acceptance"] = None
+            t.pop("answer", None)  # keep the file about cost and score, not transcripts
+            trials.append(t)
+
+        costs = [t["cost_usd"] for t in trials if t["ok"] and isinstance(t["cost_usd"], (int, float))]
+        secs = [t["elapsed_ms"] for t in trials if isinstance(t["elapsed_ms"], (int, float))]
+        scored = [t["acceptance"] for t in trials if t["acceptance"]]
+        p0 = None
+        if scored:
+            # A card that misses any P0 item is unrankable in that band regardless of
+            # cost (R28). An unscored item is not a pass.
+            p0 = all(a["passed"] is True for tr in scored for a in tr if a["p0"])
+        results.append({
+            "id": f["id"], "band": f["band"], "size_class": f["size_class"],
+            "scoring": f["scoring"], "rotating": f["rotating"], "route": route,
+            "backend": next((t["backend"] for t in trials if t["ok"]), None),
+            "model": next((t["model"] for t in trials if t["ok"]), None),
+            # must-not #1: no estimate, ever. Unmeasurable is a state, not a gap to fill.
+            "total_cost_usd": statistics.median(costs) if costs else None,
+            "cost_basis": "measured" if costs else "unmeasured",
+            "cost_spread_usd": (max(costs) - min(costs)) if len(costs) > 1 else None,
+            "wall_clock_seconds": round(statistics.median(secs) / 1000, 1) if secs else None,
+            "trials": trials, "trials_ok": sum(1 for t in trials if t["ok"]),
+            "acceptance": scored[0] if scored else None, "p0_pass": p0,
+        })
+
+    meta["finished_at"] = datetime.now(timezone.utc).isoformat()
+    meta["headroom_at_end"] = read_headroom()
+    # must-not #3: complete is set from the data, never by hand.
+    meta["complete"] = len(results) == meta["planned"]
+    doc = {"meta": meta, "results": results}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix=".bench.")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(doc, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, out_path)
+    print(f"\nwrote {out_path}  complete={meta['complete']}  rows={len(results)}")
+    return 0 if meta["complete"] else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="C07 benchmark harness")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--dry-run", action="store_true", help="print the plan, spend nothing")
+    g.add_argument("--baseline", action="store_true",
+                   help="run the 8 frozen fixtures on TODAY's routing")
+    ap.add_argument("--cwd", default=str(Path.home() / "code workshop"))
+    args = ap.parse_args()
+
+    try:
+        # --baseline takes no job list, by construction: the delta series is the
+        # frozen 8 and nothing else (must-not #4).
+        fixtures = load_fixtures(frozen_only=True)
+        routing = load_routing(fixtures)
+    except Refused as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        return 2
+
+    p = plan(fixtures, routing)
+    if args.dry_run:
+        print_plan(p, fixtures, routing)
+        return 0
+
+    if not routing.get("reviewed_by"):
+        print("REFUSED: routing-today.json is unreviewed (reviewed_by is null).\n"
+              "         Must-not #2 is HUMAN: no command settles whether these routes\n"
+              "         are what the rig actually does today. Run --dry-run, review the\n"
+              "         table, then set reviewed_by/reviewed_at.", file=sys.stderr)
+        return 2
+
+    run_id = f"bench-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+    os.environ["BRAIN_ROUTER_BENCH_RUN_ID"] = run_id  # must-not #8
+    print(f"baseline run {run_id} — {p['total_calls']} planned calls")
+    return asyncio.run(execute(fixtures, routing, p, args.cwd,
+                               SPEC / "bench" / "baseline.json", run_id))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

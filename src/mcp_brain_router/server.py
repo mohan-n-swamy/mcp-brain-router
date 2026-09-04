@@ -152,6 +152,12 @@ def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
             "cost_usd": response.get("cost_usd"),
             "cache_read_input_tokens": response.get("cache_read_input_tokens"),
             "prompt_len": prompt_len,
+            # C07: benchmark traffic must stay separable from real work. This log
+            # is the rig's own cost history -- 2,319 records of jobs actually done
+            # -- and a benchmark sweep mixed into it silently skews every future
+            # reading of what the rig costs. run-bench.py sets the env var for the
+            # duration of a run; a real delegation leaves it unset and records null.
+            "bench_run_id": os.getenv("BRAIN_ROUTER_BENCH_RUN_ID") or None,
         }
         _DELEGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
         with _DELEGATION_LOG.open("a", encoding="utf-8") as fh:
