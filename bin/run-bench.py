@@ -30,6 +30,7 @@ import os
 import statistics
 import subprocess
 import sys
+import pathlib
 import tempfile
 import time
 import uuid
@@ -119,7 +120,24 @@ def git_head() -> str:
 def _attachment_text(fixture: dict) -> str:
     """Attachments are paths, resolved against the vault. Keep them as paths in the
     prompt where the executor has a cwd -- it Reads them itself."""
-    return "\n".join(f"- {a}" for a in fixture["input"].get("attachments", []))
+    vault = pathlib.Path.home() / "code workshop"
+    out = []
+    for a in fixture["input"].get("attachments", []):
+        q = pathlib.Path(a)
+        out.append(f"- {q if q.is_absolute() else (vault / q)}")
+    return "\n".join(out)
+
+
+def scratch_cwd(run_id: str) -> str:
+    """Where a trial is allowed to WRITE. The jobs are agentic and they do write:
+    b3-write-test put a real pytest file into the router repo, and both b4 reviews
+    wrote their findings to disk instead of returning them. With the vault as cwd a
+    trial can overwrite real work, and a benchmark that mutates what it measures is
+    not a measurement. Reads still reach the vault -- attachments go in as absolute
+    paths -- so the job stays real while its side effects stay contained."""
+    d = pathlib.Path(tempfile.gettempdir()) / f"bench-{run_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
 
 
 def build_prompt(fixture: dict) -> str:
@@ -364,6 +382,7 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         # failing fast (process_error) as of this run, so calls advance to glm. That IS
         # today's routing and is recorded as such, not corrected for.
         "shard_note": "kimi first-candidate; failing process_error at run time",
+        "scratch_cwd": scratch_cwd(run_id),
         "planned_calls": p["total_calls"],
         "headroom_at_start": read_headroom(),
         "routing_reviewed_by": routing.get("reviewed_by"),
@@ -396,11 +415,12 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         trials = []
         for i in range(TRIALS):
             print(f"  {f['id']} trial {i + 1}/{TRIALS} via {route} ...", flush=True)
-            t = run_native(f, cwd) if route == "native" else await run_role(f, route, cwd)
+            box = scratch_cwd(run_id)
+            t = run_native(f, box) if route == "native" else await run_role(f, route, box)
             if t["ok"]:
                 t["acceptance"] = (score_reference(f, t["answer"])
                                    if mechanically_scorable(f)
-                                   else await score_rubric(f, t["answer"], cwd))
+                                   else await score_rubric(f, t["answer"], box))
             else:
                 t["acceptance"] = None
             t.pop("answer", None)  # keep the file about cost and score, not transcripts
@@ -431,7 +451,18 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
             "cost_spread_usd": (max(costs) - min(costs)) if len(costs) > 1 else None,
             "wall_clock_seconds": round(statistics.median(secs) / 1000, 1) if secs else None,
             "trials": trials, "trials_ok": sum(1 for t in trials if t["ok"]),
-            "acceptance": scored[0] if scored else None, "p0_pass": p0,
+            # Per-item pass COUNT across trials, not trial 1's verdict. Storing the
+            # first trial made the row contradict itself: b1 showed every item passed
+            # beside p0_pass=False, because trial 2 had failed and only the median
+            # verdict knew. A summary that disagrees with its own verdict is worse
+            # than no summary.
+            "acceptance": ([{"id": a["id"], "p0": a["p0"], "check": a["check"],
+                             "passed_trials": sum(1 for tr in scored for b in tr
+                                                  if b["id"] == a["id"] and b["passed"] is True),
+                             "of_trials": len(scored),
+                             "scored_by": a["scored_by"]}
+                            for a in scored[0]] if scored else None),
+            "p0_pass": p0,
         })
         # must-not #3: complete is derived from the data, never set by hand.
         flush(results, complete=len(results) == meta["planned"])
@@ -448,7 +479,8 @@ async def probe(by_id: dict, routing: dict, cwd: str, run_id: str) -> int:
         f = by_id[jid]
         route = routing["jobs"][jid]["route"]
         print(f"\n=== {jid}  route={route}  ({kind} path)")
-        t = run_native(f, cwd) if route == "native" else await run_role(f, route, cwd)
+        box = scratch_cwd(run_id)
+        t = run_native(f, box) if route == "native" else await run_role(f, route, box)
         print(f"  ok={t['ok']} backend={t['backend']} model={t['model']}")
         print(f"  tokens_in={t['tokens_in']} tokens_out={t['tokens_out']} "
               f"cache_read={t['cache_read_input_tokens']}")
@@ -460,7 +492,7 @@ async def probe(by_id: dict, routing: dict, cwd: str, run_id: str) -> int:
             continue
         print(f"  answer[:200]: {t['answer'][:200]!r}")
         acc = (score_reference(f, t["answer"]) if mechanically_scorable(f)
-               else await score_rubric(f, t["answer"], cwd))
+               else await score_rubric(f, t["answer"], box))
         for a in acc:
             print(f"    {a['id']} p0={a['p0']} passed={a['passed']} "
                   f"via={a['scored_by']}  ({a['check']})")
