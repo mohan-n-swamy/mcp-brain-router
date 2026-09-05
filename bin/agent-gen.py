@@ -175,10 +175,17 @@ def plan(deck_path: Path) -> list[tuple[str, str]]:
     needed = sorted({r["band"] for r in deck_rows} | {r["band"] for r in native_rows}
                     | {b for _, b, *_ in ROUTINE})
     empty = [b for b in needed if not (bands.get(b) or {}).get("ranked")]
-    if empty:
+    if empty and len(empty) == len(needed):
         raise Refused(f"bands {empty} have no ranked card. A generated agent would carry a "
                       "guessed model on a production path (R21). On week 0 this is correct "
                       "sequencing: build the deck's rankings first.")
+    if empty:
+        # Week 0 (Mohan, 2026-09-05): a band with no ranked card gets no agent files;
+        # its skills keep routing by role through the legacy walk. Never a guessed model.
+        print(f"warning: bands {empty} have no ranked card; their agents are skipped",
+              file=sys.stderr)
+        needed = [b for b in needed if b not in empty]
+        deck_rows = [r for r in deck_rows if r["band"] not in empty]
     # A ranked list that is non-empty but whose winner carries no router_model, or
     # a band with no floor, would have written the literal 'None' into a production
     # agent file (refuter finding). Refuse before rendering.
@@ -201,6 +208,8 @@ def plan(deck_path: Path) -> list[tuple[str, str]]:
     for r in native_rows:
         out.append((f"{r['name']}.md", render_native(r, bands[r["band"]])))
     for name, band, q, executor, why in ROUTINE:
+        if band in empty:
+            continue
         row = {"name": name, "band": band, "q": q, "why": why, "irr": False}
         out.append((f"{name}.md", render_deck(row, bands[band], executor=executor)))
     return out

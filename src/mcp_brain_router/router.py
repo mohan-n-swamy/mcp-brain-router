@@ -169,12 +169,13 @@ def resolve_role(
         if row is None:
             logger.warning("routing_mode=deck but role %r has no band (role_bands=%r); legacy walk",
                            role.value, getattr(config, "role_bands", None))
-        elif len(row.ranked) < 3:
-            # R26: the deck may only route a band whose top-3 carries measured cost.
-            # gate-routing-mode.py checks this before the flag is set; this is the
-            # same rule at run time, so an unranked deck cannot route by accident.
-            logger.warning("routing_mode=deck but band %s has %d ranked cards (<3, R26); legacy walk",
-                           band, len(row.ranked))
+        elif len(row.ranked) < getattr(config, "deck_min_ranked", 3):
+            # R26: the deck may only route a band whose top-3 carries measured cost
+            # (deck_min_ranked relaxes the 3 for week 0). gate-routing-mode.py checks
+            # this before the flag is set; this is the same rule at run time, so an
+            # unranked deck cannot route by accident.
+            logger.warning("routing_mode=deck but band %s has %d ranked cards (<%d, R26); legacy walk",
+                           band, len(row.ranked), getattr(config, "deck_min_ranked", 3))
         else:
             survivors = gated(row, read_quota(),
                               daily_calls=read_daily_calls(),

@@ -213,3 +213,17 @@ def test_config_save_round_trips_routing_mode_and_role_bands(tmp_path, monkeypat
     back = Config.load()
     assert back.routing_mode == "deck"
     assert back.role_bands["worker"] == "B2"
+
+
+def test_deck_min_ranked_one_routes_a_single_ranked_card(tmp_path, monkeypatch):
+    """Week 0 (Mohan, 2026-09-05): deck_min_ranked = 1 lets a band with one ranked
+    card route by deck; the spec default (3) is untouched."""
+    p = _deck_file(tmp_path, {"B3": [_card("grok-4.5", "xai", 0.01)]})
+    monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
+    monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
+    monkeypatch.setattr(deckmod, "read_daily_calls", lambda *a, **k: {})
+    cfg = _cfg("deck")
+    cfg.deck_min_ranked = 1
+    a = resolve_role(Role.WORKER, "claude", cfg, mode="agentic")
+    assert a.model == "grok-4.5"
+    assert Config.__dataclass_fields__["deck_min_ranked"].default == 3

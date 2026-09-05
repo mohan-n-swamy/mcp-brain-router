@@ -92,6 +92,9 @@ class Config:
     role_bands: Optional[Dict[str, str]] = None
     # R8: per-provider daily call ceiling (deck provider names). Absent = off.
     daily_call_cap: Optional[Dict[str, int]] = None
+    # R26 says a band routes only when its top-3 carries measured cost. Week 0
+    # (Mohan, 2026-09-05): one ranked card is enough; the spec default stays 3.
+    deck_min_ranked: int = 3
 
     @classmethod
     def load(cls) -> "Config":
@@ -132,6 +135,7 @@ class Config:
             routing_mode=str(data.get("routing_mode") or "legacy"),
             role_bands=DEFAULT_ROLE_BANDS | (data.get("role_bands") or {}),
             daily_call_cap=data.get("daily_call_cap") or None,
+            deck_min_ranked=int(data.get("deck_min_ranked") or 3),
         )
 
     def save(self) -> None:

@@ -34,6 +34,7 @@ def main() -> int:
     if not deck:
         print("deck.json unreadable or empty -- deck mode cannot be honest")
         return 1
+    NEED = getattr(cfg, "deck_min_ranked", 3)  # R26 default 3; week 0 may relax
     short = []
     for role, band in (cfg.role_bands or DEFAULT_ROLE_BANDS).items():
         row = deck.get(band)
