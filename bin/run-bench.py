@@ -609,11 +609,15 @@ def print_plan(p: dict, fixtures: list[dict], routing: dict) -> None:
     print("\nNothing was spent. To run for real: python3 bin/run-bench.py --baseline\n")
 
 
+REMEASURE = False  # --remeasure: ignore measured cells (monthly full re-measure)
+
+
 def measured_cells(fixtures: list[dict]) -> set[tuple]:
     """Cells in results.json already holding 3 ok trials for THIS fixture set.
     A seed re-run (after a harness fix, or with a widened contender set) skips
-    them; rows from another fixture set never count."""
-    if not RESULTS.exists():
+    them; rows from another fixture set never count. --remeasure ignores them
+    so a scheduled run catches drift instead of confirming last month."""
+    if REMEASURE or not RESULTS.exists():
         return set()
     try:
         doc = json.loads(RESULTS.read_text())
@@ -672,6 +676,9 @@ def seed_plan_hash(fixtures: list[dict], sets: list[dict]) -> str:
         "fixtures": hashlib.sha256(json.dumps(fixtures, sort_keys=True).encode()).hexdigest(),
         "contenders": [[st["band"], sorted(c["slug"] for c in st["contenders"])] for st in sets],
         "trials": TRIALS,
+        # A re-measure spends on every cell, a plain run only on unmeasured ones:
+        # two different spends, two different hashes.
+        "remeasure": REMEASURE,
     }, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
 
@@ -1090,8 +1097,12 @@ def main() -> int:
                    help="one PONG call per unprobed contender model id; records "
                         "bench/reachability.json. --dry-run lists them; spend needs "
                         "--approve <hash>.")
+    ap.add_argument("--remeasure", action="store_true",
+                    help="--seed-round: re-run cells already measured (drift check)")
     ap.add_argument("--cwd", default=str(Path.home() / "code workshop"))
     args = ap.parse_args()
+    global REMEASURE
+    REMEASURE = bool(args.remeasure)
     if not (args.dry_run or args.baseline or args.probe or args.seed_round or args.probe_cards):
         ap.error("one of --dry-run, --baseline, --probe, --seed-round is required")
     if args.probe and args.dry_run:

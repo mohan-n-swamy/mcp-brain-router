@@ -15,6 +15,7 @@ by proving each band winner is alive rather than by trusting the build.
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import os
 import subprocess
@@ -248,7 +249,42 @@ def run_probe() -> int:
     return proc.returncode or 1
 
 
-def full_refresh() -> int:
+def bench_plan(mode: str, remeasure: bool) -> tuple[int, str | None]:
+    """Ask C07 for its plan without spending: (calls, approve-hash). C07 prints
+    'plan hash: X' and either 'TOTAL PROVIDER CALLS  N' (seed) or 'To spend N
+    tiny calls' (probe); zero calls prints no hash."""
+    cmd = [sys.executable, str(BENCH), mode, "--dry-run"] + (["--remeasure"] if remeasure else [])
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    if out.returncode != 0:
+        print(f"STOP: {mode} --dry-run exited {out.returncode}:\n{out.stderr}", file=sys.stderr)
+        raise SystemExit(out.returncode)
+    text = out.stdout
+    h = re.search(r"^plan hash: (\S+)$", text, re.M)
+    n = re.search(r"^TOTAL PROVIDER CALLS\s+(\d+)$", text, re.M) \
+        or re.search(r"^To spend (\d+) tiny calls", text, re.M)
+    calls = int(n.group(1)) if n else 0
+    return calls, (h.group(1) if h else None)
+
+
+def spend_within_budget(step: str, mode: str, max_calls: int, remeasure: bool) -> None:
+    """Unattended spend is allowed only up to a standing budget (must-not #11
+    for a scheduled job). Over budget: STOP, print the plan, spend nothing."""
+    calls, h = bench_plan(mode, remeasure)
+    if calls == 0:
+        print(f"== {step}: nothing to spend, skipped")
+        return
+    if calls > max_calls:
+        print(f"STOP: {step} wants {calls} provider calls; standing budget is "
+              f"--max-calls {max_calls}. Nothing was spent. To run it by hand:\n"
+              f"  python3 {BENCH} {mode} --approve {h}"
+              f"{' --remeasure' if remeasure else ''}", file=sys.stderr)
+        raise SystemExit(4)
+    print(f"== {step}: {calls} calls within budget {max_calls}, approving plan {h}")
+    run(step, [sys.executable, str(BENCH), mode, "--approve", h]
+        + (["--remeasure"] if remeasure else []))
+
+
+def full_refresh(max_calls: int = 0, remeasure: bool = False) -> int:
     if not bench_supports_seed_round():
         print(
             "STOP: run-bench.py does not accept --seed-round. The refresh's "
@@ -260,7 +296,11 @@ def full_refresh() -> int:
         return 3
 
     run("fetch (C01)", [sys.executable, str(FETCH)])
-    run("benchmark (C07)", [sys.executable, str(BENCH), "--seed-round"])
+    # New cards from the fetch may enter a contender set; their model ids are
+    # probed (one tiny call each) before the seed can spend three trials on
+    # an id the CLI refuses. Both steps draw on the same standing budget.
+    spend_within_budget("probe new cards (C07)", "--probe-cards", max_calls, False)
+    spend_within_budget("benchmark (C07)", "--seed-round", max_calls, remeasure)
 
     # deck.prev.json is written BEFORE the new deck exists so there is no
     # window -- and no failure of build-deck -- in which the old deck is
@@ -302,11 +342,17 @@ def main() -> int:
     ap.add_argument("--diff-only", action="store_true",
                     help="compare deck.prev.json against deck.json, write nothing, "
                          "exit 1 if anything changed")
+    ap.add_argument("--max-calls", type=int, default=0,
+                    help="standing budget of provider calls this unattended run may "
+                         "spend on probe + benchmark; over budget STOPs with the plan "
+                         "(default 0: never spend unattended)")
+    ap.add_argument("--remeasure", action="store_true",
+                    help="re-run cells already measured (monthly drift check)")
     args = ap.parse_args()
 
     if args.diff_only:
         return diff_only()
-    return full_refresh()
+    return full_refresh(max_calls=args.max_calls, remeasure=args.remeasure)
 
 
 if __name__ == "__main__":
