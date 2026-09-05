@@ -10,36 +10,24 @@
 
 ## Current goal
 
-Ship the live-CLI worker contract (Grok/GLM/Kimi/Codex/Anthropic) and respawn the host MCP so `/delegate` uses it.
+Deck routing live for week 0 (spec 001). Watch it; build nothing until use says so.
 
 ## What is now true
 
-Agentic CLI workers match the live CLIs, not the 2026-07 mock contract:
-
-- Grok: no `--max-turns 10` (that cancelled real work — 114 audit `process_error` with `max_turns_reached`); JSON `stopReason` accepts `end_turn` and `EndTurn`; no Claude-ID `--tools` allowlist; lean `GROK_HOME` at `~/.local/state/brain-router-grok-home` + `GROK_MEMORY=0`.
-- GLM + Anthropic: `--permission-mode bypassPermissions` (was `acceptEdits` — file edits passed, shell verify could die).
-- All CLI workers: `process_error` keeps a sanitized stderr/JSON snippet. Quota-only cascade unchanged.
-
-Live config `~/.config/mcp-brain-router/config.toml` roles (also `DEFAULT_ROLES` in WT `config.py`): worker `glm-5.3 → kimi → grok-4.5 → sonnet → terra` · simple same GLM-first · thinker/adversary `grok-4.5` lead, Claude, Codex.
+- `routing_mode = "deck"`, `deck_min_ranked = 1` in `~/.config/mcp-brain-router/config.toml`. Ranked: B2 glm-5.3-flash + glm-4.7-flash · B3 glm-5.3-flash · B5 glm-5.3-flash · B1/B4 none (legacy walk, router warns per call).
+- 29 generated agents in `~/.claude/agents` (`generated-by: agent-gen`), `agent-lint` 0/39.
+- Route gate in **enforce** for claude, codex, grok, kimi, gemini via `~/.claude/state/route-gate.mode`; observations carry `caller`.
+- Bench: 1 trial/cell; contenders need a probed model id (`bench/reachability.json`); refresh monthly under `--max-calls 250`.
+- Luna cards unmeasured (codex CLI reports no usage) → never ranked. Design failure recorded: cost measured on flat subscriptions; API already scores capability.
 
 ## Latest verified evidence
 
-- **pytest -q** this wrap: **158 passed, 1 skipped** (ruff clean on `backends.py` + `test_agentic.py`).
-- **Live V-gate** this wrap: `call_grok_agentic` wrote `OK` to `/tmp/grok-agentic-vgate-20260825/vgate-ok.txt` in 11s; returned content (not `no_tool_effect`).
-- **VPS this wrap:** vultr reachable; brain-router **not** installed.
-- Editable install: `mcp-brain-router` 0.1.0 → repo `src/`. Host Grok MCP process still holds pre-fix code until respawn.
+2026-09-05: `gate-routing-mode.py` rc 0 (WARN simple→B1, adversary→B4 legacy) · `probe-band-winners.py` SC13 PASS B2/B3/B5 ALIVE · route-gate probes: curl blocked / git status allowed on all five adapters · pytest 267 passed, 1 skipped · hook selftest 78/79 (timing budget under load 11).
 
 ## Blocker
 
-This Grok session's `brain-router` stdio process is still the old import. `/mcps` disable+enable (or full Grok restart) required. Code is on disk.
+None.
 
 ## Next action
 
-1. Respawn `brain-router` MCP in the Grok TUI (`/mcps` → Space off/on).
-2. Commit WT (don't `git add -A` — `DOCTRINE.md` is untracked extra). Suggested:
-   `git add src/mcp_brain_router/backends.py tests/test_agentic.py src/mcp_brain_router/config.py src/mcp_brain_router/router.py src/mcp_brain_router/server.py STATUS.md && git commit`
-3. One live `delegate(role="worker", orchestrator="grok", mode="agentic", cwd=…)` and confirm audit JSONL.
-
----
-
-_Refresh with `bin/gen-status.rb mcp-brain-router` before /save, /park, /wrap-up when that helper is used._
+Nothing owed. If a glm answer on a B3 job is bad, that is the signal a P0 fixture is too easy. Deletion pass (API order + probe + n=1 P0, drop cost measurement) only if the deck earns it. Codex owns the claim-discipline mechanism: `/Users/mohannarayanswamy/code workshop/notes/2026-09-05-brief-codex-claim-discipline.md`.
