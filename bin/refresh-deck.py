@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -181,6 +182,30 @@ def run(step: str, cmd: list[str]) -> None:
         raise SystemExit(rc)
 
 
+RESULTS = Path.home() / "code workshop" / "specs" / "001-agent-capability-routing" / "bench" / "results.json"
+
+
+def spread_flags() -> list[str]:
+    """R7 detection: a ranked card whose 3 trials varied by more than 3x is flagged,
+    not silently ranked. The trials live in bench/results.json (C07 writes them);
+    deck.json carries only the median, so reading the deck for this was vacuous
+    (refuter finding)."""
+    import statistics
+    out: list[str] = []
+    try:
+        rows = json.loads(RESULTS.read_text(encoding="utf-8")).get("results") or []
+    except Exception:
+        return out
+    for r in rows:
+        costs = [t.get("cost_usd") for t in (r.get("trials") or []) if isinstance(t.get("cost_usd"), (int, float))]
+        if len(costs) >= 2:
+            med = statistics.median(costs)
+            if med > 0 and max(costs) > 3 * med:
+                out.append(f"TRIAL SPREAD {r.get('card') or r.get('id')} {r.get('band')}: "
+                           f"max {max(costs):.4f} exceeds 3x median {med:.4f} -- flagged, not ranked")
+    return out
+
+
 def run_probe() -> int:
     """Probe the new deck's band winners (C12) and map its exit code onto ours.
 
@@ -246,17 +271,25 @@ def full_refresh() -> int:
         PREV.write_text(json.dumps(old, indent=2) + "\n", encoding="utf-8")
         print(f"kept previous deck at {PREV}")
 
-    run("build (C02)", [sys.executable, str(BUILD)])
+    # Build to a SIDE file, emit the diff, and only then move it into place. The
+    # first version wrote deck.json first and diffed second, so an interrupt
+    # between the two left a new deck on disk with no diff ever shown (refuter).
+    NEW = STATE / "deck.new.json"
+    run("build (C02)", [sys.executable, str(BUILD), "--out", str(NEW)])
 
-    new = read_deck(DECK)
+    new = read_deck(NEW)
+    if new is None:
+        print("STOP: build produced no deck; the previous deck stays in place", file=sys.stderr)
+        return 1
     if old is None:
         print("baseline: no previous deck to diff against")
     else:
-        assert new is not None
-        lines = diff_decks(old, new)
+        lines = diff_decks(old, new) + spread_flags()
         for line in lines:
             print(line)
         print(f"diff: {len(lines)} change(s)" if lines else "diff: no changes")
+    os.replace(NEW, DECK)
+    print(f"wrote {DECK}")
 
     # LAST, and only on a full refresh (--diff-only writes nothing and must
     # never spend provider quota): prove the new deck's winners are alive.

@@ -264,6 +264,9 @@ def main() -> int:
     # writing into ~/.local/state, which a test must never do.
     ap.add_argument("--cards", default=None,
                     help="cards.json to read instead of the default state path")
+    ap.add_argument("--out", default=None,
+                    help="write the deck here instead of the state path (C08 builds to a "
+                         "side file, diffs, then moves it into place)")
     ap.add_argument("--results", default=None,
                     help="results.json to read instead of the default bench path")
     args = ap.parse_args()
@@ -312,25 +315,26 @@ def main() -> int:
     if pegged_low:
         print(f"pegged_low_demoted={pegged_low} (low-confidence pegs treated as unmeasured)")
 
+    out = Path(args.out) if args.out else OUT
     if args.dry_run:
         # Writes NOTHING -- not the file, not its parent directory. The STOPs above
         # still ran, so a dry-run reports what a real run would refuse.
-        print(f"dry-run: {OUT} not written")
+        print(f"dry-run: {out} not written")
         return 0
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
     # Temp file in the destination directory: os.replace is atomic only within one
     # filesystem, and a half-written deck.json must never be readable by the router.
-    fd, tmp = tempfile.mkstemp(dir=str(OUT.parent), prefix=".deck.", suffix=".json")
+    fd, tmp = tempfile.mkstemp(dir=str(out.parent), prefix=".deck.", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2)
-        os.replace(tmp, OUT)
+        os.replace(tmp, out)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
 
-    print(f"wrote {OUT}")
+    print(f"wrote {out}")
     return 0
 
 

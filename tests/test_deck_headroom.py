@@ -293,3 +293,53 @@ def test_gated_does_not_mutate_the_band_row(band_row):
         "glm-5-3-air",
         "grok-5",
     ]
+
+
+# ---------------------------------------------------------------- refuter findings, 2026-09-05
+
+def _row(*cards):
+    return BandRow(band="B3", floor=55.0, floor_status="ESTIMATE", ranked=list(cards), unranked=[])
+
+
+def _c(slug, provider, cost):
+    return Card(slug=slug, router_model=slug, provider=provider, model=slug, effort="base",
+                capability=60.0, price_blended=1.0, total_cost_usd=cost, size_class="small", p0_pass=True)
+
+
+def test_daily_cap_removes_the_provider_over_cap_and_keeps_order():
+    """R8, applied like headroom: over the cap -> removed, never demoted."""
+    row = _row(_c("a", "zhipu", 0.1), _c("b", "xai", 0.2), _c("c", "zhipu", 0.3))
+    out = gated(row, {}, daily_calls={"zhipu": 50}, daily_cap={"zhipu": 50})
+    assert [x.slug for x in out] == ["b"]
+    out2 = gated(row, {}, daily_calls={"zhipu": 49}, daily_cap={"zhipu": 50})
+    assert [x.slug for x in out2] == ["a", "b", "c"]
+
+
+def test_daily_cap_is_off_when_unconfigured_or_uncounted():
+    row = _row(_c("a", "zhipu", 0.1))
+    assert gated(row, {}, daily_calls={"zhipu": 999}, daily_cap=None) == row.ranked
+    assert gated(row, {}, daily_calls={}, daily_cap={"zhipu": 1}) == row.ranked
+
+
+def test_read_daily_calls_counts_today_only_and_skips_bench(tmp_path):
+    import json
+    from mcp_brain_router.deck import read_daily_calls
+    log = tmp_path / "d.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in [
+        {"ts": "2026-09-05T01:00:00+00:00", "backend": "glm"},
+        {"ts": "2026-09-05T02:00:00+00:00", "backend": "kimi"},
+        {"ts": "2026-09-05T03:00:00+00:00", "backend": "glm", "bench_run_id": "bench-x"},
+        {"ts": "2026-09-04T23:59:59+00:00", "backend": "glm"},
+        {"ts": "2026-09-05T04:00:00+00:00", "backend": "none"},
+    ]) + "\n")
+    assert read_daily_calls(log, today="2026-09-05") == {"zhipu": 1, "moonshot": 1}
+
+
+def test_stale_headroom_fails_open(tmp_path, caplog):
+    import json, logging
+    from mcp_brain_router.deck import read_quota
+    p = tmp_path / "headroom.json"
+    p.write_text(json.dumps({"fetched_at": "2020-01-01T00:00:00Z", "providers": {"zhipu": {"used_week": 0.99}}}))
+    with caplog.at_level(logging.WARNING):
+        assert read_quota(p) == {}
+    assert any("old" in r.message for r in caplog.records)

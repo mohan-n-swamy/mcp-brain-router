@@ -123,7 +123,8 @@ def main() -> int:
     print(f"  pegged {pegged} rows · total ${tot:.4f} (${meas:.4f} measured, ${tot-meas:.4f} pegged)")
 
     if a.write:
-        tgt["meta"]["pegged_from"] = donor_run
+        if pegged:
+            tgt["meta"]["pegged_from"] = donor_run  # provenance only when something was pegged
         pathlib.Path(a.target).write_text(json.dumps(tgt, indent=2) + "\n")
         print(f"  wrote {a.target}")
     else:

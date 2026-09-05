@@ -179,6 +179,18 @@ def plan(deck_path: Path) -> list[tuple[str, str]]:
         raise Refused(f"bands {empty} have no ranked card. A generated agent would carry a "
                       "guessed model on a production path (R21). On week 0 this is correct "
                       "sequencing: build the deck's rankings first.")
+    # A ranked list that is non-empty but whose winner carries no router_model, or
+    # a band with no floor, would have written the literal 'None' into a production
+    # agent file (refuter finding). Refuse before rendering.
+    broken = []
+    for b in needed:
+        row = bands[b]; top = row["ranked"][0]
+        if not top.get("router_model"):
+            broken.append(f"{b}: ranked[0] {top.get('slug')!r} has no router_model")
+        if row.get("floor") is None:
+            broken.append(f"{b}: floor is null")
+    if broken:
+        raise Refused("deck rows unusable: " + "; ".join(broken))
     irr = [r["name"] for r in deck_rows if r["irr"]]
     if irr:
         raise Refused(f"agent:deck rows marked IRR: {irr}. Irreversible work never enters the "
@@ -202,7 +214,8 @@ def write(files: list[tuple[str, str]], agents_dir: Path) -> tuple[int, int]:
         target = agents_dir / fname
         if target.exists():
             existing = target.read_text(encoding="utf-8")
-            if MARKER not in existing:
+            fm = existing.split("\n---\n", 1)[0] if existing.startswith("---\n") else ""
+            if f"\n{MARKER}" not in fm:   # marker as a frontmatter line, not prose
                 collisions.append(fname)
                 continue
             if existing == content:
@@ -242,7 +255,9 @@ def main() -> int:
         return 0
     w, u = write(files, Path(a.agents_dir))
     print(f"wrote {w}, unchanged {u}")
-    return 0
+    # Collisions were reported on stderr and left alone; exit 1 so a script cannot
+    # read 'wrote 0, unchanged 0' as a clean no-op (refuter finding).
+    return 1 if (w + u) < len(files) else 0
 
 
 if __name__ == "__main__":

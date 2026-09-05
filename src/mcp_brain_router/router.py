@@ -163,7 +163,7 @@ def resolve_role(
     # applied to a deck card exactly as to a [roles] entry. Anything the deck
     # cannot answer falls through to the legacy walk, which is never deleted (R16).
     if getattr(config, "routing_mode", "legacy") == "deck":
-        from .deck import gated, load_deck, read_quota
+        from .deck import gated, load_deck, read_daily_calls, read_quota
         band = (getattr(config, "role_bands", None) or {}).get(role.value)
         row = load_deck().get(band) if band else None
         if row is None:
@@ -176,7 +176,9 @@ def resolve_role(
             logger.warning("routing_mode=deck but band %s has %d ranked cards (<3, R26); legacy walk",
                            band, len(row.ranked))
         else:
-            survivors = gated(row, read_quota())
+            survivors = gated(row, read_quota(),
+                              daily_calls=read_daily_calls(),
+                              daily_cap=getattr(config, "daily_call_cap", None))
             if not survivors:
                 # C03 STOP: a gate that empties a band is a routing hole, and the
                 # legacy walk must not then hand the work to the very provider the

@@ -90,6 +90,8 @@ class Config:
     # rollback is this one value, not a redeploy (R16). [roles] is never deleted.
     routing_mode: str = "legacy"
     role_bands: Optional[Dict[str, str]] = None
+    # R8: per-provider daily call ceiling (deck provider names). Absent = off.
+    daily_call_cap: Optional[Dict[str, int]] = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -129,6 +131,7 @@ class Config:
             role_modes=DEFAULT_ROLE_MODES.copy(),
             routing_mode=str(data.get("routing_mode") or "legacy"),
             role_bands=DEFAULT_ROLE_BANDS | (data.get("role_bands") or {}),
+            daily_call_cap=data.get("daily_call_cap") or None,
         )
 
     def save(self) -> None:

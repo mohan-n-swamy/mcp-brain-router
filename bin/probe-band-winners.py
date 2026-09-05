@@ -115,6 +115,7 @@ async def probe_one(band: str, card, config: Config, cwd: str,
     except Exception as e:  # noqa: BLE001 -- any backend/credential failure is a failed probe
         row["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
         row["error"] = f"{type(e).__name__}: {e}"
+        row["exhausted"] = type(e).__name__ == "BackendQuotaError"  # same bookkeeping as the route() path
         say(args, f"  {band}: {card.slug} ERROR {row['error']}")
         return row
 
@@ -201,9 +202,11 @@ def main() -> int:
     if args.json:
         print(json.dumps(rows, indent=2))
 
-    failed = [r["band"] for r in rows if not r["ok"]]
+    failed = [r["band"] for r in rows if not r["ok"] or r["exhausted"]]
     if failed:
-        say(args, f"SC13 FAIL: bands whose winner did not answer ALIVE: "
+        # exhausted counts as failed even when the text says ALIVE: a winner that
+        # answered on its last drop of quota is not a live route (refuter finding).
+        say(args, f"SC13 FAIL: bands whose winner did not answer ALIVE, or answered exhausted: "
                   f"{', '.join(failed)} -- routing_mode stays legacy")
         return 1
     say(args, "SC13 PASS: every band winner answered ALIVE")

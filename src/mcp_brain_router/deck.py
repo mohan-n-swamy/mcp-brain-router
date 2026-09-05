@@ -154,7 +154,9 @@ def build_bands(cards: list[Card], floors: dict[str, float] | None = None,
 
 
 def gated(band_row: BandRow, quota: dict[str, float | None],
-          threshold: float = 0.90) -> list[Card]:
+          threshold: float = 0.90,
+          daily_calls: dict[str, int] | None = None,
+          daily_cap: dict[str, int] | int | None = None) -> list[Card]:
     """C03: remove cards whose provider is past threshold. Order is NEVER changed.
 
     This is a filter over an already-sorted list, so every survivor keeps its relative
@@ -174,7 +176,17 @@ def gated(band_row: BandRow, quota: dict[str, float | None],
         # key; deepseek has a key whose value is a balance, so the default never fires.
         return u if isinstance(u, (int, float)) else 0.0
 
-    survivors = [c for c in band_row.ranked if used(c.provider) < threshold]
+    def over_cap(provider: str) -> bool:
+        # R8: a per-provider daily call ceiling, applied exactly like headroom -- a
+        # provider over its cap is REMOVED from this band's list, never demoted. No
+        # cap configured, or no count readable, means the brake is off (fail open).
+        if not daily_cap or not daily_calls:
+            return False
+        cap = daily_cap.get(provider) if isinstance(daily_cap, dict) else daily_cap
+        return cap is not None and daily_calls.get(provider, 0) >= cap
+
+    survivors = [c for c in band_row.ranked
+                 if used(c.provider) < threshold and not over_cap(c.provider)]
     if band_row.ranked and not survivors:
         # C03's STOP: gating must never silently empty a band. Report the hole; do not
         # fall through to an over-quota provider, and do not quietly return nothing.
@@ -201,7 +213,53 @@ def read_quota(path=None) -> dict[str, float | None]:
     except Exception as e:  # noqa: BLE001 -- a dead quota source must not stop routing
         logger.warning("headroom unreadable (%s); no provider will be gated: %s", p, e)
         return {}
+    # Staleness is data (C14), and a stale file must fail OPEN here (C03): a frozen
+    # headroom.json would otherwise gate providers on hours-old figures forever. The
+    # emitter runs every 60 s; anything past STALE_S means the poller is dead.
+    try:
+        import datetime as _dt
+        ts = _dt.datetime.strptime(doc["fetched_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+        age = (_dt.datetime.now(_dt.timezone.utc) - ts).total_seconds()
+        if age > STALE_S:
+            logger.warning("headroom.json is %.0fs old (> %ds); treating as no signal", age, STALE_S)
+            return {}
+    except Exception as e:  # noqa: BLE001 -- unparseable stamp = stale
+        logger.warning("headroom fetched_at unreadable (%s); treating as no signal", e)
+        return {}
     return {name: entry.get("used_week") for name, entry in (doc.get("providers") or {}).items()}
+
+
+STALE_S = 900  # 15 min: 15 missed 60 s passes is a dead poller, not a slow one
+
+
+def read_daily_calls(path=None, today=None) -> dict[str, int]:
+    """R8: calls per provider so far today (UTC), from the delegation log, keyed by
+    DECK provider name. Benchmark traffic (bench_run_id set) is not routing and
+    is not counted. Unreadable log -> {} (no cap can fire; fail open)."""
+    import datetime as _dt
+    import json as _json
+    import pathlib as _pl
+    p = _pl.Path(path) if path else _pl.Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
+    day = today or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    counts: dict[str, int] = {}
+    try:
+        with p.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    r = _json.loads(line)
+                except Exception:
+                    continue
+                if not str(r.get("ts", "")).startswith(day) or r.get("bench_run_id"):
+                    continue
+                b = r.get("backend")
+                if not b or b in ("none", "router"):
+                    continue
+                prov = BACKEND_TO_DECK.get(b, ROUTER_TO_DECK.get(b, b))
+                counts[prov] = counts.get(prov, 0) + 1
+    except Exception as e:  # noqa: BLE001
+        logger.warning("delegation log unreadable (%s); daily cap cannot fire", e)
+        return {}
+    return counts
 
 
 # The router and the deck name the same providers differently: the router's
@@ -211,6 +269,12 @@ def read_quota(path=None) -> dict[str, float | None]:
 # how a provider at 68% weekly once displayed as having no quota at all.
 DECK_TO_ROUTER: dict[str, str] = {"moonshot": "kimi", "openai": "codex"}
 ROUTER_TO_DECK: dict[str, str] = {v: k for k, v in DECK_TO_ROUTER.items()}
+# The delegation log records the BACKEND name (the adapter), a third namespace:
+# glm / grok / kimi / codex / anthropic-cli / native. read_daily_calls maps it.
+BACKEND_TO_DECK: dict[str, str] = {
+    "glm": "zhipu", "grok": "xai", "kimi": "moonshot", "codex": "openai",
+    "anthropic-cli": "anthropic", "native": "anthropic",
+}
 
 
 def router_provider_name(deck_provider: str) -> str:
