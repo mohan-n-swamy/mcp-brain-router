@@ -61,6 +61,12 @@ def ensure_config_dir() -> Path:
     return CONFIG_DIR
 
 
+# C04: which band each role draws from when routing_mode == "deck".
+DEFAULT_ROLE_BANDS: Dict[str, str] = {
+    "simple": "B1", "worker": "B3", "adversary": "B4", "thinker": "B5",
+}
+
+
 @dataclass
 class Config:
     """Configuration for mcp-brain-router."""
@@ -77,6 +83,13 @@ class Config:
     # A code default is merged on load so a config.toml that omits the section
     # still resolves worker->agentic, every other role->chat.
     role_modes: Optional[Dict[str, str]] = None
+    # C04 (specs/001-agent-capability-routing). "legacy" walks [roles] exactly as
+    # before; "deck" resolves the role's band to a card by deck lookup and falls
+    # through to [roles] when the deck offers nothing. Legacy is the default and
+    # stays so until every band's top-3 carries a measured cost (SC5, R26). The
+    # rollback is this one value, not a redeploy (R16). [roles] is never deleted.
+    routing_mode: str = "legacy"
+    role_bands: Optional[Dict[str, str]] = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -114,6 +127,8 @@ class Config:
             # Role delegation is agentic-only. Older config files may still
             # contain chat overrides; normalize them during the shard migration.
             role_modes=DEFAULT_ROLE_MODES.copy(),
+            routing_mode=str(data.get("routing_mode") or "legacy"),
+            role_bands=DEFAULT_ROLE_BANDS | (data.get("role_bands") or {}),
         )
 
     def save(self) -> None:

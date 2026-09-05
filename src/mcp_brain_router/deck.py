@@ -150,3 +150,37 @@ def read_quota(path=None) -> dict[str, float | None]:
         logger.warning("headroom unreadable (%s); no provider will be gated: %s", p, e)
         return {}
     return {name: entry.get("used_week") for name, entry in (doc.get("providers") or {}).items()}
+
+
+# The router and the deck name the same providers differently: the router's
+# Provider enum says kimi and codex where cards.json and headroom.json say
+# moonshot and openai. This is the ONE place that translation lives. A lookup
+# that crosses the two without it does not fail -- it reads nothing, which is
+# how a provider at 68% weekly once displayed as having no quota at all.
+DECK_TO_ROUTER: dict[str, str] = {"moonshot": "kimi", "openai": "codex"}
+ROUTER_TO_DECK: dict[str, str] = {v: k for k, v in DECK_TO_ROUTER.items()}
+
+
+def router_provider_name(deck_provider: str) -> str:
+    return DECK_TO_ROUTER.get(deck_provider, deck_provider)
+
+
+def load_deck(path=None) -> dict[str, BandRow]:
+    """deck.json -> {band: BandRow}. Unreadable deck returns {} so the caller can
+    fall through to the legacy walk; a missing deck must never stop routing."""
+    import json
+    import pathlib
+    p = pathlib.Path(path) if path else pathlib.Path.home() / ".local" / "state" / "brain-router" / "deck.json"
+    try:
+        doc = json.loads(p.read_text())
+    except Exception as e:  # noqa: BLE001 -- fail open to legacy
+        logger.warning("deck unreadable (%s); legacy routing only: %s", p, e)
+        return {}
+    out: dict[str, BandRow] = {}
+    for row in doc.get("bands") or []:
+        cards = lambda xs: [Card(**{k: x.get(k) for k in Card.__dataclass_fields__}) for x in xs]  # noqa: E731
+        out[row["band"]] = BandRow(
+            band=row["band"], floor=row["floor"], floor_status=row["floor_status"],
+            ranked=cards(row.get("ranked") or []), unranked=cards(row.get("unranked") or []),
+        )
+    return out

@@ -6,6 +6,7 @@ credentials, and returns unified result dicts. Framework-free, unit-testable.
 
 import asyncio
 from dataclasses import dataclass
+import logging
 from enum import Enum
 from typing import Dict, Iterable, Optional
 
@@ -20,6 +21,9 @@ class Complexity(str, Enum):
     CHEAP = "cheap"
     CODE = "code"
     ADVERSARIAL = "adversarial"
+
+
+logger = logging.getLogger(__name__)
 
 
 class Role(str, Enum):
@@ -150,12 +154,44 @@ def resolve_role(
     if role is Role.ORCHESTRATOR:
         raise ValueError("orchestrator is selected by the human, not the router")
 
+    orchestrator_owner = orchestrator_provider(orchestrator)
+    exhausted = set(exhausted_providers)
+
+    # C04 (specs/001-agent-capability-routing): the deck path. It changes WHICH
+    # candidates are offered and in what order; it does not change who may receive
+    # work -- skip-self, skip-exhausted and the agentic Anthropic rule below are
+    # applied to a deck card exactly as to a [roles] entry. Anything the deck
+    # cannot answer falls through to the legacy walk, which is never deleted (R16).
+    if getattr(config, "routing_mode", "legacy") == "deck":
+        from .deck import gated, load_deck, read_quota
+        band = (getattr(config, "role_bands", None) or {}).get(role.value)
+        row = load_deck().get(band) if band else None
+        if row is not None:
+            for card in gated(row, read_quota()):
+                # provider_for_model on the ROUTER model id gives the router's own
+                # Provider, so the skip rules compare like with like. The deck's
+                # Card.provider (moonshot/openai) is only ever compared against
+                # headroom.json, inside gated(), where both sides use deck names.
+                try:
+                    provider = provider_for_model(card.router_model)
+                except ValueError:
+                    # A card the router cannot name cannot be routed. Found live:
+                    # o1 and o4-mini match no prefix in _MODEL_PROVIDER_PREFIXES.
+                    # Skipping is the only safe move -- raising here would take
+                    # the whole role down for a card that was never going to win,
+                    # and guessing a provider would send work to the wrong CLI.
+                    logger.warning("deck %s: card %r has no router provider; skipped",
+                                   band, card.router_model)
+                    continue
+                if provider in exhausted or provider is orchestrator_owner:
+                    continue
+                return _assignment_for(role, card.router_model, provider, mode,
+                                       reason=f"deck {band}: leftmost ranked card that clears the gate")
+
     candidates = (config.roles or {}).get(role.value, [])
     if not candidates:
         raise ValueError(f"no configured candidates for role: {role.value}")
 
-    orchestrator_owner = orchestrator_provider(orchestrator)
-    exhausted = set(exhausted_providers)
     for model in candidates:
         provider = provider_for_model(model)
         if provider in exhausted:
@@ -166,40 +202,8 @@ def resolve_role(
         # is already on. (Adversary has always had this rule; now universal.)
         if provider is orchestrator_owner:
             continue
-        if provider is Provider.ANTHROPIC:
-            if mode == "agentic":
-                # 002: no native hand-back — shell to the Anthropic CLI worker.
-                return Assignment(
-                    role=role,
-                    model=model,
-                    provider=provider,
-                    backend="anthropic-cli",
-                    execute_natively=False,
-                    reason=(
-                        "Anthropic agentic worker — shells to cc-brain claude in "
-                        "the real cwd (codex-orchestrator adversary / "
-                        "GLM+codex-exhausted fallback)"
-                    ),
-                )
-            # chat mode floor: the MCP never calls Anthropic. Native orchestrator
-            # executes it.
-            return Assignment(
-                role=role,
-                model=model,
-                provider=provider,
-                backend=None,
-                execute_natively=True,
-                reason="Anthropic candidate must execute in the native orchestrator",
-            )
-        backend, _ = _PROVIDER_TARGETS[provider]
-        return Assignment(
-            role=role,
-            model=model,
-            provider=provider,
-            backend=backend,
-            execute_natively=False,
-            reason="first eligible configured candidate",
-        )
+        return _assignment_for(role, model, provider, mode,
+                               reason="first eligible configured candidate")
 
     if role is Role.ADVERSARY:
         raise ValueError(
@@ -209,6 +213,35 @@ def resolve_role(
         f"no eligible candidate for role: {role.value} "
         "(all providers exhausted or owned by the orchestrator)"
     )
+
+
+def _assignment_for(role: Role, model: str, provider: Provider, mode: str,
+                    reason: str) -> Assignment:
+    """The one place a (model, provider) becomes an Assignment. Both the deck path
+    and the legacy walk return through here, so the agentic-Anthropic rule cannot
+    apply to one and not the other."""
+    if provider is Provider.ANTHROPIC:
+        if mode == "agentic":
+            # 002: no native hand-back — shell to the Anthropic CLI worker.
+            return Assignment(
+                role=role, model=model, provider=provider,
+                backend="anthropic-cli", execute_natively=False,
+                reason=(
+                    "Anthropic agentic worker — shells to cc-brain claude in "
+                    "the real cwd (codex-orchestrator adversary / "
+                    "GLM+codex-exhausted fallback)"
+                ),
+            )
+        # chat mode floor: the MCP never calls Anthropic. Native orchestrator
+        # executes it.
+        return Assignment(
+            role=role, model=model, provider=provider,
+            backend=None, execute_natively=True,
+            reason="Anthropic candidate must execute in the native orchestrator",
+        )
+    backend, _ = _PROVIDER_TARGETS[provider]
+    return Assignment(role=role, model=model, provider=provider,
+                      backend=backend, execute_natively=False, reason=reason)
 
 
 async def route_assignment(
