@@ -39,7 +39,13 @@ OUT = Path.home() / ".local/state/brain-router/cards.json"
 
 # Providers Mohan holds a subscription to, by the API's own creator slug.
 # Not a model list: adding a model to any of these is picked up automatically.
-REACHABLE_CREATORS = {"anthropic", "zai", "kimi", "xai", "openai", "deepseek"}
+#
+# deepseek removed 2026-09-05 (Mohan, R15). Its cards led B1-B3 by list price and
+# the rig cannot run them: no agentic adapter exists, the lane requires one, and
+# the account is a $0.13 pay-as-you-go balance. Reachable-by-subscription is not
+# executable-by-the-lane; this set now means the latter. The CREATOR_TO_PROVIDER
+# entry below stays so headroom.json's deepseek key still resolves.
+REACHABLE_CREATORS = {"anthropic", "zai", "kimi", "xai", "openai"}
 
 # The router's own provider names, which `gated()` and headroom.json key on.
 CREATOR_TO_PROVIDER = {
