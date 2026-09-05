@@ -1,9 +1,9 @@
 # mcp-brain-router — STATUS
 
-**Updated:** 2026-08-25
+**Updated:** 2026-09-05
 **Branch:** main
-**HEAD:** f1fda8b — feat: budget role shards, universal skip-self, knowledge rebase
-**Tree:** DIRTY (CLI-worker contract + glm-5.3 shard ids, uncommitted)
+**HEAD:** b8e3ae2 — week 0 flip: gate warns (not fails) on short bands, probe skips them, gen skips native rows
+**Tree:** DIRTY
 **Knowledge:** wrap 2026-08-25 (CLI contract) · prior rebase 2026-07-30
 **Safety tag:** rebase-pre-20260730-1016
 **Deploy:** not deployed — `ssh kamakshi` this wrap: hostname vultr; no brain-router git dir; no brain-router container. Open Brain compose is unrelated.
