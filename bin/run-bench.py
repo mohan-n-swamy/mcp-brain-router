@@ -782,7 +782,18 @@ async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
 
 
 async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
-                  out_path: Path, run_id: str) -> int:
+                  out_path: Path, run_id: str, prior: dict | None = None) -> int:
+    # --resume: a run killed mid-way (the harness reclaimed memory at fixture 9 of
+    # 12 on 2026-09-05) keeps its id and its flushed rows; only fixtures without
+    # three ok trials run again. The fixture-set hash must match, because rows
+    # from two fixture sets are not one baseline.
+    done: dict[str, dict] = {}
+    if prior:
+        if prior["meta"].get("fixture_set_hash") != fixture_set_hash(fixtures):
+            raise Refused("--resume: fixture set changed since the run started; not the same baseline")
+        done = {r["id"]: r for r in prior["results"] if r.get("trials_ok") == 3}
+        run_id = prior["meta"]["run_id"]
+        print(f"resuming {run_id}: {len(done)} fixtures already flushed, {len(fixtures) - len(done)} to run")
     meta = {
         "mode": "baseline", "run_id": run_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -800,6 +811,7 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         "planned_calls": p["total_calls"],
         "headroom_at_start": read_headroom(),
         "routing_reviewed_by": routing.get("reviewed_by"),
+        "resumed": bool(prior),
         "complete": False,
     }
     def flush(rows: list, complete: bool) -> None:
@@ -827,8 +839,10 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
             fh.write("\n")
         os.replace(tmp, out_path)
 
-    results = []
+    results = [done[f["id"]] for f in fixtures if f["id"] in done]
     for f in fixtures:
+        if f["id"] in done:
+            continue
         route = routing["jobs"][f["id"]]["route"]
         trials = []
         for i in range(TRIALS):
@@ -939,6 +953,9 @@ def main() -> int:
                    help="run the frozen fixtures on TODAY's routing")
     g.add_argument("--probe", action="store_true",
                    help="2 calls: one role trial, one native trial. Writes nothing.")
+    ap.add_argument("--resume", action="store_true",
+                    help="--baseline only: keep the run in bench/baseline.json, skip fixtures "
+                         "already flushed with 3 ok trials, run the rest.")
     ap.add_argument("--approve", default=None, metavar="PLAN_HASH",
                     help="required to SPEND on --seed-round: the plan hash printed by "
                          "--seed-round --dry-run. Any other value refuses.")
@@ -1017,11 +1034,22 @@ def main() -> int:
               "         table, then set reviewed_by/reviewed_at.", file=sys.stderr)
         return 2
 
-    run_id = f"bench-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+    out = SPEC / "bench" / "baseline.json"
+    prior = None
+    if args.resume:
+        try:
+            prior = json.loads(out.read_text())
+        except Exception as e:
+            print(f"REFUSED: --resume but no readable {out}: {e}", file=sys.stderr); return 2
+        run_id = prior["meta"]["run_id"]
+    else:
+        run_id = f"bench-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
     os.environ["BRAIN_ROUTER_BENCH_RUN_ID"] = run_id  # must-not #8
     print(f"baseline run {run_id} — {p['total_calls']} planned calls")
-    return asyncio.run(execute(fixtures, routing, p, args.cwd,
-                               SPEC / "bench" / "baseline.json", run_id))
+    try:
+        return asyncio.run(execute(fixtures, routing, p, args.cwd, out, run_id, prior=prior))
+    except Refused as e:
+        print(f"REFUSED: {e}", file=sys.stderr); return 2
 
 
 if __name__ == "__main__":
