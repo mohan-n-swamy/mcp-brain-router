@@ -19,6 +19,14 @@ mechanised here, not merely intended:
   #5 no similarity at B4/B5 -> refused at LOAD, before any spend
   #8 no log pollution       -> BRAIN_ROUTER_BENCH_RUN_ID stamps every record
  #11 no unapproved spend    -> --dry-run and --baseline are separate invocations
+
+--seed-round is R26's week-0 bootstrap. "Top 3 per band by measured cost" needs
+the ranking it is supposed to produce, so week 0 measures a CONTENDER set --
+per band, the cards clearing the floor with the leftmost list price plus every
+card within 2x of it -- each routed to its EXACT card, never to a role. List
+price selects who gets measured; it never ranks anything. Writes rows keyed by
+(card, band, size_class) into bench/results.json, merged, never dropping rows
+from other runs.
 """
 from __future__ import annotations
 
@@ -27,6 +35,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -35,6 +44,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,9 +52,29 @@ REPO = Path(__file__).resolve().parent.parent
 SPEC = Path.home() / "code workshop" / "specs" / "001-agent-capability-routing"
 JOBS = SPEC / "bench" / "jobs"
 ROUTING = SPEC / "bench" / "routing-today.json"
+RESULTS = SPEC / "bench" / "results.json"
+CARDS = Path.home() / ".local" / "state" / "brain-router" / "cards.json"
 HEADROOM = Path.home() / ".local" / "state" / "headroom.json"
 DELEG_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
 TRIALS = 3  # R30: median of 3. One run lets a 534s hang or a lucky 48s call decide a band.
+
+# The providers that can run a benchmark trial AT ALL. backends.py has no
+# call_deepseek_agentic, so a deepseek card cannot execute in agentic mode --
+# it is excluded from contention here, and the exclusion is PRINTED, never
+# silent, because a missing provider looks identical to a broken one otherwise.
+# Deck namespace (cards.json/headroom.json names), not router enum names.
+AGENTIC_PROVIDERS = {"zhipu", "openai", "xai", "moonshot", "anthropic"}
+
+# A hyphen between two digit groups is a decimal point in the router's naming:
+# the AA slug `glm-5-3-flash` is the router's `glm-5.3-flash`. COPIED from
+# build-deck.py (which explains why this derivation is name-shape, not a
+# verified provider id) rather than imported -- bin/ is not an importable
+# package and duplicating three lines beats an importlib shim for a script.
+_VERSION_HYPHEN = re.compile(r"(?<=\d)-(?=\d)")
+
+
+def router_model_for(slug: str) -> str:
+    return _VERSION_HYPHEN.sub(".", slug)
 
 sys.path.insert(0, str(REPO / "src"))
 
@@ -114,6 +144,39 @@ def git_head() -> str:
                               capture_output=True, text=True, timeout=10).stdout.strip()
     except Exception:
         return "unknown"
+
+
+# ------------------------------------------------------------- seed round (R26)
+
+def contender_sets() -> list[dict]:
+    """R26 week 0: per band, the cards clearing the floor (deck.py BAND_FLOORS)
+    with price_blended > 0 on an agentic provider, then the leftmost by list
+    price plus every card within 2x of it. List price picks who gets MEASURED;
+    it never ranks a live card -- that separation is the whole content of R26."""
+    from mcp_brain_router.deck import BANDS, BAND_FLOORS
+    if not CARDS.exists():
+        raise Refused(f"missing {CARDS} -- the seed round selects from cards.json (C01).")
+    cards = json.loads(CARDS.read_text())["cards"]
+    out = []
+    for band in BANDS:
+        floor = BAND_FLOORS[band]
+        # price_blended > 0: a zero price is a fetch artefact, not a free card.
+        eligible = [c for c in cards
+                    if c.get("capability") is not None and c["capability"] >= floor
+                    and isinstance(c.get("price_blended"), (int, float))
+                    and c["price_blended"] > 0]
+        excluded = Counter(c["provider"] for c in eligible
+                           if c["provider"] not in AGENTIC_PROVIDERS)
+        pool = [c for c in eligible if c["provider"] in AGENTIC_PROVIDERS]
+        if not pool:
+            raise Refused(f"band {band}: every card clearing floor {floor} is excluded "
+                          f"({dict(excluded)}) -- nothing to seed it with.")
+        cheapest = min(c["price_blended"] for c in pool)
+        contenders = sorted((c for c in pool if c["price_blended"] <= 2 * cheapest),
+                            key=lambda c: (c["price_blended"], -c["capability"]))
+        out.append({"band": band, "floor": floor, "contenders": contenders,
+                    "excluded": excluded})
+    return out
 
 
 # ---------------------------------------------------------------- execution
@@ -217,6 +280,72 @@ def run_native(fixture: dict, cwd: str) -> dict:
         "cost_usd": d.get("total_cost_usd"),
         "elapsed_ms": d.get("duration_ms") or round((time.perf_counter() - t0) * 1000),
         "failure_kind": None, "fell_back": False,
+    }
+
+
+def card_dispatch(card: dict) -> tuple[str, str]:
+    """How a card reaches its EXACT model in agentic mode.
+
+    route() only lands on a backend the caller can name through a complexity
+    tier: zhipu -> glm via CODE, openai -> codex via ADVERSARIAL. Every other
+    agentic provider (xai, moonshot, anthropic) has no tier of its own, so the
+    call goes to router._route_agentic directly with the backend the tier map
+    can never produce. NEVER route these by role: while routing_mode is legacy
+    a role resolves through [roles] and would test today's shard, not the card.
+    """
+    p = card["provider"]
+    if p == "zhipu":
+        return ("route:code->glm", "zhipu")
+    if p == "openai":
+        return ("route:adversarial->codex", "openai")
+    return {"xai": ("direct:grok", "xai"),
+            "moonshot": ("direct:kimi", "moonshot"),
+            "anthropic": ("direct:anthropic-cli", "anthropic")}[p]
+
+
+async def run_card_trial(card: dict, fixture: dict, cwd: str) -> dict:
+    """One trial against the EXACT card. Same result shape as run_role so the
+    scoring and aggregation below cannot tell the two apart."""
+    from mcp_brain_router import router
+    from mcp_brain_router.config import Config
+    model = router_model_for(card["slug"])
+    route_desc, _ = card_dispatch(card)
+    prompt = build_prompt(fixture, cwd)
+    t0 = time.perf_counter()
+    try:
+        cfg = Config.load()
+        if route_desc == "route:code->glm":
+            r = await router.route(router.Complexity.CODE, prompt, model_override=model,
+                                   config=cfg, mode="agentic", cwd=cwd)
+        elif route_desc == "route:adversarial->codex":
+            r = await router.route(router.Complexity.ADVERSARIAL, prompt,
+                                   model_override=model, config=cfg, mode="agentic", cwd=cwd)
+        elif route_desc == "direct:grok":
+            r = await router._route_agentic("grok", prompt, model, cfg, cwd)
+        elif route_desc == "direct:kimi":
+            r = await router._route_agentic("kimi", prompt, model, cfg, cwd)
+        else:
+            r = await router._route_agentic("anthropic-cli", prompt, model, cfg, cwd)
+    except Exception as e:
+        # Credential/availability errors and harness crashes are FAILED trials,
+        # never cheap successes -- same rule as an empty answer in run_role.
+        return {"ok": False, "answer": "", "backend": None, "model": model,
+                "tokens_in": None, "tokens_out": None,
+                "cache_read_input_tokens": None, "usage_source": None,
+                "cost_usd": None,
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+                "failure_kind": type(e).__name__, "fell_back": False}
+    answer = (r.content or "").strip()
+    ok = bool(answer) and not r.exhausted
+    u = r.usage or {}
+    return {
+        "ok": ok, "answer": answer, "backend": r.backend, "model": r.model,
+        "tokens_in": u.get("input_tokens"), "tokens_out": u.get("output_tokens"),
+        "cache_read_input_tokens": u.get("cache_read_input_tokens"),
+        "usage_source": u.get("source", "api") if u else None,
+        "cost_usd": u.get("cost_usd"),
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000),
+        "failure_kind": r.failure_kind, "fell_back": False,
     }
 
 
@@ -388,6 +517,264 @@ def print_plan(p: dict, fixtures: list[dict], routing: dict) -> None:
     print("\nNothing was spent. To run for real: python3 bin/run-bench.py --baseline\n")
 
 
+def plan_seed(fixtures: list[dict], sets: list[dict]) -> dict:
+    """Call plan for the week-0 seed: every (card, band) runs that band's frozen
+    fixtures × TRIALS, with a judge call for every non-mechanical fixture."""
+    by_band: dict[str, list[dict]] = {}
+    for f in fixtures:
+        by_band.setdefault(f["band"], []).append(f)
+    rows = []
+    job_calls = judge_calls = 0
+    for s in sets:
+        band_fx = by_band.get(s["band"], [])
+        for c in s["contenders"]:
+            for f in band_fx:
+                jc = TRIALS
+                kc = 0 if mechanically_scorable(f) else TRIALS
+                job_calls += jc
+                judge_calls += kc
+                route_desc, prov = card_dispatch(c)
+                rows.append({
+                    "card": c["slug"], "provider": prov, "band": f["band"],
+                    "id": f["id"], "size_class": f["size_class"],
+                    "scoring": f["scoring"],
+                    "scored_by": "mechanical" if mechanically_scorable(f) else "judge",
+                    "route": route_desc, "price_blended": c["price_blended"],
+                    "capability": c["capability"],
+                    "job_calls": jc, "judge_calls": kc,
+                })
+    return {"rows": rows, "job_calls": job_calls, "judge_calls": judge_calls,
+            "total_calls": job_calls + judge_calls}
+
+
+def seed_plan_hash(fixtures: list[dict], sets: list[dict]) -> str:
+    """Approval is of an exact plan. Must-not #11: --dry-run and the spend are
+    separate invocations, and the spend must not start on a plan the human did
+    not see. A run of --seed-round with no --approve, or with a hash from a
+    previous plan, refuses. Found the hard way: the first version had no gate at
+    all and a test launch was live for three seconds before it was killed."""
+    blob = json.dumps({
+        "fixtures": fixture_set_hash(fixtures),
+        "contenders": [[st["band"], sorted(c["slug"] for c in st["contenders"])] for st in sets],
+        "trials": TRIALS,
+    }, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def seed_provider_load(p: dict) -> dict[str, int]:
+    """Exact-card job calls land on the card's own provider; judge calls still go
+    through the adversary role's first candidate (same as baseline)."""
+    from mcp_brain_router.config import Config
+    from mcp_brain_router.router import Role, resolve_role
+    try:
+        cfg = Config.load()
+    except Exception:
+        cfg = None
+    load: dict[str, int] = {}
+
+    def adversary_first() -> str:
+        if cfg is None:
+            return "?adversary"
+        try:
+            a = resolve_role(Role("adversary"), "claude", cfg, mode="agentic")
+            v = getattr(a.provider, "value", str(a.provider))
+            return ROUTER_TO_DECK.get(v, v)
+        except Exception:
+            return "?adversary"
+
+    for r in p["rows"]:
+        if r["job_calls"]:
+            load[r["provider"]] = load.get(r["provider"], 0) + r["job_calls"]
+        if r["judge_calls"]:
+            key = adversary_first()
+            load[key] = load.get(key, 0) + r["judge_calls"]
+    return load
+
+
+def print_seed_plan(p: dict, sets: list[dict], fixtures: list[dict]) -> None:
+    print("\nSEED ROUND (R26 week 0) — nothing has been spent.\n")
+    print("Contender set per band (leftmost by price_blended + within 2x):\n")
+    for s in sets:
+        print(f"  {s['band']}  floor={s['floor']}  contenders={len(s['contenders'])}")
+        print(f"    {'card':40} {'provider':10} {'price':>8} {'capability':>10}")
+        for c in s["contenders"]:
+            print(f"    {c['slug']:40} {c['provider']:10} "
+                  f"{c['price_blended']:8.4f} {c['capability']:10.2f}")
+        # Exclusions printed, never silent — a missing provider and a broken one
+        # look identical otherwise (R15 / AGENTIC_PROVIDERS).
+        if s["excluded"]:
+            bits = ", ".join(f"{prov}={n}" for prov, n in sorted(s["excluded"].items()))
+            print(f"    excluded (no agentic adapter): {bits}")
+        else:
+            print("    excluded (no agentic adapter): (none)")
+        print()
+    # Aggregate exclusion counts across bands for the one-line summary.
+    all_excl: Counter = Counter()
+    for s in sets:
+        all_excl.update(s["excluded"])
+    if all_excl:
+        print("Excluded providers (eligible-by-floor but not in AGENTIC_PROVIDERS), "
+              "summed across bands:")
+        for prov, n in sorted(all_excl.items(), key=lambda kv: -kv[1]):
+            print(f"  {prov}: {n}")
+        print()
+
+    print("Exact call plan (each row = one fixture × n=3 on one exact card):")
+    print(f"{'card':40} {'band':5} {'job':24} {'route':28} {'calls':>5}")
+    print("-" * 110)
+    for r in p["rows"]:
+        print(f"{r['card']:40} {r['band']:5} {r['id']:24} {r['route']:28} "
+              f"{r['job_calls'] + r['judge_calls']:>5}")
+    print("-" * 110)
+    print(f"{'job calls (sum over (card,band) of fixtures_in_band × 3)':<72}"
+          f"{p['job_calls']:>6}")
+    print(f"{'judge calls (non-mechanical fixtures × 3 per (card,band))':<72}"
+          f"{p['judge_calls']:>6}")
+    print(f"{'TOTAL PROVIDER CALLS':<72}{p['total_calls']:>6}\n")
+
+    h = read_headroom()
+    load = seed_provider_load(p)
+    print("Where these calls actually land, and the quota they land on:")
+    provs = h.get("providers") or {}
+    for prov, n in sorted(load.items(), key=lambda kv: -kv[1]):
+        uw = (provs.get(prov) or {}).get("used_week")
+        shown = "n/a" if uw is None else f"{uw:.0%}"
+        warn = "  <-- HIGH" if isinstance(uw, (int, float)) and uw >= 0.60 else ""
+        print(f"  {prov:10} first-candidate for {n:>3} of {p['total_calls']} calls"
+              f"   used_week={shown}{warn}")
+    print("\nFull headroom:")
+    for prov, v in provs.items():
+        uw = v.get("used_week")
+        print(f"  {prov:10} used_week={'n/a' if uw is None else f'{uw:.0%}'}")
+    print(f"\nfixture-set hash: {fixture_set_hash(fixtures)}")
+    print("\nNothing was spent. To run for real: python3 bin/run-bench.py --seed-round\n")
+
+
+def _seed_row_key(row: dict) -> tuple:
+    """Merge identity for results.json. R30's cell is (card, band, size_class);
+    a band can hold more than one fixture of the same size_class, so fixture id
+    is part of the key or a re-run would silently drop a sibling fixture's row."""
+    return (row["card"], row["band"], row["size_class"], row["id"])
+
+
+def _score_trials(fixture: dict, trials: list[dict]) -> dict:
+    """Same aggregation execute() uses — shared so seed and baseline cannot drift."""
+    costs = [t["cost_usd"] for t in trials if t["ok"] and isinstance(t["cost_usd"], (int, float))]
+    secs = [t["elapsed_ms"] for t in trials if isinstance(t["elapsed_ms"], (int, float))]
+    scored = [t["acceptance"] for t in trials if t["acceptance"]]
+    p0 = None
+    if scored:
+        p0 = all(a["passed"] is True for tr in scored for a in tr if a["p0"])
+    return {
+        "backend": next((t["backend"] for t in trials if t["ok"]), None),
+        "backends_all": sorted({t["backend"] for t in trials if t["ok"]}),
+        "mixed_backends": len({t["backend"] for t in trials if t["ok"]}) > 1,
+        "model": next((t["model"] for t in trials if t["ok"]), None),
+        "total_cost_usd": statistics.median(costs) if costs else None,
+        "cost_basis": "measured" if costs else "unmeasured",
+        "cost_spread_usd": (max(costs) - min(costs)) if len(costs) > 1 else None,
+        "wall_clock_seconds": round(statistics.median(secs) / 1000, 1) if secs else None,
+        "trials": trials, "trials_ok": sum(1 for t in trials if t["ok"]),
+        "acceptance": ([{"id": a["id"], "p0": a["p0"], "check": a["check"],
+                         "passed_trials": sum(1 for tr in scored for b in tr
+                                              if b["id"] == a["id"] and b["passed"] is True),
+                         "of_trials": len(scored),
+                         "scored_by": a["scored_by"]}
+                        for a in scored[0]] if scored else None),
+        "p0_pass": p0,
+    }
+
+
+async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
+                       run_id: str) -> int:
+    """Measure every contender on every frozen fixture in its band; merge into
+    results.json keyed by (card, band, size_class, id). Flush after each
+    (card, band) so a mid-run crash keeps money already spent (must-not #3)."""
+    by_band: dict[str, list[dict]] = {}
+    for f in fixtures:
+        by_band.setdefault(f["band"], []).append(f)
+
+    prior: list[dict] = []
+    if RESULTS.exists():
+        try:
+            prior = list(json.loads(RESULTS.read_text()).get("results") or [])
+        except Exception as e:
+            raise Refused(f"results.json unreadable ({e}); refusing to clobber it.")
+
+    # Planned cells = one row per (card, fixture) this run will write.
+    planned = sum(len(s["contenders"]) * len(by_band.get(s["band"], [])) for s in sets)
+    meta = {
+        "mode": "seed-round", "run_id": run_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "router_head": git_head(), "fixture_set_hash": fixture_set_hash(fixtures),
+        "trials_per_cell": TRIALS, "planned": planned,
+        "scratch_cwd": scratch_cwd(run_id),
+        "planned_calls": p["total_calls"],
+        "headroom_at_start": read_headroom(),
+        "complete": False,
+    }
+    this_run: list[dict] = []
+
+    def flush(complete: bool) -> None:
+        meta["complete"] = complete
+        meta["judge_calls_spend"] = {
+            "calls": len(_JUDGE_SPEND),
+            "measured_usd": sum(x["cost_usd"] for x in _JUDGE_SPEND
+                                if isinstance(x["cost_usd"], (int, float))),
+            "unmeasured_calls": sum(1 for x in _JUDGE_SPEND if x["cost_usd"] is None),
+            "note": "scoring spend, never folded into any job's cost",
+        }
+        meta["finished_at"] = datetime.now(timezone.utc).isoformat()
+        meta["headroom_at_end"] = read_headroom()
+        by_key = {_seed_row_key(r): r for r in prior if "card" in r and "id" in r}
+        # Prior rows lacking card/id (should not exist in results.json) keep their
+        # place under a synthetic key so a merge never drops them silently.
+        kept = [r for r in prior if "card" not in r or "id" not in r]
+        for r in this_run:
+            by_key[_seed_row_key(r)] = r
+        merged = kept + list(by_key.values())
+        RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(RESULTS.parent), prefix=".bench.")
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"meta": meta, "results": merged}, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, RESULTS)
+
+    for s in sets:
+        band_fx = by_band.get(s["band"], [])
+        for c in s["contenders"]:
+            route_desc, _ = card_dispatch(c)
+            for f in band_fx:
+                trials = []
+                for i in range(TRIALS):
+                    print(f"  {c['slug']} {f['id']} trial {i + 1}/{TRIALS} "
+                          f"via {route_desc} ...", flush=True)
+                    box = scratch_cwd(run_id)
+                    t = await run_card_trial(c, f, box)
+                    if t["ok"]:
+                        t["acceptance"] = (score_reference(f, t["answer"])
+                                           if mechanically_scorable(f)
+                                           else await score_rubric(f, t["answer"], box))
+                    else:
+                        t["acceptance"] = None
+                    t.pop("answer", None)
+                    trials.append(t)
+                agg = _score_trials(f, trials)
+                this_run.append({
+                    "id": f["id"], "card": c["slug"], "band": f["band"],
+                    "size_class": f["size_class"], "scoring": f["scoring"],
+                    "rotating": f["rotating"], "route": route_desc,
+                    **agg,
+                })
+            # Flush after every (card, band): complete is derived from this-run count.
+            flush(complete=len(this_run) == meta["planned"])
+
+    print(f"\nwrote {RESULTS}  complete={meta['complete']}  "
+          f"rows_this_run={len(this_run)}  rows_total="
+          f"{len(json.loads(RESULTS.read_text()).get('results') or [])}")
+    return 0 if meta["complete"] else 1
+
+
 async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
                   out_path: Path, run_id: str) -> int:
     meta = {
@@ -531,19 +918,69 @@ async def probe(by_id: dict, routing: dict, cwd: str, run_id: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="C07 benchmark harness")
-    g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--dry-run", action="store_true", help="print the plan, spend nothing")
+    # --dry-run is a modifier: alone it prints the baseline plan (unchanged);
+    # combined with --seed-round it prints the seed plan. --baseline/--probe
+    # behaviour is otherwise untouched.
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the plan, spend nothing (alone = baseline plan; "
+                         "with --seed-round = seed plan)")
+    g = ap.add_mutually_exclusive_group(required=False)
     g.add_argument("--baseline", action="store_true",
-                   help="run the 8 frozen fixtures on TODAY's routing")
+                   help="run the frozen fixtures on TODAY's routing")
     g.add_argument("--probe", action="store_true",
                    help="2 calls: one role trial, one native trial. Writes nothing.")
+    ap.add_argument("--approve", default=None, metavar="PLAN_HASH",
+                    help="required to SPEND on --seed-round: the plan hash printed by "
+                         "--seed-round --dry-run. Any other value refuses.")
+    g.add_argument("--seed-round", action="store_true",
+                   help="R26 week-0: measure the contender set on exact cards, "
+                        "merge into bench/results.json")
     ap.add_argument("--cwd", default=str(Path.home() / "code workshop"))
     args = ap.parse_args()
+    if not (args.dry_run or args.baseline or args.probe or args.seed_round):
+        ap.error("one of --dry-run, --baseline, --probe, --seed-round is required")
+    if args.probe and args.dry_run:
+        ap.error("--probe already writes nothing; do not combine it with --dry-run")
+    if args.baseline and args.dry_run:
+        # Baseline dry-run is what bare --dry-run already does; refuse the combo
+        # so the two invocations stay distinct (must-not #11).
+        ap.error("use bare --dry-run for the baseline plan (not --baseline --dry-run)")
 
     try:
-        # --baseline takes no job list, by construction: the delta series is the
-        # frozen 8 and nothing else (must-not #4).
+        # Frozen fixtures only: rotating jobs are not part of any delta or seed
+        # series (must-not #4). Guards (B4/B5 similarity, missing reference, no
+        # P0) fire here, before anything is spent.
         fixtures = load_fixtures(frozen_only=True)
+    except Refused as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        return 2
+
+    if args.seed_round:
+        try:
+            sets = contender_sets()
+        except Refused as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        p = plan_seed(fixtures, sets)
+        h = seed_plan_hash(fixtures, sets)
+        if args.dry_run:
+            print_seed_plan(p, sets, fixtures)
+            print(f"plan hash: {h}")
+            print(f"To spend on EXACTLY this plan: python3 bin/run-bench.py --seed-round --approve {h}\n")
+            return 0
+        if args.approve != h:
+            # must-not #11, mechanised: the spend cannot start on a plan nobody saw.
+            print(f"REFUSED: --seed-round spends {p['total_calls']} provider calls and needs "
+                  f"--approve {h} (the hash printed by --seed-round --dry-run). "
+                  f"Got {args.approve!r}.", file=sys.stderr)
+            return 2
+        run_id = f"seed-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+        os.environ["BRAIN_ROUTER_BENCH_RUN_ID"] = run_id  # must-not #8
+        print(f"seed-round run {run_id} — {p['total_calls']} planned calls")
+        return asyncio.run(execute_seed(fixtures, sets, p, run_id))
+
+    # Baseline / probe / bare --dry-run need today's routing table.
+    try:
         routing = load_routing(fixtures)
     except Refused as e:
         print(f"REFUSED: {e}", file=sys.stderr)
