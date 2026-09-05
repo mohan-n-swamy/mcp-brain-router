@@ -54,6 +54,11 @@ JOBS = SPEC / "bench" / "jobs"
 ROUTING = SPEC / "bench" / "routing-today.json"
 RESULTS = SPEC / "bench" / "results.json"
 CARDS = Path.home() / ".local" / "state" / "brain-router" / "cards.json"
+# Which (provider, model) ids the subscription CLIs actually expose. cards.json
+# lists every model a creator publishes; a ChatGPT-account codex, the grok CLI
+# and the zai claude-code proxy each accept a short list of them. The first
+# seed (2026-09-05) spent three of five B1 contenders on ids the CLIs refuse.
+REACH = SPEC / "bench" / "reachability.json"
 HEADROOM = Path.home() / ".local" / "state" / "headroom.json"
 DELEG_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.jsonl"
 TRIALS = 3  # R30: median of 3. One run lets a 534s hang or a lucky 48s call decide a band.
@@ -160,15 +165,37 @@ def git_head() -> str:
 
 # ------------------------------------------------------------- seed round (R26)
 
-def contender_sets() -> list[dict]:
+def reach_key(card: dict) -> str:
+    return f"{card['provider']}/{router_model_for(card.get('model') or card['slug'])}"
+
+
+def load_reachability() -> dict:
+    if not REACH.exists():
+        return {}
+    return json.loads(REACH.read_text()).get("models") or {}
+
+
+def save_reachability(models: dict) -> None:
+    REACH.parent.mkdir(parents=True, exist_ok=True)
+    REACH.write_text(json.dumps({"updated_at": datetime.now(timezone.utc).isoformat(),
+                                 "models": models}, indent=2, sort_keys=True) + "\n")
+
+
+def contender_sets(require_probed: bool = True) -> list[dict]:
     """R26 week 0: per band, the cards clearing the floor (deck.py BAND_FLOORS)
-    with price_blended > 0 on an agentic provider, then the leftmost by list
-    price plus every card within 2x of it. List price picks who gets MEASURED;
-    it never ranks a live card -- that separation is the whole content of R26."""
+    with price_blended > 0 on an agentic provider whose model id the CLI is
+    known to accept, then the leftmost by list price plus every card within 2x
+    of it. List price picks who gets MEASURED; it never ranks a live card --
+    that separation is the whole content of R26.
+
+    require_probed: a contender whose (provider, model) has never been probed
+    refuses the seed. Spending three trials to learn "unknown model id" is
+    what --probe-cards exists to prevent."""
     from mcp_brain_router.deck import BANDS, BAND_FLOORS
     if not CARDS.exists():
         raise Refused(f"missing {CARDS} -- the seed round selects from cards.json (C01).")
     cards = json.loads(CARDS.read_text())["cards"]
+    reach = load_reachability()
     out = []
     for band in BANDS:
         floor = BAND_FLOORS[band]
@@ -180,14 +207,23 @@ def contender_sets() -> list[dict]:
         excluded = Counter(c["provider"] for c in eligible
                            if c["provider"] not in AGENTIC_PROVIDERS)
         pool = [c for c in eligible if c["provider"] in AGENTIC_PROVIDERS]
+        unreachable = [c["slug"] for c in pool
+                       if (reach.get(reach_key(c)) or {}).get("ok") is False]
+        pool = [c for c in pool if c["slug"] not in unreachable]
         if not pool:
             raise Refused(f"band {band}: every card clearing floor {floor} is excluded "
-                          f"({dict(excluded)}) -- nothing to seed it with.")
+                          f"({dict(excluded)}) or unreachable ({unreachable}) "
+                          f"-- nothing to seed it with.")
         cheapest = min(c["price_blended"] for c in pool)
         contenders = sorted((c for c in pool if c["price_blended"] <= 2 * cheapest),
                             key=lambda c: (c["price_blended"], -c["capability"]))
+        unprobed = sorted({reach_key(c) for c in contenders if reach_key(c) not in reach})
+        if unprobed and require_probed:
+            raise Refused(f"band {band}: contender model ids never probed: {unprobed}. "
+                          f"Run --probe-cards first (one tiny call per id).")
         out.append({"band": band, "floor": floor, "contenders": contenders,
-                    "excluded": excluded})
+                    "excluded": excluded, "unreachable": unreachable,
+                    "unprobed": unprobed})
     return out
 
 
@@ -323,36 +359,61 @@ def card_dispatch(card: dict) -> tuple[str, str]:
             "anthropic": ("direct:anthropic-cli", "anthropic")}[p]
 
 
-async def run_card_trial(card: dict, fixture: dict, cwd: str) -> dict:
-    """One trial against the EXACT card. Same result shape as run_role so the
-    scoring and aggregation below cannot tell the two apart."""
+async def dispatch_card(card: dict, prompt: str, cwd: str):
+    """Send one prompt to the EXACT card. A card is (model, effort), not a model
+    id: gpt-5-6-luna-xhigh is the gpt-5.6-luna model at effort xhigh. The
+    2026-09-05 seed passed the SLUG as the model name and every effort-variant
+    card died in 4s with "model is not supported". Base effort is the CLI
+    default (None)."""
     from mcp_brain_router import router
     from mcp_brain_router.config import Config
-    # A card is (model, effort), not a model id: gpt-5-6-luna-xhigh is the
-    # gpt-5.6-luna model at effort xhigh. The 2026-09-05 seed passed the SLUG
-    # as the model name and every effort-variant card died in 4s with
-    # "model is not supported". Base effort is the CLI default (None).
     model = router_model_for(card.get("model") or card["slug"])
     effort = card_effort(card)
     route_desc, _ = card_dispatch(card)
+    cfg = Config.load()
+    if route_desc == "route:code->glm":
+        return await router.route(router.Complexity.CODE, prompt, model_override=model,
+                                  config=cfg, mode="agentic", cwd=cwd, effort=effort)
+    if route_desc == "route:adversarial->codex":
+        return await router.route(router.Complexity.ADVERSARIAL, prompt,
+                                  model_override=model, config=cfg, mode="agentic",
+                                  cwd=cwd, effort=effort)
+    if route_desc == "direct:grok":
+        return await router._route_agentic("grok", prompt, model, cfg, cwd, effort=effort)
+    if route_desc == "direct:kimi":
+        return await router._route_agentic("kimi", prompt, model, cfg, cwd, effort=effort)
+    return await router._route_agentic("anthropic-cli", prompt, model, cfg, cwd,
+                                       effort=effort)
+
+
+PROBE_PROMPT = "Reply with the single word PONG and nothing else."
+
+
+async def probe_card(card: dict, cwd: str) -> dict:
+    """One tiny call: does this provider's CLI accept this model id at all?
+    Records the verdict only; never a measurement (a PONG says nothing about
+    capability or cost)."""
+    t0 = time.perf_counter()
+    try:
+        r = await dispatch_card(card, PROBE_PROMPT, cwd)
+        ok = bool((r.content or "").strip()) and not r.exhausted
+        err = None if ok else (r.failure_kind or "empty answer")
+    except Exception as e:
+        ok, err = False, f"{type(e).__name__}: {str(e)[:300]}"
+    return {"ok": ok, "error": err, "probed_with": card["slug"],
+            "probed_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000)}
+
+
+async def run_card_trial(card: dict, fixture: dict, cwd: str) -> dict:
+    """One trial against the EXACT card. Same result shape as run_role so the
+    scoring and aggregation below cannot tell the two apart."""
+    model = router_model_for(card.get("model") or card["slug"])
+    effort = card_effort(card)
     prompt = build_prompt(fixture, cwd)
     t0 = time.perf_counter()
     try:
-        cfg = Config.load()
-        if route_desc == "route:code->glm":
-            r = await router.route(router.Complexity.CODE, prompt, model_override=model,
-                                   config=cfg, mode="agentic", cwd=cwd, effort=effort)
-        elif route_desc == "route:adversarial->codex":
-            r = await router.route(router.Complexity.ADVERSARIAL, prompt,
-                                   model_override=model, config=cfg, mode="agentic",
-                                   cwd=cwd, effort=effort)
-        elif route_desc == "direct:grok":
-            r = await router._route_agentic("grok", prompt, model, cfg, cwd, effort=effort)
-        elif route_desc == "direct:kimi":
-            r = await router._route_agentic("kimi", prompt, model, cfg, cwd, effort=effort)
-        else:
-            r = await router._route_agentic("anthropic-cli", prompt, model, cfg, cwd,
-                                            effort=effort)
+        r = await dispatch_card(card, prompt, cwd)
     except Exception as e:
         # Credential/availability errors and harness crashes are FAILED trials,
         # never cheap successes -- same rule as an empty answer in run_role.
@@ -548,20 +609,41 @@ def print_plan(p: dict, fixtures: list[dict], routing: dict) -> None:
     print("\nNothing was spent. To run for real: python3 bin/run-bench.py --baseline\n")
 
 
+def measured_cells(fixtures: list[dict]) -> set[tuple]:
+    """Cells in results.json already holding 3 ok trials for THIS fixture set.
+    A seed re-run (after a harness fix, or with a widened contender set) skips
+    them; rows from another fixture set never count."""
+    if not RESULTS.exists():
+        return set()
+    try:
+        doc = json.loads(RESULTS.read_text())
+    except Exception:
+        return set()
+    if doc.get("meta", {}).get("fixture_set_hash") != fixture_set_hash(fixtures):
+        return set()
+    return {_seed_row_key(r) for r in doc.get("results") or []
+            if "card" in r and "id" in r and r.get("trials_ok") == TRIALS}
+
+
 def plan_seed(fixtures: list[dict], sets: list[dict]) -> dict:
     """Call plan for the week-0 seed: every (card, band) runs that band's frozen
-    fixtures × TRIALS, with a judge call for every non-mechanical fixture."""
+    fixtures × TRIALS, with a judge call for every non-mechanical fixture.
+    Cells already measured (3 ok trials in results.json) are listed with zero
+    calls so the plan shows what it skips."""
     by_band: dict[str, list[dict]] = {}
     for f in fixtures:
         by_band.setdefault(f["band"], []).append(f)
+    done = measured_cells(fixtures)
     rows = []
-    job_calls = judge_calls = 0
+    job_calls = judge_calls = skipped = 0
     for s in sets:
         band_fx = by_band.get(s["band"], [])
         for c in s["contenders"]:
             for f in band_fx:
-                jc = TRIALS
-                kc = 0 if mechanically_scorable(f) else TRIALS
+                cell_done = (c["slug"], f["band"], f["size_class"], f["id"]) in done
+                skipped += cell_done
+                jc = 0 if cell_done else TRIALS
+                kc = 0 if (cell_done or mechanically_scorable(f)) else TRIALS
                 job_calls += jc
                 judge_calls += kc
                 route_desc, prov = card_dispatch(c)
@@ -572,10 +654,10 @@ def plan_seed(fixtures: list[dict], sets: list[dict]) -> dict:
                     "scored_by": "mechanical" if mechanically_scorable(f) else "judge",
                     "route": route_desc, "price_blended": c["price_blended"],
                     "capability": c["capability"],
-                    "job_calls": jc, "judge_calls": kc,
+                    "job_calls": jc, "judge_calls": kc, "skip": cell_done,
                 })
     return {"rows": rows, "job_calls": job_calls, "judge_calls": judge_calls,
-            "total_calls": job_calls + judge_calls}
+            "total_calls": job_calls + judge_calls, "skipped_cells": skipped}
 
 
 def seed_plan_hash(fixtures: list[dict], sets: list[dict]) -> str:
@@ -640,6 +722,8 @@ def print_seed_plan(p: dict, sets: list[dict], fixtures: list[dict]) -> None:
             print(f"    excluded (no agentic adapter): {bits}")
         else:
             print("    excluded (no agentic adapter): (none)")
+        print(f"    unreachable (CLI refuses the model id): "
+              f"{', '.join(s.get('unreachable') or []) or '(none)'}")
         print()
     # Aggregate exclusion counts across bands for the one-line summary.
     all_excl: Counter = Counter()
@@ -657,8 +741,11 @@ def print_seed_plan(p: dict, sets: list[dict], fixtures: list[dict]) -> None:
     print("-" * 110)
     for r in p["rows"]:
         print(f"{r['card']:40} {r['band']:5} {r['id']:24} {r['route']:28} "
-              f"{r['job_calls'] + r['judge_calls']:>5}")
+              f"{r['job_calls'] + r['judge_calls']:>5}"
+              f"{'  (measured, skipped)' if r.get('skip') else ''}")
     print("-" * 110)
+    print(f"{'cells already measured in results.json (skipped)':<72}"
+          f"{p.get('skipped_cells', 0):>6}")
     print(f"{'job calls (sum over (card,band) of fixtures_in_band × 3)':<72}"
           f"{p['job_calls']:>6}")
     print(f"{'judge calls (non-mechanical fixtures × 3 per (card,band))':<72}"
@@ -734,15 +821,18 @@ async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
         except Exception as e:
             raise Refused(f"results.json unreadable ({e}); refusing to clobber it.")
 
-    # Planned cells = one row per (card, fixture) this run will write.
-    planned = sum(len(s["contenders"]) * len(by_band.get(s["band"], [])) for s in sets)
+    # Planned cells = one row per (card, fixture) this run will write; cells
+    # already holding 3 ok trials for this fixture set are kept, not re-run.
+    done = measured_cells(fixtures)
+    planned = sum(1 for s in sets for c in s["contenders"] for f in by_band.get(s["band"], [])
+                  if (c["slug"], f["band"], f["size_class"], f["id"]) not in done)
     meta = {
         "mode": "seed-round", "run_id": run_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "router_head": git_head(), "fixture_set_hash": fixture_set_hash(fixtures),
         "trials_per_cell": TRIALS, "planned": planned,
         "scratch_cwd": scratch_cwd(run_id),
-        "planned_calls": p["total_calls"],
+        "planned_calls": p["total_calls"], "skipped_cells": len(done),
         "headroom_at_start": read_headroom(),
         "complete": False,
     }
@@ -782,6 +872,9 @@ async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
         for c in s["contenders"]:
             route_desc, _ = card_dispatch(c)
             for f in band_fx:
+                if (c["slug"], f["band"], f["size_class"], f["id"]) in done:
+                    print(f"  {c['slug']} {f['id']} already measured, skipped", flush=True)
+                    continue
                 trials = []
                 for i in range(TRIALS):
                     print(f"  {c['slug']} {f['id']} trial {i + 1}/{TRIALS} "
@@ -993,9 +1086,13 @@ def main() -> int:
     g.add_argument("--seed-round", action="store_true",
                    help="R26 week-0: measure the contender set on exact cards, "
                         "merge into bench/results.json")
+    g.add_argument("--probe-cards", action="store_true",
+                   help="one PONG call per unprobed contender model id; records "
+                        "bench/reachability.json. --dry-run lists them; spend needs "
+                        "--approve <hash>.")
     ap.add_argument("--cwd", default=str(Path.home() / "code workshop"))
     args = ap.parse_args()
-    if not (args.dry_run or args.baseline or args.probe or args.seed_round):
+    if not (args.dry_run or args.baseline or args.probe or args.seed_round or args.probe_cards):
         ap.error("one of --dry-run, --baseline, --probe, --seed-round is required")
     if args.probe and args.dry_run:
         ap.error("--probe already writes nothing; do not combine it with --dry-run")
@@ -1012,6 +1109,56 @@ def main() -> int:
     except Refused as e:
         print(f"REFUSED: {e}", file=sys.stderr)
         return 2
+
+    if args.probe_cards:
+        try:
+            sets = contender_sets(require_probed=False)
+        except Refused as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        todo = {}
+        for st in sets:
+            for c in st["contenders"]:
+                if reach_key(c) in st["unprobed"]:
+                    todo.setdefault(reach_key(c), c)
+        h = "probe-" + hashlib.sha256(json.dumps(sorted(todo)).encode()).hexdigest()[:12]
+        print(f"unprobed contender model ids: {len(todo)}")
+        for k, c in sorted(todo.items()):
+            print(f"  {k:40} via {card_dispatch(c)[0]}  (card {c['slug']})")
+        if not todo:
+            print("nothing to probe; contender set is fully probed.")
+            return 0
+        if args.dry_run:
+            print(f"plan hash: {h}")
+            print(f"To spend {len(todo)} tiny calls: python3 bin/run-bench.py --probe-cards --approve {h}")
+            return 0
+        if args.approve != h:
+            print(f"REFUSED: --probe-cards spends {len(todo)} calls and needs --approve {h}. "
+                  f"Got {args.approve!r}.", file=sys.stderr)
+            return 2
+        run_id = f"probe-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+        os.environ["BRAIN_ROUTER_BENCH_RUN_ID"] = run_id  # must-not #8
+        box = scratch_cwd(run_id)
+
+        async def _probe_all():
+            reach = load_reachability()
+            for k, c in sorted(todo.items()):
+                v = await probe_card(c, box)
+                reach[k] = v
+                save_reachability(reach)  # flush per id: a kill keeps what was learned
+                print(f"  {k:40} {'ok' if v['ok'] else 'DEAD'}  {v['elapsed_ms']}ms  {v['error'] or ''}")
+            return reach
+
+        asyncio.run(_probe_all())
+        # Excluding dead ids can widen the 2x window and pull in ids never probed.
+        after = contender_sets(require_probed=False)
+        left = sorted({k for st in after for k in st["unprobed"]})
+        if left:
+            print(f"\nwidened contender set has {len(left)} unprobed id(s): {left}\n"
+                  f"run --probe-cards --dry-run again for the next approval.")
+            return 1
+        print(f"\nwrote {REACH}; contender set fully probed.")
+        return 0
 
     if args.seed_round:
         try:
