@@ -57,9 +57,21 @@ def peg(target: dict, donor: dict, slug: str) -> dict | None:
     price, cap = price_of(slug)
     # price_blended is $/1M on a 3:1 in:out blend, which is how C01 fetched it.
     usd = (ti + to) / 1_000_000 * price
+    # How much of the pegged cost rides on the borrowed half. Measured fixtures:
+    # reading (B1-B3) runs 0-5% output tokens -- there the donor's output count is
+    # a rounding error and the peg is nearly a direct measurement. Coding runs
+    # 29-36%, so most of the cost is the donor's verbosity. The B5 pre-mortem is
+    # 100% output (28 in, 8037 out) -- the entire cost is the wrong model's answer
+    # length. Thresholds split that range: <0.15 high (reading-shaped), <0.35
+    # medium (coding-shaped, peg carries real weight), else low (output-dominated,
+    # the peg prices the donor, not the target).
+    share = to / (ti + to)
+    confidence = "high" if share < 0.15 else ("medium" if share < 0.35 else "low")
     return {
         "total_cost_usd": round(usd, 6),
         "cost_basis": "pegged",
+        "output_share": round(share, 4),
+        "peg_confidence": confidence,
         "peg": {
             "card": slug,
             "price_blended_per_1m": price,
@@ -87,7 +99,7 @@ def main() -> int:
     by_id = {r["id"]: dict(r, _run=donor_run) for r in don["results"]}
 
     print(f"{'job':22} {'backend':8} {'basis':10} {'cost $':>10}  source")
-    print("-" * 78)
+    print("-" * 96)
     pegged = 0
     for r in tgt["results"]:
         if r["cost_basis"] == "measured":
@@ -103,8 +115,9 @@ def main() -> int:
         pegged += 1
         p = got["peg"]
         print(f"{r['id']:22} {str(r['backend']):8} {'pegged':10} {got['total_cost_usd']:10.6f}  "
-              f"{p['tokens_in']}+{p['tokens_out']} tok x ${p['price_blended_per_1m']}/1M ({p['card']})")
-    print("-" * 78)
+              f"{p['tokens_in']}+{p['tokens_out']} tok x ${p['price_blended_per_1m']}/1M ({p['card']}) "
+              f"[{got['peg_confidence']}, out {got['output_share']:.0%}]")
+    print("-" * 96)
     tot = sum(x["total_cost_usd"] for x in tgt["results"] if isinstance(x["total_cost_usd"], (int, float)))
     meas = sum(x["total_cost_usd"] for x in tgt["results"] if x["cost_basis"] == "measured")
     print(f"  pegged {pegged} rows · total ${tot:.4f} (${meas:.4f} measured, ${tot-meas:.4f} pegged)")

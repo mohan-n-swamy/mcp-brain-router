@@ -87,10 +87,10 @@ def read_json(path: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str]]:
+def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str], int]:
     """Index results rows by card, and collect the bands a reference job has passed.
 
-    Returns (by_card, derived_bands). A row keys on `card` (C07's own field name), or
+    Returns (by_card, derived_bands, pegged_low). A row keys on `card` (C07's own field name), or
     on `model` for a row written before that field existed; `build_cards` then looks up
     under both the slug and the router_model, since either shape names the same card
     and a lookup miss would silently un-rank a measured one.
@@ -102,11 +102,25 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str]]:
     one p0_pass and one size_class per card while C07 emits them per band -- the type
     needs a per-band shape, or C02 needs a stated selection rule. Until one exists, the
     duplicate is at least announced rather than absorbed.
+
+    A pegged row (peg-costs.py) carries a peg_confidence for how much of its cost
+    rides on token counts borrowed from another model. A LOW-confidence peg is
+    output-dominated -- the cost prices the donor's verbosity, not this card -- so
+    ranking on it would rank the wrong model. It is demoted here to UNMEASURED
+    (total_cost_usd None), which R21 already handles: present-but-unranked. Medium
+    and high pegs rank normally; measured rows are untouched.
     """
     by_card: dict[str, dict] = {}
     derived: set[str] = set()
+    pegged_low = 0
     for row in (doc or {}).get("results") or []:
         key = row.get("card") or row.get("model")
+        if key and row.get("cost_basis") == "pegged" and row.get("peg_confidence") == "low":
+            pegged_low += 1
+            print(f"warning: pegged row {key!r} (band {row.get('band')}) has low "
+                  "peg_confidence — output-dominated, cost demoted to UNMEASURED "
+                  "and unrankable (R21)",
+                  file=sys.stderr)
         if key:
             if key in by_card:
                 prev = by_card[key]
@@ -135,13 +149,17 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str]]:
                         file=sys.stderr,
                     )
                     raise SystemExit(3)
+            if key and row.get("cost_basis") == "pegged" and row.get("peg_confidence") == "low":
+                # Demoted, not dropped: build_cards reads total_cost_usd as None, so
+                # the card stays present in its band and permanently unranked (R21).
+                row = {**row, "total_cost_usd": None}
             by_card[key] = row
         # R27: a floor is DERIVED only from a reference-job PASS. A completed run that
         # failed a P0 item, or one that was never scored (p0_pass None), derives
         # nothing -- it is evidence about the card, not about where the floor sits.
         if row.get("band") in BANDS and row.get("p0_pass") is True:
             derived.add(row["band"])
-    return by_card, derived
+    return by_card, derived, pegged_low
 
 
 def build_cards(raw: list[dict], by_card: dict[str, dict]) -> tuple[list[Card], int, list[str]]:
@@ -240,7 +258,7 @@ def main() -> int:
     results_doc = read_json(RESULTS)
 
     try:
-        by_card, derived = load_measurements(results_doc)
+        by_card, derived, pegged_low = load_measurements(results_doc)
         cards, dropped, matched = build_cards(cards_doc.get("cards") or [], by_card)
         rows = build_bands(cards, derived=derived)
         check_stops(rows, results_doc, derived)
@@ -271,6 +289,8 @@ def main() -> int:
         print(line)
     print(f"cards={len(cards)} dropped={dropped} measured={len(matched)} "
           f"results={doc['results_present']}")
+    if pegged_low:
+        print(f"pegged_low_demoted={pegged_low} (low-confidence pegs treated as unmeasured)")
 
     if args.dry_run:
         # Writes NOTHING -- not the file, not its parent directory. The STOPs above
