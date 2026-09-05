@@ -142,3 +142,42 @@ def test_hash_changes_when_the_contender_set_changes():
                                   "price_blended": 0.20, "capability": 72.0})
     # One more card is more planned calls; the approved plan no longer matches
     assert bench.seed_plan_hash(_fixtures(), sets) != h0
+
+
+def test_execute_seed_flush_writes_results(monkeypatch, tmp_path):
+    """The seed flush must run the whole way: on 2026-09-05 the live run died on
+    NameError inside flush() after three glm calls, because the unscored-rows
+    count read a name that exists only in the baseline path. Drive execute_seed
+    with a stubbed trial and assert the file lands with meta.complete and
+    unscored_rows derived from the merged rows."""
+    import asyncio
+    import json
+
+    bench = _load_bench()  # fresh module: the autouse gate stubs execute_seed
+    results = tmp_path / "results.json"
+    monkeypatch.setattr(bench, "RESULTS", results)
+    monkeypatch.setattr(bench, "read_headroom", lambda: {"providers": {}})
+    monkeypatch.setattr(bench, "git_head", lambda: "test")
+    monkeypatch.setattr(bench, "scratch_cwd", lambda run_id: str(tmp_path))
+    monkeypatch.setattr(bench, "card_dispatch", lambda c: ("route:test", "test"))
+
+    async def fake_trial(card, fixture, cwd):
+        return {"ok": True, "answer": "x", "cost_usd": 0.01, "wall_s": 1.0}
+
+    monkeypatch.setattr(bench, "run_card_trial", fake_trial)
+    monkeypatch.setattr(bench, "mechanically_scorable", lambda f: True)
+    monkeypatch.setattr(bench, "score_reference",
+                        lambda f, a: {"p0_pass": True, "score": 1.0})
+    monkeypatch.setattr(bench, "_score_trials",
+                        lambda f, trials: {"acceptance": {"p0_pass": True},
+                                           "trials_ok": len(trials)})
+    sets = [{"band": "B1", "floor": 10.0, "excluded": {},
+             "contenders": [{"slug": "c1", "provider": "zhipu",
+                             "price_blended": 0.1, "capability": 70.0}]}]
+    fx = [f for f in _fixtures() if f["band"] == "B1"]
+    rc = asyncio.run(bench.execute_seed(fx, sets, {"total_calls": 3}, "seed-test"))
+    assert rc == 0
+    doc = json.loads(results.read_text())
+    assert doc["meta"]["complete"] is True
+    assert doc["meta"]["unscored_rows"] == 0
+    assert [r["card"] for r in doc["results"]] == ["c1"]

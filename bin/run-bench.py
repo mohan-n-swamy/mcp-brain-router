@@ -730,7 +730,6 @@ async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
         # complete says every planned row is present; it says nothing about scoring.
         # SC15's assertion is acceptance==null count 0 -- surface that count so a
         # finished run with unscored rows cannot read as clean (refuter #4).
-        meta["unscored_rows"] = sum(1 for r in rows if r.get("acceptance") is None)
         meta["judge_calls_spend"] = {
             "calls": len(_JUDGE_SPEND),
             "measured_usd": sum(x["cost_usd"] for x in _JUDGE_SPEND
@@ -747,6 +746,7 @@ async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
         for r in this_run:
             by_key[_seed_row_key(r)] = r
         merged = kept + list(by_key.values())
+        meta["unscored_rows"] = sum(1 for r in merged if r.get("acceptance") is None)
         RESULTS.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(RESULTS.parent), prefix=".bench.")
         with os.fdopen(fd, "w") as fh:
