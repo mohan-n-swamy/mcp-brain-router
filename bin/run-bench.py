@@ -76,6 +76,18 @@ _VERSION_HYPHEN = re.compile(r"(?<=\d)-(?=\d)")
 def router_model_for(slug: str) -> str:
     return _VERSION_HYPHEN.sub(".", slug)
 
+
+def card_effort(card: dict) -> str | None:
+    """cards.json effort -> the router's effort argument. "base" is the CLI
+    default; "non-reasoning" is the C06 low setting (thinking disabled on the
+    HTTP adapters, --effort low on the CLIs)."""
+    e = card.get("effort") or "base"
+    if e == "base":
+        return None
+    if e == "non-reasoning":
+        return "low"
+    return e
+
 sys.path.insert(0, str(REPO / "src"))
 
 
@@ -316,7 +328,12 @@ async def run_card_trial(card: dict, fixture: dict, cwd: str) -> dict:
     scoring and aggregation below cannot tell the two apart."""
     from mcp_brain_router import router
     from mcp_brain_router.config import Config
-    model = router_model_for(card["slug"])
+    # A card is (model, effort), not a model id: gpt-5-6-luna-xhigh is the
+    # gpt-5.6-luna model at effort xhigh. The 2026-09-05 seed passed the SLUG
+    # as the model name and every effort-variant card died in 4s with
+    # "model is not supported". Base effort is the CLI default (None).
+    model = router_model_for(card.get("model") or card["slug"])
+    effort = card_effort(card)
     route_desc, _ = card_dispatch(card)
     prompt = build_prompt(fixture, cwd)
     t0 = time.perf_counter()
@@ -324,25 +341,31 @@ async def run_card_trial(card: dict, fixture: dict, cwd: str) -> dict:
         cfg = Config.load()
         if route_desc == "route:code->glm":
             r = await router.route(router.Complexity.CODE, prompt, model_override=model,
-                                   config=cfg, mode="agentic", cwd=cwd)
+                                   config=cfg, mode="agentic", cwd=cwd, effort=effort)
         elif route_desc == "route:adversarial->codex":
             r = await router.route(router.Complexity.ADVERSARIAL, prompt,
-                                   model_override=model, config=cfg, mode="agentic", cwd=cwd)
+                                   model_override=model, config=cfg, mode="agentic",
+                                   cwd=cwd, effort=effort)
         elif route_desc == "direct:grok":
-            r = await router._route_agentic("grok", prompt, model, cfg, cwd)
+            r = await router._route_agentic("grok", prompt, model, cfg, cwd, effort=effort)
         elif route_desc == "direct:kimi":
-            r = await router._route_agentic("kimi", prompt, model, cfg, cwd)
+            r = await router._route_agentic("kimi", prompt, model, cfg, cwd, effort=effort)
         else:
-            r = await router._route_agentic("anthropic-cli", prompt, model, cfg, cwd)
+            r = await router._route_agentic("anthropic-cli", prompt, model, cfg, cwd,
+                                            effort=effort)
     except Exception as e:
         # Credential/availability errors and harness crashes are FAILED trials,
         # never cheap successes -- same rule as an empty answer in run_role.
+        # The message is kept: three cards failed 0/3 in the first seed and the
+        # cause had to be reproduced by hand because only the type was stored.
         return {"ok": False, "answer": "", "backend": None, "model": model,
+                "effort": effort,
                 "tokens_in": None, "tokens_out": None,
                 "cache_read_input_tokens": None, "usage_source": None,
                 "cost_usd": None,
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000),
-                "failure_kind": type(e).__name__, "fell_back": False}
+                "failure_kind": type(e).__name__, "error": str(e)[:300],
+                "fell_back": False}
     answer = (r.content or "").strip()
     ok = bool(answer) and not r.exhausted
     u = r.usage or {}
