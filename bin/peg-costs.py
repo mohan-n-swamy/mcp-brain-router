@@ -105,8 +105,14 @@ def main() -> int:
         if r["cost_basis"] == "measured":
             print(f"{r['id']:22} {str(r['backend']):8} {'measured':10} {r['total_cost_usd']:10.6f}  own usage")
             continue
-        slug = DEFAULT_CARD.get(str(r["backend"]))
+        # Seed rows name the exact card; baseline rows only know the backend.
+        slug = r.get("card") or DEFAULT_CARD.get(str(r["backend"]))
         donor = by_id.get(r["id"])
+        if not r.get("trials_ok"):
+            # No answer came back: there is nothing to price. A pegged cost here
+            # would let a card that never worked look cheap in the deck.
+            print(f"{r['id']:22} {str(r['backend']):8} {'UNMEASURED':10} {'-':>10}  0 ok trials, not pegged")
+            continue
         got = peg(r, donor, slug) if (slug and donor) else None
         if not got:
             print(f"{r['id']:22} {str(r['backend']):8} {'UNMEASURED':10} {'-':>10}  no donor tokens")
