@@ -186,6 +186,7 @@ def plan(deck_path: Path) -> list[tuple[str, str]]:
               file=sys.stderr)
         needed = [b for b in needed if b not in empty]
         deck_rows = [r for r in deck_rows if r["band"] not in empty]
+        native_rows = [r for r in native_rows if r["band"] not in empty]
     # A ranked list that is non-empty but whose winner carries no router_model, or
     # a band with no floor, would have written the literal 'None' into a production
     # agent file (refuter finding). Refuse before rendering.

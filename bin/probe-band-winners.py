@@ -135,6 +135,8 @@ async def probe_all(deck: dict, config: Config, fake: bool,
     # real (throwaway) directory, not the server's or this script's.
     with tempfile.TemporaryDirectory(prefix="probe-band-") as tmp:
         for band in BANDS:
+            if not (deck.get(band) and deck[band].ranked):
+                continue
             card = deck[band].ranked[0]
             say(args, f"probing {band} winner {card.slug} "
                       f"(provider={card.provider} model={card.router_model})")
@@ -169,12 +171,12 @@ def main() -> int:
     deck = load_deck(args.deck)
 
     missing = [b for b in BANDS if not (deck.get(b) and deck[b].ranked)]
-    if missing:
-        for b in missing:
-            say(args, f"band {b}: no ranked card in {deck_path}")
-        say(args, f"no ranked winner in: {', '.join(missing)} -- on week 0 this is "
-                  f"the EXPECTED result (deck built, costs not yet measured); "
-                  f"nothing was probed and probe.json was not written")
+    for b in missing:
+        say(args, f"band {b}: no ranked card in {deck_path} -- skipped (legacy walk)")
+    if len(missing) == len(BANDS):
+        say(args, f"no ranked winner in any band -- on week 0 this is the EXPECTED "
+                  f"result (deck built, costs not yet measured); nothing was probed "
+                  f"and probe.json was not written")
         return 2
 
     rows = asyncio.run(probe_all(deck, config, args.fake, args))
