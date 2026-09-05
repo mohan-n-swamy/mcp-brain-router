@@ -196,7 +196,12 @@ def _attachment_text(fixture: dict, scratch: str) -> str:
     out = []
     for a in fixture["input"].get("attachments", []):
         q = pathlib.Path(a)
-        src = q if q.is_absolute() else (vault / q)
+        # Same bases as validate-fixtures.py, or a fixture the validator accepts can
+        # fail here: f3's attachment is a memory-dir file, and vault-relative
+        # resolution alone refused all three of its trials on the first full run.
+        MEMORY = pathlib.Path.home() / ".claude/projects/-Users-mohannarayanswamy-code-workshop/memory"
+        src = q if q.is_absolute() else next(
+            (b / q for b in (vault, SPEC, MEMORY, MEMORY.parent) if (b / q).exists()), vault / q)
         dst = box / src.name
         if src.is_dir():
             shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -258,11 +263,14 @@ def run_native(fixture: dict, cwd: str) -> dict:
     Recording this as a role would flatter the after-number (must-not #2)."""
     t0 = time.perf_counter()
     try:
+        prompt = build_prompt(fixture, cwd)   # may raise Refused: that is a STOP, see below
         p = subprocess.run(
-            ["claude", "-p", build_prompt(fixture, cwd), "--output-format", "json"],
+            ["claude", "-p", prompt, "--output-format", "json"],
             capture_output=True, text=True, cwd=cwd, timeout=900,
         )
         d = json.loads(p.stdout) if p.returncode == 0 else {}
+    except Refused:
+        raise   # a missing attachment stops the run; it must never become a scored-null row
     except Exception as e:
         return {"ok": False, "answer": "", "backend": "native", "model": None,
                 "cost_usd": None, "usage_source": None, "tokens_in": None,
