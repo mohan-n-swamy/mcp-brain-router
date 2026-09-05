@@ -118,7 +118,7 @@ def main():
     for shape in sorted(SHAPE_COUNTS):
         print(f"  observed {shape}: {SHAPE_COUNTS[shape]}")
     print(f"  observed total: {observed}")
-    print(f"  delegated: {delegated}")
+    print(f"  delegated (all bands -- log carries no band; upper bound): {delegated}")
     if observed > 0:
         print(f"  ratio delegated/observed: {delegated / observed:.2f}")
     else:

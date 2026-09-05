@@ -87,21 +87,23 @@ def read_json(path: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str], int]:
-    """Index results rows by card, and collect the bands a reference job has passed.
+def load_measurements(doc: dict | None) -> tuple[dict[str, dict[str, dict]], set[str], int]:
+    """Index results rows by (card, band), and collect the bands a reference job passed.
 
-    Returns (by_card, derived_bands, pegged_low). A row keys on `card` (C07's own field name), or
-    on `model` for a row written before that field existed; `build_cards` then looks up
-    under both the slug and the router_model, since either shape names the same card
-    and a lookup miss would silently un-rank a measured one.
+    Returns (by_card, derived_bands, pegged_low). by_card maps key -> {band -> entry},
+    where entry is that band's measurement {total_cost_usd, p0_pass, size_class,
+    cost_basis} -- the per-band shape R30 requires. A row keys on `card` (C07's own
+    field name), or on `model` for a row written before that field existed;
+    `build_cards` then looks up under both the slug and the router_model, since either
+    shape names the same card and a lookup miss would silently un-rank a measured one.
 
-    C07 records one row per (card, band, size_class), so from week 1 a card measured in
-    two bands has two rows and this index keeps whichever came last in the file. That
-    is a real hazard, not a tidiness point: a card that passes P0 in B1 and fails it in
-    B4 would take its single p0_pass from file order. The Card type carries one cost,
-    one p0_pass and one size_class per card while C07 emits them per band -- the type
-    needs a per-band shape, or C02 needs a stated selection rule. Until one exists, the
-    duplicate is at least announced rather than absorbed.
+    C07 records one row per (card, band, size_class), so a card measured in two bands
+    has two rows and BOTH survive here, keyed by band. That fixes the old hazard where
+    a card passing P0 in B1 and failing it in B4 took its single verdict from file
+    order. What still cannot be flattened is two rows for the SAME (card, band) --
+    which in practice means the two size classes of B4/B5 -- with DIFFERENT verdicts:
+    there is no third key below band to separate them, so the builder STOPs rather
+    than pick one silently.
 
     A pegged row (peg-costs.py) carries a peg_confidence for how much of its cost
     rides on token counts borrowed from another model. A LOW-confidence peg is
@@ -110,7 +112,7 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str], int]
     (total_cost_usd None), which R21 already handles: present-but-unranked. Medium
     and high pegs rank normally; measured rows are untouched.
     """
-    by_card: dict[str, dict] = {}
+    by_card: dict[str, dict[str, dict]] = {}
     derived: set[str] = set()
     pegged_low = 0
     for row in (doc or {}).get("results") or []:
@@ -121,39 +123,41 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str], int]
                   "peg_confidence — output-dominated, cost demoted to UNMEASURED "
                   "and unrankable (R21)",
                   file=sys.stderr)
+            # Demoted, not dropped: the entry carries total_cost_usd None, so the
+            # card stays present in its band and permanently unranked (R21).
+            row = {**row, "total_cost_usd": None}
         if key:
-            if key in by_card:
-                prev = by_card[key]
-                same_verdict = prev.get("p0_pass") == row.get("p0_pass")
-                msg = (
-                    f"{key!r} has more than one results row "
-                    f"(bands {prev.get('band')} and {row.get('band')})"
-                )
-                if same_verdict:
-                    # Same verdict either way, so file order cannot change the outcome.
-                    # Still announced: it means the flattening has started to bite.
-                    print(f"warning: {msg}; verdicts agree, last row read wins",
-                          file=sys.stderr)
-                else:
-                    # STOP. p0_pass differs BETWEEN BANDS, so whichever row is read
-                    # last decides whether this card can rank -- routing by file order.
-                    # A card that passes P0 on easy work and fails it on hard work is
-                    # exactly the case the bands exist to separate, and collapsing it
-                    # to one verdict is worse than refusing to build.
+            bands = by_card.setdefault(key, {})
+            band = row.get("band")
+            if band in bands:
+                prev = bands[band]
+                if prev.get("p0_pass") != row.get("p0_pass"):
+                    # STOP. Same card, same band -- the rows differ only by size
+                    # class (R30) -- and the verdicts disagree. There is nothing
+                    # below "band" to key them apart, so keeping either row is a
+                    # silent pick, and the small/large choice would follow file
+                    # order. That has to be settled in the bench, not here.
                     print(
-                        f"STOP: {msg} with DIFFERENT p0_pass "
-                        f"({prev.get('p0_pass')} vs {row.get('p0_pass')}). The Card "
-                        "type holds one verdict per card while C07 emits one per band, "
-                        "so ranking here would follow file order. Give Card a per-band "
-                        "shape, or state C02's selection rule, before building.",
+                        f"STOP: {key!r} band {band} has results rows with DIFFERENT "
+                        f"p0_pass ({prev.get('p0_pass')} vs {row.get('p0_pass')}). "
+                        "Same (card, band) differing only by size class must agree, "
+                        "or the builder cannot flatten them without following file "
+                        "order. Re-run the bench cell (R30: median of n=3) before "
+                        "building.",
                         file=sys.stderr,
                     )
                     raise SystemExit(3)
-            if key and row.get("cost_basis") == "pegged" and row.get("peg_confidence") == "low":
-                # Demoted, not dropped: build_cards reads total_cost_usd as None, so
-                # the card stays present in its band and permanently unranked (R21).
-                row = {**row, "total_cost_usd": None}
-            by_card[key] = row
+                # Same verdict either way, so file order cannot change the outcome.
+                # Still announced: it means two size-class rows collapsed to one.
+                print(f"warning: {key!r} band {band} has more than one results row; "
+                      "verdicts agree, last row read wins",
+                      file=sys.stderr)
+            bands[band] = {
+                "total_cost_usd": row.get("total_cost_usd"),
+                "p0_pass": row.get("p0_pass"),
+                "size_class": row.get("size_class") or "small",
+                "cost_basis": row.get("cost_basis") or "measured",
+            }
         # R27: a floor is DERIVED only from a reference-job PASS. A completed run that
         # failed a P0 item, or one that was never scored (p0_pass None), derives
         # nothing -- it is evidence about the card, not about where the floor sits.
@@ -162,7 +166,7 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict], set[str], int]
     return by_card, derived, pegged_low
 
 
-def build_cards(raw: list[dict], by_card: dict[str, dict]) -> tuple[list[Card], int, list[str]]:
+def build_cards(raw: list[dict], by_card: dict[str, dict[str, dict]]) -> tuple[list[Card], int, list[str]]:
     """Map cards.json rows onto the Card dataclass, dropping capability-less cards.
 
     A card with `capability is None` cleared fewer than C01's minimum agentic
@@ -188,6 +192,12 @@ def build_cards(raw: list[dict], by_card: dict[str, dict]) -> tuple[list[Card], 
         m = by_card.get(slug) or by_card.get(rm) or {}
         if m:
             matched.append(slug)
+        # The scalars keep the LAST row read, exactly as the pre-R30 builder did, so
+        # a consumer still holding a one-measurement-per-card card sees no change.
+        # Ranking never reads them once by_band is populated -- deck.py routes every
+        # band through its own entry -- so this is compatibility, not a selection
+        # rule, and a file-order change cannot alter which bands the card ranks in.
+        last = m[next(reversed(m))] if m else {}
         cards.append(
             Card(
                 slug=slug,
@@ -197,20 +207,21 @@ def build_cards(raw: list[dict], by_card: dict[str, dict]) -> tuple[list[Card], 
                 effort=c["effort"],
                 capability=c["capability"],
                 price_blended=c["price_blended"],  # reference only, NEVER the sort key (R19/R25)
-                total_cost_usd=m.get("total_cost_usd"),
+                total_cost_usd=last.get("total_cost_usd"),
                 # size_class is a property of a MEASUREMENT, not of a card: C07 records
-                # cost per (card, band, size_class), while the LLD's Card type carries a
-                # single one. With no measurement there is no size to report, so the
-                # field defaults to the smaller job shape rather than claiming a large
-                # one was ever run.
-                size_class=m.get("size_class") or "small",
-                p0_pass=m.get("p0_pass"),
+                # cost per (card, band, size_class). With no measurement there is no
+                # size to report, so the field defaults to the smaller job shape
+                # rather than claiming a large one was ever run.
+                size_class=last.get("size_class") or "small",
+                p0_pass=last.get("p0_pass"),
+                by_band=dict(m),
             )
         )
     return cards, dropped, matched
 
 
-def check_stops(rows, results_doc: dict | None, derived: set[str]) -> None:
+def check_stops(rows, results_doc: dict | None, derived: set[str],
+                results_path: Path = RESULTS) -> None:
     """Both STOPs, checked over the EMITTED rows rather than assumed from inputs.
 
     Asserting these against the data structures that were actually built is the whole
@@ -223,8 +234,8 @@ def check_stops(rows, results_doc: dict | None, derived: set[str]) -> None:
         if loaded:
             raise Refused(
                 "STOP: bands " + ", ".join(loaded) + " have ranked cards while "
-                f"{RESULTS} carries no results. Ranking without measurement means cost "
-                "was estimated, which R21 forbids outright."
+                f"{results_path} carries no results. Ranking without measurement means "
+                "cost was estimated, which R21 forbids outright."
             )
     for r in rows:
         if r.floor_status == "DERIVED" and r.band not in derived:
@@ -248,20 +259,29 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="C02: build deck.json from cards.json + bench results")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the band summary and write nothing at all")
+    # Overrides exist for the tests: a builder whose STOP paths can only be
+    # exercised against the live state files cannot be regression-tested without
+    # writing into ~/.local/state, which a test must never do.
+    ap.add_argument("--cards", default=None,
+                    help="cards.json to read instead of the default state path")
+    ap.add_argument("--results", default=None,
+                    help="results.json to read instead of the default bench path")
     args = ap.parse_args()
 
-    cards_doc = read_json(CARDS)
+    cards_path = Path(args.cards).expanduser() if args.cards else CARDS
+    results_path = Path(args.results).expanduser() if args.results else RESULTS
+    cards_doc = read_json(cards_path)
     if cards_doc is None:
-        print(f"STOP: {CARDS} is absent. Run bin/fetch-provider-table.py (C01) first.",
+        print(f"STOP: {cards_path} is absent. Run bin/fetch-provider-table.py (C01) first.",
               file=sys.stderr)
         return 2
-    results_doc = read_json(RESULTS)
+    results_doc = read_json(results_path)
 
     try:
         by_card, derived, pegged_low = load_measurements(results_doc)
         cards, dropped, matched = build_cards(cards_doc.get("cards") or [], by_card)
         rows = build_bands(cards, derived=derived)
-        check_stops(rows, results_doc, derived)
+        check_stops(rows, results_doc, derived, results_path=results_path)
     except Refused as e:
         print(e, file=sys.stderr)
         return 3
@@ -275,8 +295,8 @@ def main() -> int:
 
     doc = {
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "cards_path": str(CARDS),
-        "results_path": str(RESULTS),
+        "cards_path": str(cards_path),
+        "results_path": str(results_path),
         "results_present": "absent" if results_doc is None
         else ("empty" if not (results_doc.get("results") or []) else "present"),
         "cards_in": len(cards_doc.get("cards") or []),

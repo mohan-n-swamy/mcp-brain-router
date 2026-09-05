@@ -554,7 +554,9 @@ def seed_plan_hash(fixtures: list[dict], sets: list[dict]) -> str:
     previous plan, refuses. Found the hard way: the first version had no gate at
     all and a test launch was live for three seconds before it was killed."""
     blob = json.dumps({
-        "fixtures": fixture_set_hash(fixtures),
+        # The WHOLE fixture, not id+prompt: an acceptance-item edit changes what a
+        # trial is scored against, and approval is of the exact plan (refuter #1).
+        "fixtures": hashlib.sha256(json.dumps(fixtures, sort_keys=True).encode()).hexdigest(),
         "contenders": [[st["band"], sorted(c["slug"] for c in st["contenders"])] for st in sets],
         "trials": TRIALS,
     }, sort_keys=True).encode()
@@ -647,7 +649,7 @@ def print_seed_plan(p: dict, sets: list[dict], fixtures: list[dict]) -> None:
         uw = v.get("used_week")
         print(f"  {prov:10} used_week={'n/a' if uw is None else f'{uw:.0%}'}")
     print(f"\nfixture-set hash: {fixture_set_hash(fixtures)}")
-    print("\nNothing was spent. To run for real: python3 bin/run-bench.py --seed-round\n")
+    print("\nNothing was spent.")
 
 
 def _seed_row_key(row: dict) -> tuple:
@@ -717,6 +719,10 @@ async def execute_seed(fixtures: list[dict], sets: list[dict], p: dict,
 
     def flush(complete: bool) -> None:
         meta["complete"] = complete
+        # complete says every planned row is present; it says nothing about scoring.
+        # SC15's assertion is acceptance==null count 0 -- surface that count so a
+        # finished run with unscored rows cannot read as clean (refuter #4).
+        meta["unscored_rows"] = sum(1 for r in rows if r.get("acceptance") is None)
         meta["judge_calls_spend"] = {
             "calls": len(_JUDGE_SPEND),
             "measured_usd": sum(x["cost_usd"] for x in _JUDGE_SPEND
@@ -801,6 +807,10 @@ async def execute(fixtures: list[dict], routing: dict, p: dict, cwd: str,
         next row -- and a partial file that SAYS it is partial is exactly what must-not
         #3 asks for. Same atomic temp+replace; a reader never sees a half-written file."""
         meta["complete"] = complete
+        # complete says every planned row is present; it says nothing about scoring.
+        # SC15's assertion is acceptance==null count 0 -- surface that count so a
+        # finished run with unscored rows cannot read as clean (refuter #4).
+        meta["unscored_rows"] = sum(1 for r in rows if r.get("acceptance") is None)
         meta["judge_calls_spend"] = {
             "calls": len(_JUDGE_SPEND),
             "measured_usd": sum(x["cost_usd"] for x in _JUDGE_SPEND

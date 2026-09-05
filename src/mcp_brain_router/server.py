@@ -692,7 +692,8 @@ def create_server():
                     "exhausted": False,
                 }
             if role is not None:
-                return await _delegate_role_impl(role, prompt, orchestrator or "", mode, cwd)
+                return await _delegate_role_impl(role, prompt, orchestrator or "", mode, cwd,
+                                                 effort=effort)
             if complexity is None:
                 return {
                     "error": "Provide either role or complexity",
@@ -713,6 +714,7 @@ def create_server():
             model: str | None = None,
             mode: str | None = None,
             cwd: str | None = None,
+            effort: str | None = None,
         ):
             """
             Delegate by legacy complexity tier or configured orchestration role.

@@ -155,6 +155,15 @@ class Config:
             lines.append("[model_overrides]")
             for complexity, model in self.model_overrides.items():
                 lines.append(f'{complexity} = "{self._escape_toml(model)}"')
+        # C04: a load -> save -> load cycle must not silently revert deck mode to
+        # legacy or drop the bands (refuter finding). Emitted before the tables so
+        # TOML keeps them top-level.
+        if self.routing_mode and self.routing_mode != "legacy":
+            lines.append(f'routing_mode = "{self._escape_toml(self.routing_mode)}"')
+        if self.role_bands:
+            lines.append("[role_bands]")
+            for role, band in self.role_bands.items():
+                lines.append(f'{role} = "{self._escape_toml(band)}"')
         if self.roles:
             lines.append("[roles]")
             for role, models in self.roles.items():

@@ -175,3 +175,24 @@ def test_codex_constants_are_the_effort_none_argv():
     assert backends.CODEX_EXEC_BASE == backends._codex_exec_base(agentic=False)
     assert backends.CODEX_EXEC_BASE_AGENTIC == backends._codex_exec_base(agentic=True)
     assert 'model_reasoning_effort="low"' in backends.CODEX_EXEC_BASE
+
+
+# ---------------------------------------------------------------- refuter finding, 2026-09-05
+
+@pytest.mark.asyncio
+async def test_effort_reaches_glm_through_the_role_path(monkeypatch):
+    """The fatal one: route_assignment -> route() -> _route_agentic dropped effort for
+    every provider that goes through the generic branch -- which is where the live
+    worker cascade lands (glm). Only the adapter unit tests had covered glm."""
+    from mcp_brain_router import router as r
+    from mcp_brain_router.config import Config
+    seen = {}
+    def fake_glm(prompt, model, cwd=None, effort=None):
+        seen["effort"] = effort
+        return {"content": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}}
+    monkeypatch.setattr(backends, "call_glm_agentic", fake_glm)
+    monkeypatch.setattr(r, "_validate_credentials", lambda *a, **k: None, raising=False)
+    cfg = Config(roles={"worker": ["glm-5.3"]}, glm_key="k")
+    a = r.resolve_role(r.Role.WORKER, "claude", cfg, mode="agentic")
+    await r.route_assignment(a, "hi", cfg, mode="agentic", cwd="/tmp", effort="high")
+    assert seen.get("effort") == "high"

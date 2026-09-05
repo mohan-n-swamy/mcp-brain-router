@@ -82,7 +82,7 @@ def tools_of(fm: dict[str, str], text: str = "") -> list[str]:
     frontmatter-only read passed that probe -- an unenforcing lint, the STOP
     condition -- so a second tool declared ANYWHERE now counts."""
     found: list[str] = []
-    for line in re.findall(r"(?m)^tools:\s*(.*)$", text) or [fm.get("tools", "")]:
+    for line in re.findall(r"(?mi)^\s*tools\s*:\s*(.*)$", text) or [fm.get("tools", "")]:
         for t in line.split(","):
             t = t.strip()
             if t and t not in found:
@@ -110,7 +110,12 @@ def main() -> int:
     ap.add_argument("--agents-dir", default=str(AGENTS))
     agents = Path(ap.parse_args().agents_dir)
     failures: list[str] = []
-    files = sorted(agents.glob("*.md")) if agents.is_dir() else []
+    if not agents.is_dir():
+        # Fail closed: a lint that finds no directory has checked nothing (refuter #4).
+        print(f"FAIL agents dir does not exist: {agents}")
+        print("agent-lint: 0 agent files, 1 failure(s)")
+        return 1
+    files = sorted(agents.glob("*.md"))
     for f in files:
         text = f.read_text(encoding="utf-8")
         fm = frontmatter(text)
@@ -126,7 +131,9 @@ def main() -> int:
                                 f"{tools}; must be exactly [{DELEGATE_TOOL}]"
                                 + (f" -- extra: {extra}" if extra else ""))
             # 1b -- agentic mode + real cwd named
-            if "agentic" not in text or "cwd" not in text:
+            agentic_arg = re.search(r'mode\s*[:=]\s*["\']?agentic', text) is not None
+            cwd_arg = re.search(r'\bcwd\s*[:=]', text) is not None
+            if not (agentic_arg and cwd_arg):
                 failures.append(f"{name}: agent:deck must name mode=agentic and a real cwd; "
                                 "in chat mode the work never happens")
             # 3 -- IRR never in the lane. Keyed on irr, never on q3.

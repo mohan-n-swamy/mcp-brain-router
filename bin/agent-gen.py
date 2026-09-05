@@ -114,7 +114,9 @@ def render_deck(row: dict, band_row: dict, executor: str | None = None) -> str:
         f"effort: {card.get('effort') or 'base'}",
         f"min_capability: {band_row['floor']}",
         f"band: {row['band']}",
-        f"lane: deck",
+        "lane: deck",
+        "mode: agentic",     # C11 checks this key, not a sentence in the body
+        "cwd: caller",       # the caller's real working directory, passed per call
         f"tier_why: \"{row['band']} because {_desc(row['why'])}\"",
         f"q_scores: [{q[0]}, {q[1]}, {q[2]}, {q[3]}]",
         "irr: false",

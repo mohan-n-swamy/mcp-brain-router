@@ -8,8 +8,9 @@ the chances of a SILENT routing shift. So the refresh never overwrites
 silently: the previous deck is kept as deck.prev.json and every change a
 reader could act on is printed before the new deck is trusted.
 
-C12's probe is not built yet. Skipping it silently would be the exact
-failure mode this component exists to prevent, so the skip is printed.
+The probe (C12) runs LAST, against the freshly written deck: a winner that
+does not answer is a routing change the diff cannot see, so the refresh ends
+by proving each band winner is alive rather than by trusting the build.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ PREV = STATE / "deck.prev.json"
 FETCH = REPO / "bin" / "fetch-provider-table.py"
 BENCH = REPO / "bin" / "run-bench.py"
 BUILD = REPO / "bin" / "build-deck.py"
+PROBE = REPO / "bin" / "probe-band-winners.py"
 
 # R7: a card whose trials vary wildly has a cost, but not a trustworthy one.
 # It is FLAGGED for a human, never silently ranked on the median.
@@ -179,6 +181,48 @@ def run(step: str, cmd: list[str]) -> None:
         raise SystemExit(rc)
 
 
+def run_probe() -> int:
+    """Probe the new deck's band winners (C12) and map its exit code onto ours.
+
+    Output is captured, not streamed, because exit 1 needs the --json rows to
+    name the failing bands -- but the probe's human lines still reach the log
+    verbatim, since a captured-but-swallowed report is a silent skip with a
+    subprocess in the middle.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(PROBE), "--json"],
+        capture_output=True, text=True,
+    )
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+
+    if proc.returncode == 0:
+        return 0
+    if proc.returncode == 2:
+        # Week 0: costs not yet measured, so no band has a ranked winner. The
+        # deck was still fetched, benchmarked, built and diffed -- that is a
+        # successful refresh of a young deck, not a launchd failure.
+        print("probe: deck has no ranked winners (week 0) -- not a failure")
+        return 0
+
+    # Exit 1 (or anything unexpected): a winner that did not answer ALIVE. The
+    # previous deck is deliberately NOT restored -- C08 reports, the human
+    # acts -- and the nonzero exit makes launchd log the run either way.
+    bands: list[str] = []
+    try:
+        bands = [r.get("band", "?") for r in json.loads(proc.stdout)
+                 if not r.get("ok")]
+    except json.JSONDecodeError:
+        print(f"probe: exited {proc.returncode} and its --json output did not "
+              f"parse; see its report above", file=sys.stderr)
+    if bands:
+        print(f"probe: FAILING BANDS: {', '.join(bands)}", file=sys.stderr)
+    print(f"probe: exited {proc.returncode}; previous deck NOT restored "
+          f"(deck.prev.json holds it) -- C08 reports, the human acts",
+          file=sys.stderr)
+    return proc.returncode or 1
+
+
 def full_refresh() -> int:
     if not bench_supports_seed_round():
         print(
@@ -214,10 +258,9 @@ def full_refresh() -> int:
             print(line)
         print(f"diff: {len(lines)} change(s)" if lines else "diff: no changes")
 
-    # C12 is not built. A silent skip is the failure mode this file exists
-    # to prevent, so the skip is itself a printed line in the weekly log.
-    print("probe: C12 not built, skipped")
-    return 0
+    # LAST, and only on a full refresh (--diff-only writes nothing and must
+    # never spend provider quota): prove the new deck's winners are alive.
+    return run_probe()
 
 
 def main() -> int:

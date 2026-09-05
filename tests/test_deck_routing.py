@@ -68,7 +68,8 @@ def test_default_mode_is_legacy():
 
 def test_deck_mode_takes_leftmost_ranked_card(tmp_path, monkeypatch):
     p = _deck_file(tmp_path, {"B3": [_card("glm-5.3", "zhipu", 0.10),
-                                     _card("kimi-k3", "moonshot", 0.13)]})
+                                     _card("kimi-k3", "moonshot", 0.13),
+                                     _card("grok-4.5", "xai", 0.20)]})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
     a = resolve_role(Role.WORKER, "claude", _cfg("deck"), mode="agentic")
@@ -80,7 +81,8 @@ def test_deck_mode_takes_leftmost_ranked_card(tmp_path, monkeypatch):
 
 def test_deck_mode_applies_skip_self(tmp_path, monkeypatch):
     p = _deck_file(tmp_path, {"B3": [_card("glm-5.3", "zhipu", 0.10),
-                                     _card("kimi-k3", "moonshot", 0.13)]})
+                                     _card("kimi-k3", "moonshot", 0.13),
+                                     _card("grok-4.5", "xai", 0.20)]})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
     # Orchestrator is glm's own provider -> the leftmost card is skipped.
@@ -90,7 +92,8 @@ def test_deck_mode_applies_skip_self(tmp_path, monkeypatch):
 
 def test_deck_mode_applies_skip_exhausted(tmp_path, monkeypatch):
     p = _deck_file(tmp_path, {"B3": [_card("glm-5.3", "zhipu", 0.10),
-                                     _card("kimi-k3", "moonshot", 0.13)]})
+                                     _card("kimi-k3", "moonshot", 0.13),
+                                     _card("grok-4.5", "xai", 0.20)]})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
     a = resolve_role(Role.WORKER, "claude", _cfg("deck"), mode="agentic",
@@ -102,7 +105,8 @@ def test_deck_mode_headroom_gates_by_DECK_provider_name(tmp_path, monkeypatch):
     """The gate compares Card.provider against headroom keys -- both deck names.
     moonshot at 95% must remove kimi-k3 even though the router calls it 'kimi'."""
     p = _deck_file(tmp_path, {"B3": [_card("kimi-k3", "moonshot", 0.05),
-                                     _card("glm-5.3", "zhipu", 0.10)]})
+                                     _card("glm-5.3", "zhipu", 0.10),
+                                     _card("grok-4.5", "xai", 0.20)]})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {"moonshot": 0.95, "zhipu": 0.10})
     a = resolve_role(Role.WORKER, "claude", _cfg("deck"), mode="agentic")
@@ -126,7 +130,9 @@ def test_deck_mode_falls_through_when_deck_unreadable(monkeypatch):
 
 def test_deck_anthropic_card_uses_agentic_rule(tmp_path, monkeypatch):
     """The three-way Anthropic rule is shared with the legacy walk, not re-implemented."""
-    p = _deck_file(tmp_path, {"B5": [_card("claude-fable-5.1", "anthropic", 0.50, cap=72)]})
+    p = _deck_file(tmp_path, {"B5": [_card("claude-fable-5.1", "anthropic", 0.50, cap=72),
+                                     _card("claude-opus-4.8", "anthropic", 0.60, cap=71),
+                                     _card("claude-sonnet-5", "anthropic", 0.30, cap=68)]})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
     a = resolve_role(Role.THINKER, "codex", _cfg("deck"), mode="agentic")
@@ -165,3 +171,45 @@ def test_deck_and_router_provider_names_agree_on_every_live_card():
     # can never win; it is reported so the prefix table can grow, not failed on.
     assert not misrouted, f"{len(misrouted)} cards misroute, e.g. {misrouted[:3]}"
     print(f"unroutable (skipped by deck path): {sorted(unroutable)}")
+
+
+# ---------------------------------------------------------------- refuter findings, 2026-09-05
+
+def test_deck_mode_under_three_ranked_falls_to_legacy_with_warning(tmp_path, monkeypatch, caplog):
+    """R26 at run time: a band with fewer than 3 ranked cards cannot route by deck."""
+    p = _deck_file(tmp_path, {"B3": [_card("grok-4.5", "xai", 0.01)]})
+    monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
+    monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
+    import logging
+    with caplog.at_level(logging.WARNING):
+        a = resolve_role(Role.WORKER, "claude", _cfg("deck"), mode="agentic")
+    assert a.model == "kimi"  # legacy first candidate, not the deck's cheap grok
+    assert any("<3" in r.message for r in caplog.records)
+
+
+def test_routing_hole_never_hands_work_to_the_gated_provider(tmp_path, monkeypatch, caplog):
+    """C03 STOP: when the gate empties a band, the legacy walk must not select the
+    very provider the gate removed. kimi is legacy-first for worker; gate it out."""
+    p = _deck_file(tmp_path, {"B3": [_card("kimi-k3", "moonshot", 0.05),
+                                     _card("kimi-k2.6", "moonshot", 0.06),
+                                     _card("kimi-k3-low", "moonshot", 0.07)]})
+    monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
+    monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {"moonshot": 0.99})
+    import logging
+    with caplog.at_level(logging.WARNING):
+        a = resolve_role(Role.WORKER, "claude", _cfg("deck"), mode="agentic")
+    assert a.provider is not Provider.KIMI, "legacy walk handed work to the gated-out provider"
+    assert a.model == "glm-5.3"
+    assert any("routing hole" in r.message for r in caplog.records)
+
+
+def test_config_save_round_trips_routing_mode_and_role_bands(tmp_path, monkeypatch):
+    from mcp_brain_router import config as cfgmod
+    monkeypatch.setattr(cfgmod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfgmod, "CONFIG_FILE", tmp_path / "config.toml")
+    c = _cfg("deck"); c.role_bands = {"worker": "B2"}
+    c.save()
+    (tmp_path / "config.toml").chmod(0o600)
+    back = Config.load()
+    assert back.routing_mode == "deck"
+    assert back.role_bands["worker"] == "B2"

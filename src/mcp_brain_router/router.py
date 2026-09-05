@@ -166,8 +166,27 @@ def resolve_role(
         from .deck import gated, load_deck, read_quota
         band = (getattr(config, "role_bands", None) or {}).get(role.value)
         row = load_deck().get(band) if band else None
-        if row is not None:
-            for card in gated(row, read_quota()):
+        if row is None:
+            logger.warning("routing_mode=deck but role %r has no band (role_bands=%r); legacy walk",
+                           role.value, getattr(config, "role_bands", None))
+        elif len(row.ranked) < 3:
+            # R26: the deck may only route a band whose top-3 carries measured cost.
+            # gate-routing-mode.py checks this before the flag is set; this is the
+            # same rule at run time, so an unranked deck cannot route by accident.
+            logger.warning("routing_mode=deck but band %s has %d ranked cards (<3, R26); legacy walk",
+                           band, len(row.ranked))
+        else:
+            survivors = gated(row, read_quota())
+            if not survivors:
+                # C03 STOP: a gate that empties a band is a routing hole, and the
+                # legacy walk must not then hand the work to the very provider the
+                # gate removed. Exclude every gated-out provider from the walk.
+                gated_out = {provider_for_model(c.router_model) for c in row.ranked
+                             if _router_provider_ok(c.router_model)}
+                exhausted |= gated_out
+                logger.warning("routing hole: band %s fully gated (%s); legacy walk excludes them",
+                               band, sorted(p.value for p in gated_out))
+            for card in survivors:
                 # provider_for_model on the ROUTER model id gives the router's own
                 # Provider, so the skip rules compare like with like. The deck's
                 # Card.provider (moonshot/openai) is only ever compared against
@@ -213,6 +232,13 @@ def resolve_role(
         f"no eligible candidate for role: {role.value} "
         "(all providers exhausted or owned by the orchestrator)"
     )
+
+
+def _router_provider_ok(model_id: str) -> bool:
+    try:
+        provider_for_model(model_id); return True
+    except ValueError:
+        return False
 
 
 def _assignment_for(role: Role, model: str, provider: Provider, mode: str,
@@ -381,7 +407,7 @@ async def route_assignment(
         result.tried = ["kimi"]
         return result
     _, complexity = _PROVIDER_TARGETS[assignment.provider]
-    return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd)
+    return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd, effort=effort)
 
 
 # Pure tier ownership. The router selects exactly one backend and never crosses
@@ -457,6 +483,7 @@ async def route(
     config: Optional[Config] = None,
     mode: str = "chat",
     cwd: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> RouteResult:
     """
     Route a request to the appropriate backend.
@@ -497,7 +524,11 @@ async def route(
 
     try:
         if mode == "agentic":
-            result = await _route_agentic(backend_name, prompt, model, config, cwd)
+            # C06: effort rides the agentic dispatch. The refuter found it dropped
+            # here for glm/kimi/codex while the xai and anthropic branches carried it --
+            # the live worker cascade lands on glm, so the flag was silently lost on
+            # the path that actually runs.
+            result = await _route_agentic(backend_name, prompt, model, config, cwd, effort=effort)
         elif backend_name == "deepseek":
             result = await _route_deepseek(prompt, model, config)
         elif backend_name == "glm":

@@ -13,7 +13,7 @@ measurement having changed.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,14 @@ class Card:
     total_cost_usd: Optional[float]  # MEASURED median of n=3 (R21/R30). None => unrankable
     size_class: Literal["small", "large"]   # <10k / >=10k input tokens (R30)
     p0_pass: Optional[bool]          # None => unmeasured; False => unrankable in band (R28)
+    # R30: C07 records one row per (card, band, size_class), so cost, verdict and
+    # size belong to a BAND, not to the card. by_band maps band -> that band's
+    # measurement {total_cost_usd, p0_pass, size_class, cost_basis}. The scalar
+    # fields above stay for callers holding a card measured in one band; they are
+    # what a card with an empty by_band falls back to. Frozen dataclass cannot
+    # take a mutable default directly, hence the factory -- the dict is still
+    # treated as read-only, and every write happens once at build time.
+    by_band: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -52,19 +60,59 @@ class BandRow:
 
 
 # C03's postcondition is a literal grep for quota/headroom inside sort_key, so those
-# words are kept OUT of the function entirely -- including its docstring. The rule they
-# state lives here instead: sort_key is the ONLY ordering rule in the system, it ranks
-# on measured cost then capability, and nothing about provider load may enter it. C03's
-# STOP says that adding it means the design drifted back to headroom-as-cost, where the
-# deck silently reorders as load drifts and no measurement has changed.
+# words are kept OUT of sort_key and sort_key_for entirely -- including docstrings.
+# The rule they state lives here instead: this module holds the ONLY ordering rule in
+# the system, it ranks on measured cost then capability, and nothing about provider
+# load may enter it. C03's STOP says that adding it means the design drifted back to
+# headroom-as-cost, where the deck silently reorders as load drifts and no
+# measurement has changed.
+def _order_key(cost: float | None, capability: float) -> tuple[float, float]:
+    assert cost is not None, "unmeasured card cannot rank (R21)"
+    return (cost, -capability)
+
+
 def sort_key(c: Card) -> tuple[float, float]:
     """The single authoritative ordering rule (R25): cost ASC, capability DESC (R18)."""
-    assert c.total_cost_usd is not None, "unmeasured card cannot rank (R21)"
-    return (c.total_cost_usd, -c.capability)
+    return _order_key(c.total_cost_usd, c.capability)
 
 
-def rankable(c: Card) -> bool:
+def sort_key_for(band):
+    """The SAME rule expressed per band (R30): rank a card by what it cost and
+    proved IN THIS BAND, not by its scalars. sort_key remains the one-band form."""
+    def key(c: Card) -> tuple[float, float]:
+        m = measurement_for(c, band)
+        return _order_key(m["total_cost_usd"], c.capability)
+    return key
+
+
+def measurement_for(c: Card, band: str | None) -> dict:
+    """The measurement a card carries FOR ONE BAND: cost, P0 verdict, size, basis.
+
+    A card that passes P0 in B1 and fails it in B4 is two different observations,
+    and one scalar verdict per card would settle it by file order. by_band holds
+    each band's row; the scalars are the fallback while by_band is empty, which is
+    every week-0 deck and every card measured in a single band.
+    """
+    if not c.by_band:
+        # cost_basis names where the number came from: "scalar" means the card's
+        # own fields, set by whoever measured it in exactly one band.
+        return {"total_cost_usd": c.total_cost_usd, "p0_pass": c.p0_pass,
+                "size_class": c.size_class, "cost_basis": "scalar"}
+    if band is None or band not in c.by_band:
+        # Measured somewhere, but not here. Borrowing another band's row would let
+        # a B1 pass rank the same card in B4, which is the flattening this shape
+        # exists to end; R21's present-but-unranked state is the honest answer.
+        return {"total_cost_usd": None, "p0_pass": None,
+                "size_class": "small", "cost_basis": "unmeasured-in-band"}
+    return c.by_band[band]
+
+
+def rankable(c: Card, band: str | None = None) -> bool:
     """A card ranks only if cost was MEASURED and no P0 acceptance item failed.
+
+    Both checks run against the band's own measurement when the card carries one
+    (R30); a card with no by_band falls back to its scalars, unchanged from the
+    one-measurement-per-card era.
 
     Two independent disqualifiers, and both matter. No cost means R21's rule that an
     unmeasured card cannot rank -- otherwise a newly-shipped model captures routing on
@@ -72,7 +120,8 @@ def rankable(c: Card) -> bool:
     without it the cheapest wrong answer wins its band, because a polished, materially
     incorrect reply returned in four seconds for a cent beats every correct one on cost.
     """
-    return c.total_cost_usd is not None and c.p0_pass is True
+    m = measurement_for(c, band)
+    return m["total_cost_usd"] is not None and m["p0_pass"] is True
 
 
 def build_bands(cards: list[Card], floors: dict[str, float] | None = None,
@@ -89,8 +138,11 @@ def build_bands(cards: list[Card], floors: dict[str, float] | None = None,
     for b in BANDS:
         floor = floors[b]
         eligible = [c for c in cards if c.capability is not None and c.capability >= floor]
-        ranked = sorted([c for c in eligible if rankable(c)], key=sort_key)
-        unranked = [c for c in eligible if not rankable(c)]
+        # R30: rank by the band's own measurement. A card measured in B1 only is
+        # unranked here even when its scalars say "passed" -- same rule, applied
+        # to the row that was actually taken in this band.
+        ranked = sorted([c for c in eligible if rankable(c, b)], key=sort_key_for(b))
+        unranked = [c for c in eligible if not rankable(c, b)]
         rows.append(BandRow(
             band=b, floor=floor,
             # R27/R3: DERIVED requires a supporting reference-job pass. Absent that,
@@ -178,7 +230,16 @@ def load_deck(path=None) -> dict[str, BandRow]:
         return {}
     out: dict[str, BandRow] = {}
     for row in doc.get("bands") or []:
-        cards = lambda xs: [Card(**{k: x.get(k) for k in Card.__dataclass_fields__}) for x in xs]  # noqa: E731
+        def cards(xs, _fields=Card.__dataclass_fields__) -> list[Card]:
+            built = []
+            for x in xs:
+                kw = {k: x.get(k) for k in _fields}
+                # decks written before the per-band shape carry no by_band key;
+                # x.get() yields None, and the empty dict is the same "use the
+                # scalars" state as week 0.
+                kw["by_band"] = kw["by_band"] or {}
+                built.append(Card(**kw))
+            return built
         out[row["band"]] = BandRow(
             band=row["band"], floor=row["floor"], floor_status=row["floor_status"],
             ranked=cards(row.get("ranked") or []), unranked=cards(row.get("unranked") or []),
