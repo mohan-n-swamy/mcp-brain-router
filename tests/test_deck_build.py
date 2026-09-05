@@ -303,7 +303,7 @@ def _results_row(card="split-verdict", band="B1", cost=0.10, p0=True,
             "total_cost_usd": cost, "p0_pass": p0, "cost_basis": "measured"}
 
 
-def test_same_card_and_band_with_conflicting_verdicts_stops_the_builder(tmp_path):
+def test_same_card_and_band_with_conflicting_verdicts_fails_the_band(tmp_path):
     """The STOP, now correctly scoped (R30).
 
     Rows in DIFFERENT bands may disagree — that is the per-band shape working, and
@@ -321,17 +321,17 @@ def test_same_card_and_band_with_conflicting_verdicts_stops_the_builder(tmp_path
     # B1 shows DERIVED, not ESTIMATE: its reference job PASSED (R27).
     assert "B1 floor=35.0 DERIVED ranked=1 unranked=0" in ok.stdout
 
-    # Same (card, band), different verdicts: STOP, exit 3.
+    # Same (card, band), different verdicts: the band verdict is False (R28),
+    # the build succeeds, and the card is unranked in that band.
     clash = _run_builder(
         tmp_path / "clash",
         [_cards_row()],
         [_results_row(band="B1", size_class="small", p0=True),
          _results_row(band="B1", size_class="large", p0=False)],
     )
-    assert clash.returncode == 3
-    assert "STOP" in clash.stderr
-    assert "DIFFERENT p0_pass" in clash.stderr
-
+    assert clash.returncode == 0, clash.stderr
+    assert "different p0_pass" in clash.stderr
+    assert "ranked=0 unranked=1" in clash.stdout.splitlines()[0]
 
 def test_week_zero_builder_output_is_unchanged(tmp_path):
     """R26 via the builder itself: no results rows means every band ranked=0 and

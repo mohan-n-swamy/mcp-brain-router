@@ -132,21 +132,16 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict[str, dict]], set
             if band in bands:
                 prev = bands[band]
                 if prev.get("p0_pass") != row.get("p0_pass"):
-                    # STOP. Same card, same band -- the rows differ only by size
-                    # class (R30) -- and the verdicts disagree. There is nothing
-                    # below "band" to key them apart, so keeping either row is a
-                    # silent pick, and the small/large choice would follow file
-                    # order. That has to be settled in the bench, not here.
-                    print(
-                        f"STOP: {key!r} band {band} has results rows with DIFFERENT "
-                        f"p0_pass ({prev.get('p0_pass')} vs {row.get('p0_pass')}). "
-                        "Same (card, band) differing only by size class must agree, "
-                        "or the builder cannot flatten them without following file "
-                        "order. Re-run the bench cell (R30: median of n=3) before "
-                        "building.",
-                        file=sys.stderr,
-                    )
-                    raise SystemExit(3)
+                    # Same card, same band, two size classes, verdicts disagree.
+                    # R28: a P0 failure anywhere in the band fails the band, so
+                    # the merged verdict is False; no file-order pick. (Until
+                    # 2026-09-05 this STOPped the build; at one trial per cell
+                    # that stopped every build.)
+                    print(f"warning: {key!r} band {band} has size-class rows with "
+                          f"different p0_pass ({prev.get('p0_pass')} vs "
+                          f"{row.get('p0_pass')}); band verdict is False (R28)",
+                          file=sys.stderr)
+                    row = {**row, "p0_pass": False}
                 # Same verdict either way, so file order cannot change the outcome.
                 # Still announced: it means two size-class rows collapsed to one.
                 print(f"warning: {key!r} band {band} has more than one results row; "
