@@ -382,6 +382,7 @@ async def _delegate_role_impl(
     orchestrator: str,
     mode: str | None = None,
     cwd: str | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     """Resolve and execute a role, walking candidates on any backend failure.
 
@@ -509,7 +510,7 @@ async def _delegate_role_impl(
             name = assignment.backend or assignment.provider.value
             try:
                 result = await route_assignment(
-                    assignment, prompt, config, mode=resolved_mode, cwd=cwd
+                    assignment, prompt, config, mode=resolved_mode, cwd=cwd, effort=effort
                 )
             except BackendError as e:
                 tried.append(name)
@@ -554,6 +555,13 @@ async def _delegate_role_impl(
                 "exhausted": False,
                 "source": "external-untrusted",
             }
+            if effort is not None:
+                # C05/C06: a flag that is accepted and dropped makes an unverifiable
+                # claim look verified. Say whether the backend that answered could
+                # actually take it -- kimi cannot -- so the caller knows.
+                from .backends import EFFORT_UNSUPPORTED
+                response["effort"] = effort
+                response["effort_applied"] = result.backend not in EFFORT_UNSUPPORTED
             if result.usage:
                 response["tokens_in"] = result.usage.get("input_tokens", 0)
                 response["tokens_out"] = result.usage.get("output_tokens", 0)

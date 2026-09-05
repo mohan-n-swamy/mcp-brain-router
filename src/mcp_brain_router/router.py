@@ -250,6 +250,7 @@ async def route_assignment(
     config: Config,
     mode: str = "chat",
     cwd: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> "RouteResult":
     """Execute a non-native assignment through existing tier machinery.
 
@@ -264,7 +265,7 @@ async def route_assignment(
     if assignment.backend == "anthropic-cli":
         try:
             return await _route_agentic(
-                "anthropic-cli", prompt, assignment.model, config, cwd
+                "anthropic-cli", prompt, assignment.model, config, cwd, effort=effort
             )
         except BackendQuotaError as e:
             return RouteResult(
@@ -303,10 +304,10 @@ async def route_assignment(
         try:
             if mode == "agentic":
                 result = await _route_agentic(
-                    "grok", prompt, assignment.model, config, cwd
+                    "grok", prompt, assignment.model, config, cwd, effort=effort
                 )
             else:
-                result = await _route_grok(prompt, assignment.model, config)
+                result = await _route_grok(prompt, assignment.model, config, effort=effort)
         except BackendQuotaError as e:
             return RouteResult(
                 content="grok quota exhausted; advance to the next role candidate",
@@ -561,6 +562,7 @@ async def _route_agentic(
     model: str,
     config: Config,
     cwd: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> RouteResult:
     """Agentic dispatch — shell to the per-provider CLI harness in the REAL cwd
     (spec 002). GLM→cc-glm, codex→codex exec (real cwd), and an explicit
@@ -575,22 +577,22 @@ async def _route_agentic(
     pass cwd."""
     if backend_name == "glm":
         result = await asyncio.to_thread(
-            backends.call_glm_agentic, prompt, model, cwd
+            backends.call_glm_agentic, prompt, model, cwd, effort
         )
         label = "glm"
     elif backend_name == "grok":
         result = await asyncio.to_thread(
-            backends.call_grok_agentic, prompt, model, cwd
+            backends.call_grok_agentic, prompt, model, cwd, effort
         )
         label = "grok"
     elif backend_name == "kimi":
         result = await asyncio.to_thread(
-            backends.call_kimi_agentic, prompt, model, cwd
+            backends.call_kimi_agentic, prompt, model, cwd, effort
         )
         label = "kimi"
     elif backend_name == "codex":
         result = await asyncio.to_thread(
-            backends.call_codex_agentic, prompt, model, cwd
+            backends.call_codex_agentic, prompt, model, cwd, effort
         )
         label = "codex"
     elif backend_name == "anthropic-cli":
@@ -770,6 +772,7 @@ async def _route_grok(
     prompt: str,
     model: str,
     config: Config,
+    effort: Optional[str] = None,
 ) -> RouteResult:
     """Route to Grok backend (subprocess-based, chat mode).
 
@@ -781,8 +784,7 @@ async def _route_grok(
     result = await asyncio.to_thread(
         backends.call_grok,
         prompt,
-        model,
-    )
+        model, effort=effort)
 
     return RouteResult(
         content=result["content"],

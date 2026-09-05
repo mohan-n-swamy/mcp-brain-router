@@ -78,7 +78,7 @@ _CODEX_BIN = shutil.which("codex") or (
 # 23,145 tokens / ~69s for PONG; these flags used 14,907 / 10.6s. Delegated
 # prompts are self-contained workers: no user config, rules, plugins, hooks,
 # memories, apps, multi-agent fan-out, persisted session, MCPs, or repo context.
-CODEX_EXEC_BASE = [
+_CODEX_EXEC_BASE_TMPL = [
     _CODEX_BIN,
     "exec",
     "--skip-git-repo-check",
@@ -98,7 +98,7 @@ CODEX_EXEC_BASE = [
     "-c",
     "mcp_servers={}",
     "-c",
-    'model_reasoning_effort="low"',
+    "__EFFORT__",
     "-c",
     'approval_policy="never"',
     "-C",
@@ -162,7 +162,7 @@ _KIMI_BIN = _resolve_bin("kimi", ("~/.kimi-code/bin",))
 #   - `-C /private/tmp`  → run in the REAL cwd (files must land in the repo)
 #   - `--ignore-rules`  → removed so codex's edit/permission rules can apply
 # (spec 002 SC-6). The cwd is set per-call via subprocess.run(cwd=...).
-CODEX_EXEC_BASE_AGENTIC = [
+_CODEX_EXEC_BASE_AGENTIC_TMPL = [
     _CODEX_BIN,
     "exec",
     "--skip-git-repo-check",
@@ -183,10 +183,36 @@ CODEX_EXEC_BASE_AGENTIC = [
     "-c",
     "mcp_servers={}",
     "-c",
-    'model_reasoning_effort="low"',
+    "__EFFORT__",
     "-c",
     'approval_policy="never"',
 ]
+
+
+def _codex_exec_base(agentic: bool, effort: Optional[str] = None) -> list:
+    """The lean Codex argv with reasoning effort THREADED, not typed.
+
+    C06 (specs/001-agent-capability-routing): two hardcoded reasoning-effort
+    literals (both "low") sat inside the argv blobs, so an effort
+    request could not reach Codex without rebuilding the whole list. One builder,
+    both shapes. effort=None reproduces today's argv byte-for-byte -- the default
+    stays "low" -- which is the whole safety property: every existing caller passes
+    no effort and must see no change."""
+    level = effort or "low"
+    tmpl = _CODEX_EXEC_BASE_AGENTIC_TMPL if agentic else _CODEX_EXEC_BASE_TMPL
+    return [(f'model_reasoning_effort="{level}"' if a == "__EFFORT__" else a) for a in tmpl]
+
+
+# Shared with install.py's smoke test; built with effort=None so they cannot drift.
+CODEX_EXEC_BASE = _codex_exec_base(agentic=False)
+CODEX_EXEC_BASE_AGENTIC = _codex_exec_base(agentic=True)
+
+# C06: providers whose CLI exposes no reasoning-effort control at all. kimi accepts
+# -p and --output-format and nothing about effort (kimi --help, 2026-09-05). An
+# effort request to one of these is ACCEPTED by the signature and NOT applied, and
+# the router reports effort_applied=False -- a flag that did nothing must never
+# look like a verified claim (C05 STOP).
+EFFORT_UNSUPPORTED = frozenset({"kimi"})
 
 
 def _find_mise_node() -> str:
@@ -652,6 +678,7 @@ async def call_deepseek(
     prompt: str,
     model: str,
     api_key: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call DeepSeek API directly.
@@ -677,6 +704,16 @@ async def call_deepseek(
         "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if effort:
+        # These endpoints take the Anthropic Messages body, whose reasoning knob is
+        # `thinking.type` (the C06 table names exactly that for GLM), not OpenAI's
+        # reasoning_effort. Levels above "low" enable it; "low" disables it. The
+        # key is constructed only when requested so an effort=None request stays
+        # byte-identical to today's (C06 STOP). NOTE: role delegation is agentic-
+        # only, so this chat path carries no live traffic in the rig; the mapping
+        # follows the spec and is not verified against the provider -- recorded
+        # as such in verification.md rather than claimed.
+        payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
@@ -714,6 +751,7 @@ async def call_deepseek_via_headroom(
     model: str,
     api_key: str,
     headroom_url: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call DeepSeek through headroom proxy.
@@ -733,6 +771,16 @@ async def call_deepseek_via_headroom(
         "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if effort:
+        # These endpoints take the Anthropic Messages body, whose reasoning knob is
+        # `thinking.type` (the C06 table names exactly that for GLM), not OpenAI's
+        # reasoning_effort. Levels above "low" enable it; "low" disables it. The
+        # key is constructed only when requested so an effort=None request stays
+        # byte-identical to today's (C06 STOP). NOTE: role delegation is agentic-
+        # only, so this chat path carries no live traffic in the rig; the mapping
+        # follows the spec and is not verified against the provider -- recorded
+        # as such in verification.md rather than claimed.
+        payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
@@ -773,6 +821,7 @@ async def call_glm(
     prompt: str,
     model: str,
     api_key: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call GLM API directly.
@@ -798,6 +847,16 @@ async def call_glm(
         "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if effort:
+        # These endpoints take the Anthropic Messages body, whose reasoning knob is
+        # `thinking.type` (the C06 table names exactly that for GLM), not OpenAI's
+        # reasoning_effort. Levels above "low" enable it; "low" disables it. The
+        # key is constructed only when requested so an effort=None request stays
+        # byte-identical to today's (C06 STOP). NOTE: role delegation is agentic-
+        # only, so this chat path carries no live traffic in the rig; the mapping
+        # follows the spec and is not verified against the provider -- recorded
+        # as such in verification.md rather than claimed.
+        payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
@@ -834,6 +893,7 @@ async def call_glm_via_headroom(
     model: str,
     api_key: str,
     headroom_url: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call GLM through headroom proxy.
@@ -853,6 +913,16 @@ async def call_glm_via_headroom(
         "system": CAVEMAN_SYSTEM,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if effort:
+        # These endpoints take the Anthropic Messages body, whose reasoning knob is
+        # `thinking.type` (the C06 table names exactly that for GLM), not OpenAI's
+        # reasoning_effort. Levels above "low" enable it; "low" disables it. The
+        # key is constructed only when requested so an effort=None request stays
+        # byte-identical to today's (C06 STOP). NOTE: role delegation is agentic-
+        # only, so this chat path carries no live traffic in the rig; the mapping
+        # follows the spec and is not verified against the provider -- recorded
+        # as such in verification.md rather than claimed.
+        payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
@@ -940,6 +1010,7 @@ def _resolve_agentic_cwd(cwd: Optional[str], backend: str) -> str:
 def call_codex(
     prompt: str,
     model: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call Codex CLI via subprocess: codex exec -m <model> <prompt>.
@@ -966,7 +1037,7 @@ def call_codex(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (live-verified: without it, prompt="-h"
             # prints CLI help instead of delegating).
-            CODEX_EXEC_BASE + ["-m", model, "-"],
+            _codex_exec_base(agentic=False, effort=effort) + ["-m", model, "-"],
             input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
             # NOTE: no stdin= here. `input=` already opens a stdin pipe and
             # closes it, which is exactly what stops the CLI waiting on the
@@ -1019,6 +1090,7 @@ def call_codex(
 def call_grok(
     prompt: str,
     model: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call Grok CLI via subprocess (chat mode): `grok --prompt-file <f> -m <model>`.
 
@@ -1043,7 +1115,8 @@ def call_grok(
     try:
         with _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
             result = subprocess.run(
-                [_GROK_BIN, "--prompt-file", pf, "-m", model, "--output-format", "plain"],
+                [_GROK_BIN, "--prompt-file", pf, "-m", model, "--output-format", "plain"]
+                + (["--reasoning-effort", effort] if effort else []),
                 # inherited stdin is the MCP stdio pipe; the CLIs wait on it
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -1091,6 +1164,7 @@ def call_grok(
 def call_kimi(
     prompt: str,
     model: str,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call Kimi CLI via subprocess (chat mode): `kimi -p <prompt> --output-format text`.
 
@@ -1217,7 +1291,7 @@ def _cc_family_output(stdout: str) -> tuple[str, Optional[Dict[str, int]]]:
     return content.strip(), usage
 
 
-def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
     """Agentic GLM worker: `cc-glm -p <prompt> --model <model>` in the REAL cwd.
 
     cc-glm is the rig's headless GLM CLI; it has file + shell tools and writes
@@ -1247,6 +1321,8 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
         "--permission-mode",
         "bypassPermissions",
     ]
+    if effort:
+        argv += ["--effort", effort]  # cc-glm --help: "Effort level for the current session"
     try:
         result = subprocess.run(
             argv,
@@ -1285,7 +1361,7 @@ def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict
         )
 
 
-def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Grok worker: `grok --prompt-file <f> -m <model>` in the REAL cwd.
 
     Lean profile (Codex-parity): isolated GROK_HOME (no user MCP/skills/hooks),
@@ -1320,7 +1396,8 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
                     "--disable-web-search",
                     "--output-format",
                     "json",
-                ],
+                ]
+                + (["--reasoning-effort", effort] if effort else []),  # grok --help: alias --effort
                 # inherited stdin is the MCP stdio pipe; the CLIs wait on it
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -1386,7 +1463,7 @@ def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
         )
 
 
-def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Kimi worker: `kimi -p <prompt> --output-format text` in the
     REAL cwd.
 
@@ -1456,7 +1533,7 @@ def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dic
         )
 
 
-def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Codex worker: `codex exec` in the REAL cwd (NOT /private/tmp).
 
     Reuses CODEX_EXEC_BASE_AGENTIC — the lean worker flags (no MCPs, low
@@ -1471,7 +1548,7 @@ def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Di
         result = subprocess.run(
             # "--" ends option parsing so a prompt starting with "-" can't be
             # read as a codex flag (same protection as call_codex).
-            CODEX_EXEC_BASE_AGENTIC + ["-m", model, "-"],
+            _codex_exec_base(agentic=True, effort=effort) + ["-m", model, "-"],
             input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
             # NOTE: no stdin= here. `input=` already opens a stdin pipe and
             # closes it, which is exactly what stops the CLI waiting on the
