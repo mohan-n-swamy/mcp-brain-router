@@ -626,7 +626,7 @@ def measured_cells(fixtures: list[dict]) -> set[tuple]:
     if doc.get("meta", {}).get("fixture_set_hash") != fixture_set_hash(fixtures):
         return set()
     return {_seed_row_key(r) for r in doc.get("results") or []
-            if "card" in r and "id" in r and r.get("trials_ok") == TRIALS}
+            if "card" in r and "id" in r and (r.get("trials_ok") or 0) >= TRIALS}
 
 
 def plan_seed(fixtures: list[dict], sets: list[dict]) -> dict:
@@ -1072,6 +1072,7 @@ async def probe(by_id: dict, routing: dict, cwd: str, run_id: str) -> int:
 
 
 def main() -> int:
+    global REMEASURE, TRIALS
     ap = argparse.ArgumentParser(description="C07 benchmark harness")
     # --dry-run is a modifier: alone it prints the baseline plan (unchanged);
     # combined with --seed-round it prints the seed plan. --baseline/--probe
@@ -1099,10 +1100,15 @@ def main() -> int:
                         "--approve <hash>.")
     ap.add_argument("--remeasure", action="store_true",
                     help="--seed-round: re-run cells already measured (drift check)")
+    ap.add_argument("--trials", type=int, default=TRIALS,
+                    help=f"trials per cell (R30 default {TRIALS}; Mohan 2026-09-05: week 0 "
+                         "may run fewer to cap spend, the plan hash carries the number)")
     ap.add_argument("--cwd", default=str(Path.home() / "code workshop"))
     args = ap.parse_args()
-    global REMEASURE
     REMEASURE = bool(args.remeasure)
+    if args.trials < 1:
+        ap.error("--trials must be >= 1")
+    TRIALS = args.trials
     if not (args.dry_run or args.baseline or args.probe or args.seed_round or args.probe_cards):
         ap.error("one of --dry-run, --baseline, --probe, --seed-round is required")
     if args.probe and args.dry_run:
