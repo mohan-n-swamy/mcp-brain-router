@@ -77,20 +77,23 @@ async def test_delegate_role_advances_on_process_error(role_config):
 
 @pytest.mark.asyncio
 async def test_all_candidates_failed_reports_last_failure_kind(role_config):
-    # orchestrator opus → anthropic skipped (skip-self): glm, grok, codex
+    # rigor: small — skip-self is adversary-only (2026-09-07), so the worker
+    # walk under an opus orchestrator is glm, grok, codex, anthropic-cli.
     response, route_call = await _run(
-        role_config, [_err(), _err(backend="grok"), _err("invalid_output", backend="codex")]
+        role_config, [_err(), _err(backend="grok"), _err(backend="codex"),
+                      _err("invalid_output", backend="anthropic-cli")]
     )
     assert response["backend"] == "none"
     assert response["exhausted"] is True
     assert response["failure_kind"] == "invalid_output"
-    assert response["tried"] == ["glm", "grok", "codex"]
-    assert route_call.await_count == 3
+    assert response["tried"] == ["glm", "grok", "codex", "anthropic-cli"]
+    assert route_call.await_count == 4
 
 
 @pytest.mark.asyncio
 async def test_mixed_quota_and_process_error_is_not_labelled_quota(role_config):
-    response, _ = await _run(role_config, [_quota(), _err(backend="grok"), _quota()])
+    # rigor: small — four candidates now (sonnet-worker no longer skipped)
+    response, _ = await _run(role_config, [_quota(), _err(backend="grok"), _quota(), _quota()])
     assert response["exhausted"] is True
     # the LAST failure was quota, but not EVERY failure was: honest kind wins
     assert response["failure_kind"] == "process_error"
@@ -98,7 +101,8 @@ async def test_mixed_quota_and_process_error_is_not_labelled_quota(role_config):
 
 @pytest.mark.asyncio
 async def test_all_quota_keeps_quota_contract(role_config):
-    response, _ = await _run(role_config, [_quota(), _quota(), _quota()])
+    # rigor: small — four candidates now (sonnet-worker no longer skipped)
+    response, _ = await _run(role_config, [_quota(), _quota(), _quota(), _quota()])
     assert response["exhausted"] is True
     assert response["failure_kind"] == "quota_exhausted"
 

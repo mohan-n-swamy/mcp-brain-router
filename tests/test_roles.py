@@ -37,7 +37,7 @@ def role_config():
 @pytest.mark.parametrize(
     ("role", "orchestrator", "provider", "native"),
     [
-        (Role.THINKER, "opus", Provider.CODEX, False),
+        (Role.THINKER, "opus", Provider.ANTHROPIC, True),  # rigor: small — skip-self is adversary-only
         (Role.THINKER, "codex", Provider.ANTHROPIC, True),
         (Role.ADVERSARY, "opus", Provider.CODEX, False),
         (Role.ADVERSARY, "codex", Provider.ANTHROPIC, True),
@@ -62,18 +62,18 @@ def test_adversary_always_differs(role_config, orchestrator):
 
 
 @pytest.mark.parametrize("orchestrator", ["claude", "codex", "grok", "kimi"])
-def test_every_role_skips_orchestrator_provider(role_config, orchestrator):
+def test_adversary_skips_orchestrator_provider(role_config, orchestrator):
+    # rigor: small — only the adversary skips self
     adversary = resolve_role(Role.ADVERSARY, orchestrator, role_config)
-    worker = resolve_role(Role.WORKER, orchestrator, role_config)
     assert adversary.provider is not orchestrator_provider(orchestrator)
-    assert worker.provider is not orchestrator_provider(orchestrator)
 
 
-def test_worker_skip_self_lands_on_next_provider(role_config):
-    # glm-5.2 leads the fixture worker shard; a zhipu orchestrator must skip it.
+def test_worker_does_not_skip_self(role_config):
+    # rigor: small — skip-self is adversary-only (2026-09-07): a zhipu
+    # orchestrator keeps glm-5.2, the leftmost worker candidate.
     assignment = resolve_role(Role.WORKER, "zhipu", role_config)
-    assert assignment.provider is Provider.XAI
-    assert assignment.model == "grok-4.5"
+    assert assignment.provider is Provider.ZHIPU
+    assert assignment.model == "glm-5.2"
 
 
 def test_exhaustion_walks_candidate_providers(role_config):

@@ -79,14 +79,19 @@ def test_deck_mode_takes_leftmost_ranked_card(tmp_path, monkeypatch):
     assert a.reason.startswith("deck B3")
 
 
-def test_deck_mode_applies_skip_self(tmp_path, monkeypatch):
-    p = _deck_file(tmp_path, {"B3": [_card("glm-5.3", "zhipu", 0.10),
-                                     _card("kimi-k3", "moonshot", 0.13),
-                                     _card("grok-4.5", "xai", 0.20)]})
+def test_deck_mode_applies_skip_self_to_adversary_only(tmp_path, monkeypatch):
+    # rigor: small — skip-self narrowed to adversary (2026-09-07)
+    cards = [_card("glm-5.3", "zhipu", 0.10),
+             _card("kimi-k3", "moonshot", 0.13),
+             _card("grok-4.5", "xai", 0.20)]
+    p = _deck_file(tmp_path, {"B3": cards, "B4": cards})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {})
-    # Orchestrator is glm's own provider -> the leftmost card is skipped.
+    # Orchestrator is glm's own provider. Worker keeps the leftmost card;
+    # adversary skips it.
     a = resolve_role(Role.WORKER, "glm", _cfg("deck"), mode="agentic")
+    assert a.model == "glm-5.3"
+    a = resolve_role(Role.ADVERSARY, "glm", _cfg("deck"), mode="agentic")
     assert a.model == "kimi-k3"
 
 

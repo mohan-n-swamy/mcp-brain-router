@@ -32,7 +32,8 @@ class Role(str, Enum):
     Each role is a distinct job in an orchestrated build loop, filled from a
     config-ordered candidate list. ORCHESTRATOR is NOT resolved by the router —
     it is whoever the human launched (an input), used to enforce the
-    skip-self rule (no role resolves to the orchestrator's own provider).
+    skip-self rule (the adversary never resolves to the orchestrator's own
+    provider; other roles may).
     """
 
     ORCHESTRATOR = "orchestrator"
@@ -43,9 +44,9 @@ class Role(str, Enum):
 
 
 class Provider(str, Enum):
-    """Model provider — used to enforce the skip-self rule (a role never
-    resolves to the orchestrator's own provider; adversary has always required
-    this) and to decide whether a resolved role is handed back for native
+    """Model provider — used to enforce the skip-self rule (the adversary
+    never resolves to the orchestrator's own provider; adversary only, since
+    2026-09-07) and to decide whether a resolved role is handed back for native
     (Anthropic) execution vs called directly by the router."""
 
     ANTHROPIC = "anthropic"   # opus / sonnet / haiku / fable — NEVER called by the router
@@ -149,13 +150,14 @@ def resolve_role(
     handed back for native execution — it targets the anthropic-cli agentic
     harness (cc-brain claude). This is the codex-orchestrator adversary case
     AND the GLM+codex-exhausted final fallback worker, where there may be no
-    native Anthropic loop to hand back to. The skip-self rule (a role never
-    resolves to the orchestrator's own provider) applies either way."""
+    native Anthropic loop to hand back to. The skip-self rule (the adversary
+    never resolves to the orchestrator's own provider) applies either way."""
     if role is Role.ORCHESTRATOR:
         raise ValueError("orchestrator is selected by the human, not the router")
 
     orchestrator_owner = orchestrator_provider(orchestrator)
     exhausted = set(exhausted_providers)
+    skip_self = role is Role.ADVERSARY
 
     # C04 (specs/001-agent-capability-routing): the deck path. It changes WHICH
     # candidates are offered and in what order; it does not change who may receive
@@ -205,7 +207,7 @@ def resolve_role(
                     logger.warning("deck %s: card %r has no router provider; skipped",
                                    band, card.router_model)
                     continue
-                if provider in exhausted or provider is orchestrator_owner:
+                if provider in exhausted or (skip_self and provider is orchestrator_owner):
                     continue
                 return _assignment_for(role, card.router_model, provider, mode,
                                        reason=f"deck {band}: leftmost ranked card that clears the gate")
@@ -218,11 +220,10 @@ def resolve_role(
         provider = provider_for_model(model)
         if provider in exhausted:
             continue
-        # Skip-self: a role must route work AWAY from the orchestrator's own
-        # provider. Self-delegation shells to a nested CLI of the same brain —
-        # slow, hook-polluted, and spends the same quota pool the orchestrator
-        # is already on. (Adversary has always had this rule; now universal.)
-        if provider is orchestrator_owner:
+        # Skip-self applies to ADVERSARY only (Mohan, 2026-09-07): a reviewer
+        # must come from a different brain than the orchestrator. Every other
+        # role walks its configured list in order, own provider included.
+        if skip_self and provider is orchestrator_owner:
             continue
         return _assignment_for(role, model, provider, mode,
                                reason="first eligible configured candidate")
@@ -232,8 +233,7 @@ def resolve_role(
             "no eligible adversary differs from the orchestrator provider"
         )
     raise ValueError(
-        f"no eligible candidate for role: {role.value} "
-        "(all providers exhausted or owned by the orchestrator)"
+        f"no eligible candidate for role: {role.value} (all providers exhausted)"
     )
 
 
