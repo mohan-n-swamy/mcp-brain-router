@@ -75,6 +75,9 @@ class Config:
     codex_enabled: bool = False
     grok_enabled: bool = False
     kimi_enabled: bool = False
+    jev_key_file: Optional[str] = None
+    jev_key_files: Optional[List[str]] = None  # JEV-LOAD pool, tried in order
+    decide_backends: Optional[List[Dict[str, str]]] = None  # DECIDE-SWITCH: {name, url, provider, key_file}
     headroom_base_url: Optional[str] = None
     model_overrides: Optional[Dict[str, str]] = None
     roles: Optional[Dict[str, List[str]]] = None
@@ -126,6 +129,9 @@ class Config:
             codex_enabled=data.get("codex_enabled", False),
             grok_enabled=data.get("grok_enabled", False),
             kimi_enabled=data.get("kimi_enabled", False),
+            jev_key_file=data.get("jev_key_file"),
+            jev_key_files=data.get("jev_key_files"),
+            decide_backends=data.get("decide_backends"),
             headroom_base_url=data.get("headroom_base_url"),
             model_overrides=data.get("model_overrides"),
             roles=DEFAULT_ROLES | (data.get("roles") or {}),
@@ -154,6 +160,12 @@ class Config:
             lines.append("grok_enabled = true")
         if self.kimi_enabled:
             lines.append("kimi_enabled = true")
+        if self.jev_key_file:
+            lines.append(f'jev_key_file = "{self._escape_toml(self.jev_key_file)}"')
+        if self.jev_key_files:
+            lines.append("jev_key_files = [" + ", ".join(f'"{self._escape_toml(p)}"' for p in self.jev_key_files) + "]")
+        if self.decide_backends:
+            lines.append("decide_backends = [" + ", ".join("{" + ", ".join(f'{k} = "{self._escape_toml(str(v))}"' for k, v in b.items()) + "}" for b in self.decide_backends) + "]")
         if self.headroom_base_url:
             lines.append(
                 f'headroom_base_url = "{self._escape_toml(self.headroom_base_url)}"'

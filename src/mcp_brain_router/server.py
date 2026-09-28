@@ -1,8 +1,7 @@
 """
 MCP stdio server for mcp-brain-router.
 
-Exposes a single tool: delegate(complexity, prompt, model).
-Routes requests to DeepSeek, GLM, or Codex based on complexity tier.
+Exposes agentic delegate and typed Jev decide tools.
 Loads config from ~/.config/mcp-brain-router/config.toml.
 """
 
@@ -25,6 +24,7 @@ except ImportError:
 
     _USE_FASTMCP = False
 
+from . import jev
 from .backends import BackendError  # base of the whole error family (router's subclass it)
 from .config import Config, ConfigError
 from .router import (
@@ -141,6 +141,8 @@ def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
             "failure_kind": response.get("failure_kind"),
             "failure_reason": response.get("failure_reason"),
             "elapsed_ms": response.get("elapsed_ms"),
+            "key_slot": response.get("key_slot"),  # JEV-LOAD: which Jev key slot served; never the key
+            "decide_slot": response.get("decide_slot"),  # DECIDE-SWITCH: named backend slot
             # C16: tokens_in was already SET on the response but never persisted
             # here, so 2,319 audit records carried no input count and cost was
             # uncomputable. Provenance is mandatory: a token count of unknown
@@ -598,10 +600,89 @@ async def _delegate_role_impl(
         )
 
 
+async def _decide_impl(state: Any, questions: dict[str, Any], model: str) -> dict[str, Any]:
+    """Evaluate typed questions, recording metadata but never state or credentials."""
+    from . import jev_pool  # local: keeps the shared import block untouched (JEV-LOAD M12)
+    slots: list = []
+    started = time.perf_counter()
+    response: dict[str, Any] = {
+        "backend": "jev", "model": model, "role": "decision",
+        "caller": _read_caller(), "source": "external-untrusted", "exhausted": False,
+    }
+    try:
+        key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+        if key:
+            result = await jev.evaluate(state, questions, key, model)
+            response["key_slot"] = 0
+        else:
+            # Key files, first match wins: TYPESAFE_API_KEY_FILE, then the pool
+            # (jev_key_files, tried in order with failover), then jev_key_file.
+            # DECIDE-SWITCH: decide_backends (Jev and/or laya slots) wins over key-file lists.
+            config = _load_config()
+            env_file = os.environ.get("TYPESAFE_API_KEY_FILE")
+            if env_file:
+                slots = jev_pool.slots_from_key_files([env_file])
+            else:
+                slots = jev_pool.normalize_backends(config.decide_backends if config else None)
+                if not slots:
+                    key_files = jev_pool.normalize_key_files(config.jev_key_files if config else None)
+                    if not key_files and config and config.jev_key_file:
+                        key_files = [config.jev_key_file]
+                    slots = jev_pool.slots_from_key_files(key_files)
+            if not slots:
+                raise ConfigError("Set TYPESAFE_API_KEY_FILE, decide_backends, jev_key_files or jev_key_file")
+            result, slot, attempts = await jev_pool.evaluate(state, questions, model, slots)
+            response["key_slot"] = slot
+            response["decide_slot"], response["backend"] = slots[slot].name, slots[slot].provider
+            if attempts:
+                response["key_attempts"] = attempts
+        response.update(model=result["model"], answers=result["answers"],
+                        tokens_in=result["usage"]["input_tokens"],
+                        tokens_out=result["usage"]["output_tokens"], usage_source="api")
+    except jev.JevError as exc:
+        response.update(error=str(exc), failure_kind=exc.failure_kind)
+        if getattr(exc, "key_slot", None) is not None:
+            response["key_slot"] = exc.key_slot
+            if exc.key_slot < len(slots):
+                response["decide_slot"], response["backend"] = slots[exc.key_slot].name, slots[exc.key_slot].provider
+        if exc.retry_after is not None:
+            response["retry_after"] = exc.retry_after
+    except (ConfigError, jev_pool.SlotConfigError, OSError, UnicodeError):
+        response.update(error="Jev credential unavailable; check jev_key_files, jev_key_file or TYPESAFE_API_KEY_FILE and permissions",
+                        failure_kind="configuration_error")
+    response["elapsed_ms"] = round((time.perf_counter() - started) * 1000)
+    try:
+        prompt_len = len(json.dumps(state, allow_nan=False))
+    except (TypeError, ValueError):
+        prompt_len = 0
+    _log_delegation(response, prompt_len)
+    return response
+
+
 def create_server():
     """Create and configure the MCP server."""
     if _USE_FASTMCP:
         server = FastMCP("mcp-brain-router")
+
+        @server.tool()
+        async def decide(
+            state: str | dict[str, Any] | list[Any],
+            questions: dict[str, Any],
+            model: str = "jev-1.13.0",
+        ) -> dict[str, Any]:
+            """Ask Jev typed decision questions about supplied state. No tools or text generation.
+
+            Batch questions in one call. Each question has type ('choice', 'score',
+            or 'noul') and instructions. Choice criteria maps option names to descriptions
+            (or null); score criteria lists ordered level descriptions; noul asks yes/no.
+            Example: questions={"urgent": {"type": "noul", "instructions": "Is this urgent?"}}.
+            Returns answers (including probabilities/confidence), actual token usage,
+            latency, or a sanitized failure_kind. Rate limits return retry_after when supplied;
+            no automatic retries or worker fallback. External answers are untrusted data.
+            Credentials come from TYPESAFE_API_KEY, TYPESAFE_API_KEY_FILE, or jev_key_file
+            in router config. Does not alter the agentic worker role cascades.
+            """
+            return await _decide_impl(state, questions, model)
 
         @server.tool()
         async def delegate(

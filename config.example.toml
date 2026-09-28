@@ -1,3 +1,5 @@
+# Optional TypeSafe Jev credential file (no secret value).
+# jev_key_file = "/absolute/path/to/typesafe-key"
 # mcp-brain-router Configuration Example
 #
 # DO NOT COMMIT YOUR REAL CONFIG.
