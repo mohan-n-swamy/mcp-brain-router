@@ -167,3 +167,44 @@ def test_duplicate_or_incomplete_backends_rejected():
         jev_pool.normalize_backends([{"name": "a", "url": LAYA_URL, "provider": "other", "key_file": "/k"}])
     with pytest.raises(jev_pool.SlotConfigError):
         jev_pool.normalize_backends([{"name": "a", "url": LAYA_URL}])
+
+
+@pytest.mark.asyncio
+async def test_slot_model_laya_sends_named_checkpoint(monkeypatch, tmp_path, backends):
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json=LAYA_BODY)
+    _mock_http(monkeypatch, handler)
+    backends[0]["model"] = "typed-decisions"
+    _wire(monkeypatch, tmp_path, config.Config(decide_backends=backends))
+    result = await server._decide_impl("s", Q, "jev-1.13.0")
+    assert result["decide_slot"] == "laya-mini" and sent == ["typed-decisions"]
+
+
+@pytest.mark.asyncio
+async def test_slot_model_absent_keeps_caller_model(monkeypatch, tmp_path, backends):
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json=LAYA_BODY)
+    _mock_http(monkeypatch, handler)
+    _wire(monkeypatch, tmp_path, config.Config(decide_backends=backends))
+    await server._decide_impl("s", Q, "jev-1.13.0")
+    assert sent == ["jev-1.13.0"]
+
+
+@pytest.mark.asyncio
+async def test_slot_model_jev_still_requires_jev_name():
+    with pytest.raises(jev.JevError) as info:
+        await jev.evaluate("s", Q, "k", "typed-decisions")
+    assert info.value.failure_kind == "validation_error"
+    with pytest.raises(jev.JevError):
+        await jev.evaluate("s", Q, "k", "Bad Model!", endpoint="http://127.0.0.1:8090/v1/systemone", provider="laya")
+
+
+def test_slot_model_empty_rejected():
+    with pytest.raises(jev_pool.SlotConfigError):
+        jev_pool.normalize_backends([{"name": "a", "url": LAYA_URL, "provider": "laya", "key_file": "/k", "model": " "}])

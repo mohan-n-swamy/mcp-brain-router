@@ -16,7 +16,7 @@ Add a top-level `decide_backends` list to the router config. The order is the sw
 decide_backends = [
   {name = "jev-office",   url = "https://api.typesafe.ai/v1/systemone",   provider = "jev",  key_file = "~/secret/jev-key-1"},
   {name = "jev-personal", url = "https://api.typesafe.ai/v1/systemone",   provider = "jev",  key_file = "~/secret/jev-key-2"},
-  {name = "laya-mini",    url = "http://100.100.10.20:8090/v1/systemone", provider = "laya", key_file = "~/secret/laya-key"},
+  {name = "laya-mini",    url = "http://100.100.10.20:8090/v1/systemone", provider = "laya", key_file = "~/secret/laya-key", model = "typed-decisions"},
 ]
 ```
 
@@ -24,6 +24,9 @@ This is the live order chosen by Mohan on 2026-09-28: zero-shot laya scored 4/10
 Jev's 10/10 on labelled routing cases (`rig-consolidation/slices/DECIDE-SWITCH/evidence/side-by-side-2026-09-28.tsv`),
 so laya is the free fallback when both Jev keys fail. Move it up only after fine-tuning and a new side-by-side.
 
+- `model` (optional) is the checkpoint the slot asks for. A laya slot may name `english`,
+  `multilingual` or `typed-decisions` (measured best: 7/10 on labelled routing cases against 4/10 for
+  the base checkpoint); a Jev slot only accepts `jev-*`. Omit it to pass the caller's model through.
 - `provider` is `jev` or `laya`. `laya` accepts laya-serve's own model name in the
   response; everything else about the answer is validated exactly as for Jev.
 - `url` must be https, or plain http to loopback or a Tailscale `100.64.0.0/10`

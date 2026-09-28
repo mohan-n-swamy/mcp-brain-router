@@ -39,6 +39,7 @@ class Slot:
     url: str
     provider: str
     key_file: str
+    model: Optional[str] = None  # checkpoint this slot asks for; None = the caller's model
 
 
 def slots_from_key_files(paths: list[str]) -> list[Slot]:
@@ -62,7 +63,9 @@ def normalize_backends(value: Any) -> list[Slot]:
             jev.validate_endpoint(item["url"])
         except jev.JevError:
             raise SlotConfigError("decide_backends url must be https, or http to loopback or a tailnet address") from None
-        slots.append(Slot(item["name"], item["url"], item["provider"], item["key_file"]))
+        if "model" in item and not (isinstance(item["model"], str) and item["model"].strip()):
+            raise SlotConfigError("decide_backends model must be a non-empty string when given")
+        slots.append(Slot(item["name"], item["url"], item["provider"], item["key_file"], item.get("model")))
     if len({s.name for s in slots}) != len(slots):
         raise SlotConfigError("decide_backends names must be unique")
     return slots
@@ -123,7 +126,7 @@ async def evaluate(
         try:
             default_jev = spec.provider == "jev" and spec.url == jev.JEV_ENDPOINT
             extra = {} if default_jev else {"endpoint": spec.url, "provider": spec.provider}
-            result = await call(state, questions, key, model, **extra)
+            result = await call(state, questions, key, spec.model or model, **extra)
         except jev.JevError as exc:
             exc.key_slot = slot
             if exc.failure_kind not in FAILOVER_KINDS:

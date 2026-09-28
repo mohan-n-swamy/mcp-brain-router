@@ -120,8 +120,10 @@ def _validate_credential(api_key: Any) -> str:
     return api_key
 
 
-def _validate_model(model: Any) -> str:
-    if not isinstance(model, str) or not re.fullmatch(r"jev-[a-zA-Z0-9.-]+", model):
+def _validate_model(model: Any, provider: str = "jev") -> str:
+    # jev: "jev-<version>"; laya: a checkpoint name such as "typed-decisions" (DECIDE-SWITCH F7)
+    pattern = r"jev-[a-zA-Z0-9.-]+" if provider == "jev" else r"[a-z0-9][a-z0-9._-]{0,63}"
+    if not isinstance(model, str) or not re.fullmatch(pattern, model):
         _fail("model must be a non-empty string", "validation_error")
     return model
 
@@ -265,9 +267,9 @@ async def evaluate(
     _validate_state(state)
     _validate_questions(questions)
     _validate_credential(api_key)
-    model = _validate_model(model)
     if provider not in PROVIDERS:
         _fail("provider must be jev or laya", "validation_error")
+    model = _validate_model(model, provider)
     endpoint = validate_endpoint(endpoint)
 
     payload = {"state": state, "questions": questions, "model": model}
