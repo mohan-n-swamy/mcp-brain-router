@@ -612,7 +612,8 @@ def _spool_decide(response: dict[str, Any], state: Any, questions: dict[str, Any
             or "answers" not in response or os.getenv("BRAIN_ROUTER_BENCH_RUN_ID")):
         return None
     try:
-        import uuid  # local: keeps the shared import block untouched (JEV-LOAD M12)
+        import stat  # local: keeps the shared import block untouched (JEV-LOAD M12)
+        import uuid
         spool_id = uuid.uuid4().hex
         row = {
             "spool_id": spool_id, "ts": datetime.now(timezone.utc).isoformat(),
@@ -623,12 +624,16 @@ def _spool_decide(response: dict[str, Any], state: Any, questions: dict[str, Any
         }
         line = (json.dumps(row, allow_nan=False) + "\n").encode("utf-8")
         spool = Path(path).expanduser()
+        if spool.resolve() == _DELEGATION_LOG.resolve():
+            raise ValueError("spool path is the audit log")
         spool.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(spool, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, line)
-        finally:
-            os.close(fd)
+        # O_NOFOLLOW: no symlinked spool; O_NONBLOCK: a FIFO without a reader fails instead of hanging
+        fd = os.open(spool, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "ab") as fh:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("spool is not a regular file")
+            os.fchmod(fd, 0o600)
+            fh.write(line)  # buffered: a short os.write is retried, not reported as success
         return spool_id
     except Exception as e:  # noqa: BLE001 — the spool must never break decide()
         logger.warning(f"decide-spool write failed (non-fatal): {type(e).__name__}")

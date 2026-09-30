@@ -1,5 +1,7 @@
 """JEV-SHADOW: the decide spool records answered Jev calls without changing decide()."""
+import copy
 import json
+import os
 import stat
 from unittest.mock import AsyncMock
 
@@ -22,7 +24,8 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.delenv("BRAIN_ROUTER_DECIDE_SPOOL", raising=False)
     audit = tmp_path / "audit.jsonl"
     monkeypatch.setattr(server, "_DELEGATION_LOG", audit)
-    monkeypatch.setattr(server.jev, "evaluate", AsyncMock(return_value=JEV_OK))
+    # a fresh copy per call, so an in-place change by the spool cannot hide in a shared object
+    monkeypatch.setattr(server.jev, "evaluate", AsyncMock(side_effect=lambda *a, **k: copy.deepcopy(JEV_OK)))
     return audit
 
 
@@ -89,3 +92,31 @@ def test_no_row_for_laya_backend(monkeypatch, tmp_path):
     monkeypatch.delenv("BRAIN_ROUTER_BENCH_RUN_ID", raising=False)
     assert server._spool_decide({"backend": "laya", "answers": {}}, STATE, Q) is None
     assert not spool.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["symlink", "audit_log"])
+async def test_fail_open_refuses_unsafe_paths(wired, monkeypatch, tmp_path, case):
+    if case == "symlink":
+        target = tmp_path / "elsewhere.jsonl"
+        target.write_text("")
+        (tmp_path / "spool.jsonl").symlink_to(target)
+        path = tmp_path / "spool.jsonl"
+    else:
+        path = wired
+    monkeypatch.setenv("BRAIN_ROUTER_DECIDE_SPOOL", str(path))
+    resp = await server._decide_impl(STATE, Q, "jev-1.13.0")
+    assert resp["answers"] == JEV_OK["answers"] and "error" not in resp
+    assert STATE not in wired.read_text()
+    if case == "symlink":
+        assert target.read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_existing_loose_spool_is_tightened(wired, monkeypatch, tmp_path):
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text("")
+    os.chmod(spool, 0o644)
+    monkeypatch.setenv("BRAIN_ROUTER_DECIDE_SPOOL", str(spool))
+    await server._decide_impl(STATE, Q, "jev-1.13.0")
+    assert stat.S_IMODE(spool.stat().st_mode) == 0o600 and spool.read_text()
