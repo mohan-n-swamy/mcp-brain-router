@@ -91,6 +91,9 @@ _DELEGATION_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.j
 RETRY_FAST_MS = 15_000
 RETRYABLE_KINDS = frozenset({"process_error", "network_error"})
 
+# ROUTER (2026-09-30): the role list a GLM-only tier walks when no GLM key is set.
+_TIER_ROLES = {Complexity.CHEAP: "simple", Complexity.CODE: "worker"}
+
 
 def _retryable(failure_kind: str | None, elapsed_ms: int | None) -> bool:
     return (
@@ -283,6 +286,19 @@ async def _delegate_impl(
                     "failure_kind": "validation_error",
                     "failure_reason": error_msg,
                 }
+            )
+
+        # ROUTER (2026-09-30): cheap and code are GLM-only tiers. With no GLM key
+        # configured they would fail outright, so they walk the matching role list
+        # instead (cheap -> simple, code -> worker), as a Codex caller's
+        # adversarial tier already does. With a GLM key, behaviour is unchanged.
+        if complexity_enum in _TIER_ROLES and not config.glm_key:
+            return await _delegate_role_impl(
+                _TIER_ROLES[complexity_enum],
+                prompt,
+                caller,
+                mode="agentic",
+                cwd=cwd,
             )
 
         result = await route(
