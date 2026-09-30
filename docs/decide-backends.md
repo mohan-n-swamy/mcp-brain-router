@@ -57,3 +57,13 @@ threshold tuned on one backend for the other.
 
 `uv run pytest -q tests/test_decide_backends.py tests/test_jev_pool.py tests/test_jev.py tests/test_jev_mcp.py`,
 then a live `decide` from a fresh MCP process and check the audit line's `decide_slot`.
+
+## Decide spool (optional, off by default)
+
+Set `BRAIN_ROUTER_DECIDE_SPOOL=<path>` in a client's MCP registration to keep one JSONL row per
+answered Jev call: state, questions, site (sorted question ids) and Jev's answers under
+`jev` with `trainable: false`. The file is created mode 0600; a write failure is logged and
+never affects `decide`. The audit line carries the row's `spool_id`, never the text. Rows are
+for local shadow comparison: TypeSafe's MCA §2.3(b) bars using Jev output to train a model
+that imitates it, so do not build training labels from the `jev` field. Test:
+`pytest -q tests/test_decide_spool.py`.

@@ -123,7 +123,7 @@ def _read_caller() -> str:
     return raw
 
 
-def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
+def _log_delegation(response: dict[str, Any], prompt_len: int, spool_id: str | None = None) -> None:
     """Append one audit line for a completed delegate() call. Never raises."""
     try:
         record = {
@@ -160,6 +160,7 @@ def _log_delegation(response: dict[str, Any], prompt_len: int) -> None:
             # reading of what the rig costs. run-bench.py sets the env var for the
             # duration of a run; a real delegation leaves it unset and records null.
             "bench_run_id": os.getenv("BRAIN_ROUTER_BENCH_RUN_ID") or None,
+            "spool_id": spool_id,  # JEV-SHADOW: row id in the decide spool; the text lives only there
         }
         _DELEGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
         with _DELEGATION_LOG.open("a", encoding="utf-8") as fh:
@@ -600,6 +601,40 @@ async def _delegate_role_impl(
         )
 
 
+def _spool_decide(response: dict[str, Any], state: Any, questions: dict[str, Any]) -> str | None:
+    """JEV-SHADOW: keep one answered Jev call (state, questions, answers) for a local shadow.
+
+    Off unless BRAIN_ROUTER_DECIDE_SPOOL names a file. Jev's answers are stored as
+    `trainable: false`: TypeSafe MCA §2.3(b) bars training a model to imitate them.
+    Fail-open, file mode 0600, never touches `response`. Returns the row id or None."""
+    path = os.environ.get("BRAIN_ROUTER_DECIDE_SPOOL", "").strip()
+    if (not path or response.get("backend") != "jev" or response.get("error")
+            or "answers" not in response or os.getenv("BRAIN_ROUTER_BENCH_RUN_ID")):
+        return None
+    try:
+        import uuid  # local: keeps the shared import block untouched (JEV-LOAD M12)
+        spool_id = uuid.uuid4().hex
+        row = {
+            "spool_id": spool_id, "ts": datetime.now(timezone.utc).isoformat(),
+            "caller": response.get("caller"), "site": ",".join(sorted(questions)),
+            "model": response.get("model"), "decide_slot": response.get("decide_slot"),
+            "state": state, "questions": questions,
+            "jev": {"answers": response["answers"], "trainable": False},
+        }
+        line = (json.dumps(row, allow_nan=False) + "\n").encode("utf-8")
+        spool = Path(path).expanduser()
+        spool.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(spool, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+        return spool_id
+    except Exception as e:  # noqa: BLE001 — the spool must never break decide()
+        logger.warning(f"decide-spool write failed (non-fatal): {type(e).__name__}")
+        return None
+
+
 async def _decide_impl(state: Any, questions: dict[str, Any], model: str) -> dict[str, Any]:
     """Evaluate typed questions, recording metadata but never state or credentials."""
     from . import jev_pool  # local: keeps the shared import block untouched (JEV-LOAD M12)
@@ -655,7 +690,7 @@ async def _decide_impl(state: Any, questions: dict[str, Any], model: str) -> dic
         prompt_len = len(json.dumps(state, allow_nan=False))
     except (TypeError, ValueError):
         prompt_len = 0
-    _log_delegation(response, prompt_len)
+    _log_delegation(response, prompt_len, _spool_decide(response, state, questions))
     return response
 
 
@@ -693,6 +728,7 @@ def create_server():
             model: str | None = None,
             mode: str | None = None,
             cwd: str | None = None,
+            effort: str | None = None,
         ) -> dict[str, Any]:
             """
             Delegate by legacy complexity tier or configured orchestration role.
