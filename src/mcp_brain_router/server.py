@@ -292,7 +292,9 @@ async def _delegate_impl(
         # configured they would fail outright, so they walk the matching role list
         # instead (cheap -> simple, code -> worker), as a Codex caller's
         # adversarial tier already does. With a GLM key, behaviour is unchanged.
-        if complexity_enum in _TIER_ROLES and not config.glm_key:
+        # An unregistered caller has no orchestrator to declare, so it keeps the
+        # tier path and its explicit missing-credential error.
+        if complexity_enum in _TIER_ROLES and not config.glm_key and caller in _KNOWN_CALLERS:
             return await _delegate_role_impl(
                 _TIER_ROLES[complexity_enum],
                 prompt,
