@@ -1,7 +1,9 @@
 """SC3/SC4: the deck's ordering rule and its two unrankable gates (C02).
 
 Four rules are proved here:
-  - `sort_key` is (cost ASC, capability DESC) — cost dominates, always (R18/R25).
+  - `sort_key` is (Mohan's cost order ASC, pass rate DESC); it only ever orders cards
+    already within 10 points of the band's best (ROUTER, 2026-10-01; replaces R18's
+    cost-in-dollars key, which ranked on prices he does not pay).
   - An unmeasured card cannot rank (R21/SC4).
   - A card that failed a P0 acceptance item cannot rank, however cheap (R28).
   - Over-qualification is free: a card populates its band and every band below.
@@ -30,10 +32,12 @@ BIN = Path(__file__).resolve().parent.parent / "bin" / "build-deck.py"
 
 
 def _card(slug: str, capability: float, cost: float | None = None,
-          p0: bool | None = None, provider: str = "zhipu",
-          by_band: dict | None = None) -> Card:
-    """Default is an UNMEASURED card — no cost, no P0 result. That is the week-0
-    shape (R26), so the zero-extra-arg call is the common case."""
+          p0: bool | None = None, provider: str = "openai",
+          by_band: dict | None = None, pass_rate: float | None = None,
+          trials: int | None = None) -> Card:
+    """Default is an UNMEASURED card — no pass rate, no P0 result. That is the week-0
+    shape (R26), so the zero-extra-arg call is the common case. `cost` stays as a
+    reference field only; it no longer ranks anything."""
     return Card(
         slug=slug,
         router_model=slug,
@@ -46,7 +50,14 @@ def _card(slug: str, capability: float, cost: float | None = None,
         size_class="small",
         p0_pass=p0,
         by_band=by_band or {},
+        pass_rate=pass_rate,
+        trials=trials,
     )
+
+
+def _meas(slug, capability, pass_rate, provider="openai", p0=True):
+    """A card benched 3 times in its band(s) with the given pass rate."""
+    return _card(slug, capability, p0=p0, provider=provider, pass_rate=pass_rate, trials=3)
 
 
 def _bands_containing(rows, card) -> list[str]:
@@ -55,61 +66,55 @@ def _bands_containing(rows, card) -> list[str]:
 
 # --- 1. the sort key -------------------------------------------------------
 
-def test_sort_key_breaks_cost_ties_by_capability_descending():
-    # Equal cost: the MORE capable card wins the tie (capability DESC).
-    weak = _card("tie-weak", 70.0, cost=0.002, p0=True)
-    strong = _card("tie-strong", 80.0, cost=0.002, p0=True)
+def test_sort_key_breaks_cost_order_ties_by_pass_rate_descending():
+    # Same provider (same place in the cost order): the BETTER card wins the tie.
+    weak = _meas("tie-weak", 70.0, 0.80)
+    strong = _meas("tie-strong", 80.0, 0.90)
 
     assert sorted([weak, strong], key=sort_key) == [strong, weak]
     assert sorted([strong, weak], key=sort_key) == [strong, weak]
 
 
-def test_cost_dominates_capability_even_when_cheaper_is_dumber():
-    # The whole point of (cost ASC, capability DESC): the cheap, LESS capable
-    # card ranks ahead of the expensive, more capable one. Capability is only a
-    # tiebreaker; it never overturns a cost difference.
-    cheap_dumb = _card("cheap-dumb", 40.0, cost=0.001, p0=True)
-    dear_smart = _card("dear-smart", 95.0, cost=0.005, p0=True)
-    tie_strong = _card("tie-strong", 80.0, cost=0.002, p0=True)
-    tie_weak = _card("tie-weak", 70.0, cost=0.002, p0=True)
+def test_cost_order_dominates_pass_rate_among_eligible_cards():
+    # Among cards within 10 points of the best, the cheaper capacity leads even when
+    # a dearer one scored higher: Codex, then Grok, then Claude (Mohan, 2026-10-01).
+    codex = _meas("codex", 90.0, 0.86, provider="openai")
+    grok = _meas("grok", 90.0, 0.90, provider="xai")
+    claude = _meas("claude", 90.0, 0.95, provider="anthropic")
 
-    ordered = sorted([dear_smart, tie_weak, tie_strong, cheap_dumb], key=sort_key)
-    assert [c.slug for c in ordered] == [
-        "cheap-dumb", "tie-strong", "tie-weak", "dear-smart",
-    ]
+    ordered = sorted([claude, grok, codex], key=sort_key)
+    assert [c.slug for c in ordered] == ["codex", "grok", "claude"]
 
 
 def test_build_bands_uses_the_same_ordering_rule():
-    # build_bands must not sort with a key of its own — B1's floor is 35.0, so
-    # every card below clears it and the band order must equal sort_key order.
+    # build_bands must not sort with a key of its own: every card is within 10 points
+    # of the best, so the band order must equal sort_key order.
     cards = [
-        _card("dear-smart", 95.0, cost=0.005, p0=True),
-        _card("tie-weak", 70.0, cost=0.002, p0=True),
-        _card("cheap-dumb", 40.0, cost=0.001, p0=True),
-        _card("tie-strong", 80.0, cost=0.002, p0=True),
+        _meas("claude", 95.0, 0.95, provider="anthropic"),
+        _meas("grok", 70.0, 0.90, provider="xai"),
+        _meas("codex-b", 40.0, 0.88, provider="openai"),
+        _meas("codex-a", 80.0, 0.92, provider="openai"),
     ]
 
     rows = build_bands(cards)
     b1 = rows[0]
 
     assert b1.band == "B1"
-    assert [c.slug for c in b1.ranked] == [
-        "cheap-dumb", "tie-strong", "tie-weak", "dear-smart",
-    ]
+    assert [c.slug for c in b1.ranked] == ["codex-a", "codex-b", "grok", "claude"]
     assert b1.ranked == sorted(cards, key=sort_key)
 
 
 # --- 2. unmeasured cannot rank (SC4 / R21) ---------------------------------
 
 def test_unmeasured_card_never_ranks_in_any_band():
-    unmeasured = _card("brand-new", 90.0, cost=None, p0=True)
-    measured = _card("known", 90.0, cost=0.004, p0=True)
+    unmeasured = _card("brand-new", 90.0, p0=True)
+    measured = _meas("known", 90.0, 0.90)
 
     rows = build_bands([unmeasured, measured])
 
     assert not rankable(unmeasured)
-    # SC4: no ranked list anywhere in the deck holds a null-cost card.
-    assert all(c.total_cost_usd is not None for r in rows for c in r.ranked)
+    # SC4: no ranked list anywhere in the deck holds an unmeasured card.
+    assert all(c.pass_rate is not None and c.trials >= 3 for r in rows for c in r.ranked)
     for r in rows:
         assert unmeasured not in r.ranked
         # It clears every floor on capability, so it is PRESENT — just unranked.
@@ -117,7 +122,7 @@ def test_unmeasured_card_never_ranks_in_any_band():
 
 
 def test_sort_key_refuses_an_unmeasured_card():
-    unmeasured = _card("brand-new", 90.0, cost=None, p0=True)
+    unmeasured = _card("brand-new", 90.0, p0=True)
 
     with pytest.raises(AssertionError):
         sort_key(unmeasured)
@@ -126,11 +131,11 @@ def test_sort_key_refuses_an_unmeasured_card():
 # --- 3/4. P0 failure and unmeasured P0 are unrankable (R28) ----------------
 
 def test_cheapest_card_in_the_band_still_cannot_rank_if_p0_failed():
-    # The failing card is the CHEAPEST by an order of magnitude. Without R28 it
-    # would head every band — the cheapest wrong answer winning on price alone.
-    cheapest_but_wrong = _card("fast-and-wrong", 90.0, cost=0.0001, p0=False)
-    correct = _card("correct-cheap", 90.0, cost=0.002, p0=True)
-    correct_dear = _card("correct-dear", 90.0, cost=0.009, p0=True)
+    # The failing card is first in the cost order and scored highest. Without R28 it
+    # would head every band: the cheapest wrong answer winning on cost alone.
+    cheapest_but_wrong = _meas("fast-and-wrong", 90.0, 0.99, provider="openai", p0=False)
+    correct = _meas("correct-grok", 90.0, 0.90, provider="xai")
+    correct_dear = _meas("correct-claude", 90.0, 0.92, provider="anthropic")
 
     rows = build_bands([cheapest_but_wrong, correct, correct_dear])
 
@@ -138,15 +143,15 @@ def test_cheapest_card_in_the_band_still_cannot_rank_if_p0_failed():
     for r in rows:
         assert cheapest_but_wrong not in r.ranked
         assert cheapest_but_wrong in r.unranked
-        # The next-cheapest P0-passing card takes the head of the band.
+        # The next card in the cost order that passed P0 takes the head of the band.
         assert r.ranked[0] is correct
-        assert [c.slug for c in r.ranked] == ["correct-cheap", "correct-dear"]
+        assert [c.slug for c in r.ranked] == ["correct-grok", "correct-claude"]
 
 
 def test_unmeasured_p0_is_also_unrankable_only_true_ranks():
-    p0_unknown = _card("p0-unknown", 90.0, cost=0.001, p0=None)
-    p0_failed = _card("p0-failed", 90.0, cost=0.001, p0=False)
-    p0_passed = _card("p0-passed", 90.0, cost=0.001, p0=True)
+    p0_unknown = _meas("p0-unknown", 90.0, 0.9, p0=None)
+    p0_failed = _meas("p0-failed", 90.0, 0.9, p0=False)
+    p0_passed = _meas("p0-passed", 90.0, 0.9, p0=True)
 
     assert rankable(p0_unknown) is False
     assert rankable(p0_failed) is False
@@ -162,7 +167,7 @@ def test_unmeasured_p0_is_also_unrankable_only_true_ranks():
 # --- 5. over-qualification fill -------------------------------------------
 
 def test_card_clearing_the_b5_floor_populates_every_band():
-    over = _card("over-qualified", BAND_FLOORS["B5"], cost=0.003, p0=True)
+    over = _meas("over-qualified", BAND_FLOORS["B5"], 0.9)
 
     rows = build_bands([over])
 
@@ -172,7 +177,7 @@ def test_card_clearing_the_b5_floor_populates_every_band():
 
 
 def test_mid_capability_card_fills_only_the_bands_it_clears():
-    mid = _card("mid", 50.0, cost=0.003, p0=True)
+    mid = _meas("mid", 50.0, 0.9)
 
     rows = build_bands([mid])
 
@@ -228,7 +233,7 @@ def test_floors_are_estimate_unless_explicitly_derived():
 def test_deck_has_exactly_five_bands_and_never_emits_b6():
     # A capability-95 card is included deliberately: B6 must be absent because
     # the deck emits five rows, not because no card happened to qualify.
-    rows = build_bands([_card("top", 95.0, cost=0.001, p0=True)])
+    rows = build_bands([_meas("top", 95.0, 0.9)])
 
     assert len(rows) == 5
     assert [r.band for r in rows] == ["B1", "B2", "B3", "B4", "B5"]
@@ -239,9 +244,9 @@ def test_deck_has_exactly_five_bands_and_never_emits_b6():
 
 # --- 9. per-band measurements (R30) ---------------------------------------
 
-def _entry(cost: float | None, p0: bool | None) -> dict:
-    return {"total_cost_usd": cost, "p0_pass": p0,
-            "size_class": "small", "cost_basis": "measured"}
+def _entry(cost: float | None, p0: bool | None, pass_rate: float = 0.9, trials: int = 3) -> dict:
+    return {"total_cost_usd": cost, "p0_pass": p0, "size_class": "small",
+            "cost_basis": "measured", "pass_rate": pass_rate, "trials": trials}
 
 
 def test_card_ranks_where_it_passed_and_is_unranked_where_it_failed():
@@ -292,7 +297,7 @@ def _run_builder(tmp_path, cards_rows, results_rows):
 
 
 def _cards_row(slug="split-verdict", capability=95.0):
-    return {"slug": slug, "provider": "zhipu", "model": slug, "effort": "base",
+    return {"slug": slug, "provider": "openai", "model": slug, "effort": "base",
             "capability": capability, "price_blended": 1.0, "total_cost_usd": None,
             "p0_pass": None}
 
@@ -300,7 +305,8 @@ def _cards_row(slug="split-verdict", capability=95.0):
 def _results_row(card="split-verdict", band="B1", cost=0.10, p0=True,
                  size_class="small"):
     return {"card": card, "band": band, "size_class": size_class,
-            "total_cost_usd": cost, "p0_pass": p0, "cost_basis": "measured"}
+            "total_cost_usd": cost, "p0_pass": p0, "cost_basis": "measured",
+            "pass_rate": 0.9, "trials": 3}
 
 
 def test_same_card_and_band_with_conflicting_verdicts_fails_the_band(tmp_path):

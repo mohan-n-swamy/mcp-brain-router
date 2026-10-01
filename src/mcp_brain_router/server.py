@@ -164,6 +164,7 @@ def _log_delegation(response: dict[str, Any], prompt_len: int, spool_id: str | N
             # duration of a run; a real delegation leaves it unset and records null.
             "bench_run_id": os.getenv("BRAIN_ROUTER_BENCH_RUN_ID") or None,
             "spool_id": spool_id,  # JEV-SHADOW: row id in the decide spool; the text lives only there
+            "route_reason": response.get("reason"),  # ROUTER: why this backend (deck pick or fallback)
         }
         _DELEGATION_LOG.parent.mkdir(parents=True, exist_ok=True)
         with _DELEGATION_LOG.open("a", encoding="utf-8") as fh:

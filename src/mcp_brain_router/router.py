@@ -164,20 +164,23 @@ def resolve_role(
     # work -- skip-self, skip-exhausted and the agentic Anthropic rule below are
     # applied to a deck card exactly as to a [roles] entry. Anything the deck
     # cannot answer falls through to the legacy walk, which is never deleted (R16).
+    fallback_reason = None  # ROUTER: why the legacy walk ran when the deck was asked first
     if getattr(config, "routing_mode", "legacy") == "deck":
-        from .deck import gated, load_deck, read_daily_calls, read_quota
+        from .deck import COST_ORDER, gated, load_deck, measured, read_daily_calls, read_quota
         band = (getattr(config, "role_bands", None) or {}).get(role.value)
         row = load_deck().get(band) if band else None
+        n_measured = sum(measured(c, band) for c in (row.ranked + row.unranked)) if row else 0
+        min_measured = getattr(config, "deck_min_measured", 2)
         if row is None:
             logger.warning("routing_mode=deck but role %r has no band (role_bands=%r); legacy walk",
                            role.value, getattr(config, "role_bands", None))
-        elif len(row.ranked) < getattr(config, "deck_min_ranked", 3):
-            # R26: the deck may only route a band whose top-3 carries measured cost
-            # (deck_min_ranked relaxes the 3 for week 0). gate-routing-mode.py checks
-            # this before the flag is set; this is the same rule at run time, so an
-            # unranked deck cannot route by accident.
-            logger.warning("routing_mode=deck but band %s has %d ranked cards (<%d, R26); legacy walk",
-                           band, len(row.ranked), getattr(config, "deck_min_ranked", 3))
+        elif n_measured < min_measured:
+            # ROUTER (replaces R26's ranked-count rule): under relative eligibility one
+            # ranked card is legitimate, but fewer than two MEASURED cards means there is
+            # no comparison behind "best" -- the 2026-09-07 one-card-band failure.
+            fallback_reason = "reference-thin-evidence (band %s: %d measured, need %d)" % (
+                band, n_measured, min_measured)
+            logger.warning("routing_mode=deck: %s; legacy walk", fallback_reason)
         else:
             survivors = gated(row, read_quota(),
                               daily_calls=read_daily_calls(),
@@ -189,9 +192,13 @@ def resolve_role(
                 gated_out = {provider_for_model(c.router_model) for c in row.ranked
                              if _router_provider_ok(c.router_model)}
                 exhausted |= gated_out
+                fallback_reason = "fallback-quota (band %s gated: %s)" % (
+                    band, ",".join(sorted(p.value for p in gated_out)))
                 logger.warning("routing hole: band %s fully gated (%s); legacy walk excludes them",
                                band, sorted(p.value for p in gated_out))
             for card in survivors:
+                if card.provider not in COST_ORDER:
+                    continue  # a discontinued provider in an old deck file never routes
                 # provider_for_model on the ROUTER model id gives the router's own
                 # Provider, so the skip rules compare like with like. The deck's
                 # Card.provider (moonshot/openai) is only ever compared against
@@ -210,7 +217,7 @@ def resolve_role(
                 if provider in exhausted or (skip_self and provider is orchestrator_owner):
                     continue
                 return _assignment_for(role, card.router_model, provider, mode,
-                                       reason=f"deck {band}: leftmost ranked card that clears the gate")
+                                       reason=f"deck {band}: eligible-cheapest (within the band's best, cost order)")
 
     candidates = (config.roles or {}).get(role.value, [])
     if not candidates:
@@ -226,7 +233,7 @@ def resolve_role(
         if skip_self and provider is orchestrator_owner:
             continue
         return _assignment_for(role, model, provider, mode,
-                               reason="first eligible configured candidate")
+                               reason=fallback_reason or "first eligible configured candidate")
 
     if role is Role.ADVERSARY:
         raise ValueError(
@@ -256,9 +263,8 @@ def _assignment_for(role: Role, model: str, provider: Provider, mode: str,
                 role=role, model=model, provider=provider,
                 backend="anthropic-cli", execute_natively=False,
                 reason=(
-                    "Anthropic agentic worker — shells to cc-brain claude in "
-                    "the real cwd (codex-orchestrator adversary / "
-                    "GLM+codex-exhausted fallback)"
+                    f"{reason}; Anthropic agentic worker — shells to cc-brain claude in "
+                    "the real cwd"
                 ),
             )
         # chat mode floor: the MCP never calls Anthropic. Native orchestrator

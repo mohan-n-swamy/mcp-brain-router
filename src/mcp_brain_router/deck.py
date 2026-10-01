@@ -27,6 +27,17 @@ Effort = Literal["base", "low", "medium", "high", "xhigh"]
 BAND_FLOORS: dict[str, float] = {"B1": 35.0, "B2": 48.0, "B3": 55.0, "B4": 59.0, "B5": 62.0}
 BANDS: tuple[str, ...] = ("B1", "B2", "B3", "B4", "B5")
 
+# ROUTER (rig-consolidation slice, Mohan 2026-10-01): best result first, lowest cost
+# second. A card ranks in a band only if its measured pass rate there is within
+# TOLERANCE of the band's best measured card ("10 points ok"); among those, COST_ORDER
+# decides ("yes codex grok claude"). All three are flat subscriptions, so the order is
+# which week he would rather spend, not a price: spec 001 ranked on list prices he does
+# not pay, which he recorded as its design failure. A provider missing from COST_ORDER
+# cannot rank at all (Kimi, GLM and DeepSeek are discontinued).
+COST_ORDER: dict[str, int] = {"openai": 0, "xai": 1, "anthropic": 2}
+TOLERANCE = 0.10
+MIN_TRIALS = 3
+
 
 @dataclass(frozen=True)
 class Card:
@@ -48,6 +59,10 @@ class Card:
     # take a mutable default directly, hence the factory -- the dict is still
     # treated as read-only, and every write happens once at build time.
     by_band: dict = field(default_factory=dict)
+    # ROUTER: quality measured on the bench (fraction of checks passed) and how many
+    # trials it rests on. Scalars for a one-band card; by_band rows carry their own.
+    pass_rate: Optional[float] = None
+    trials: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -66,22 +81,21 @@ class BandRow:
 # load may enter it. C03's STOP says that adding it means the design drifted back to
 # headroom-as-cost, where the deck silently reorders as load drifts and no
 # measurement has changed.
-def _order_key(cost: float | None, capability: float) -> tuple[float, float]:
-    assert cost is not None, "unmeasured card cannot rank (R21)"
-    return (cost, -capability)
+def _order_key(cost_rank: int | None, pass_rate: float | None) -> tuple[int, float]:
+    assert cost_rank is not None and pass_rate is not None, "unmeasured card cannot rank (R21)"
+    return (cost_rank, -pass_rate)
 
 
-def sort_key(c: Card) -> tuple[float, float]:
-    """The single authoritative ordering rule (R25): cost ASC, capability DESC (R18)."""
-    return _order_key(c.total_cost_usd, c.capability)
+def sort_key(c: Card) -> tuple[int, float]:
+    """The single authoritative ordering rule: Mohan's cost order, then pass rate DESC."""
+    return _order_key(COST_ORDER.get(c.provider), measurement_for(c, None).get("pass_rate"))
 
 
 def sort_key_for(band):
-    """The SAME rule expressed per band (R30): rank a card by what it cost and
-    proved IN THIS BAND, not by its scalars. sort_key remains the one-band form."""
-    def key(c: Card) -> tuple[float, float]:
-        m = measurement_for(c, band)
-        return _order_key(m["total_cost_usd"], c.capability)
+    """The SAME rule expressed per band (R30): rank a card by what it proved IN THIS
+    BAND, not by its scalars. sort_key remains the one-band form."""
+    def key(c: Card) -> tuple[int, float]:
+        return _order_key(COST_ORDER.get(c.provider), measurement_for(c, band).get("pass_rate"))
     return key
 
 
@@ -97,18 +111,26 @@ def measurement_for(c: Card, band: str | None) -> dict:
         # cost_basis names where the number came from: "scalar" means the card's
         # own fields, set by whoever measured it in exactly one band.
         return {"total_cost_usd": c.total_cost_usd, "p0_pass": c.p0_pass,
-                "size_class": c.size_class, "cost_basis": "scalar"}
+                "size_class": c.size_class, "cost_basis": "scalar",
+                "pass_rate": c.pass_rate, "trials": c.trials}
     if band is None or band not in c.by_band:
         # Measured somewhere, but not here. Borrowing another band's row would let
         # a B1 pass rank the same card in B4, which is the flattening this shape
         # exists to end; R21's present-but-unranked state is the honest answer.
         return {"total_cost_usd": None, "p0_pass": None,
-                "size_class": "small", "cost_basis": "unmeasured-in-band"}
+                "size_class": "small", "cost_basis": "unmeasured-in-band",
+                "pass_rate": None, "trials": None}
     return c.by_band[band]
 
 
+def measured(c: Card, band: str | None = None) -> bool:
+    """Benched in this band often enough to compare: >= MIN_TRIALS trials, a listed provider."""
+    m = measurement_for(c, band)
+    return c.provider in COST_ORDER and (m.get("trials") or 0) >= MIN_TRIALS and m.get("pass_rate") is not None
+
+
 def rankable(c: Card, band: str | None = None) -> bool:
-    """A card ranks only if cost was MEASURED and no P0 acceptance item failed.
+    """A card ranks only if it was MEASURED here and no P0 acceptance item failed.
 
     Both checks run against the band's own measurement when the card carries one
     (R30); a card with no by_band falls back to its scalars, unchanged from the
@@ -120,8 +142,7 @@ def rankable(c: Card, band: str | None = None) -> bool:
     without it the cheapest wrong answer wins its band, because a polished, materially
     incorrect reply returned in four seconds for a cent beats every correct one on cost.
     """
-    m = measurement_for(c, band)
-    return m["total_cost_usd"] is not None and m["p0_pass"] is True
+    return measured(c, band) and measurement_for(c, band).get("p0_pass") is True
 
 
 def build_bands(cards: list[Card], floors: dict[str, float] | None = None,
@@ -141,8 +162,14 @@ def build_bands(cards: list[Card], floors: dict[str, float] | None = None,
         # R30: rank by the band's own measurement. A card measured in B1 only is
         # unranked here even when its scalars say "passed" -- same rule, applied
         # to the row that was actually taken in this band.
-        ranked = sorted([c for c in eligible if rankable(c, b)], key=sort_key_for(b))
-        unranked = [c for c in eligible if not rankable(c, b)]
+        # ROUTER: the reference is the band's best measured pass rate; a card further
+        # than TOLERANCE below it is measurably worse and does not rank, however cheap.
+        candidates = [c for c in eligible if rankable(c, b)]
+        best = max((measurement_for(c, b)["pass_rate"] for c in candidates), default=None)
+        ranked = sorted([c for c in candidates
+                         if measurement_for(c, b)["pass_rate"] >= best - TOLERANCE - 1e-9],
+                        key=sort_key_for(b))
+        unranked = [c for c in eligible if c not in ranked]
         rows.append(BandRow(
             band=b, floor=floor,
             # R27/R3: DERIVED requires a supporting reference-job pass. Absent that,

@@ -256,17 +256,26 @@ def test_an_already_empty_band_does_not_warn(caplog):
 
 # --- 7. SORT KEY UNTOUCHED --------------------------------------------------
 
+def _measured(slug: str, provider: str, pass_rate: float) -> Card:
+    return Card(slug=slug, router_model=slug, provider=provider, model=slug, effort="medium",
+                capability=80.0, price_blended=99.0, total_cost_usd=None, size_class="small",
+                p0_pass=True, pass_rate=pass_rate, trials=3)
+
+
 def test_sort_key_output_is_independent_of_quota(band_row):
     """Same input, same key — whatever the quota state is."""
-    before = [sort_key(c) for c in band_row.ranked]
+    cards = [_measured("codex", "openai", 0.90), _measured("grok", "xai", 0.92),
+             _measured("claude", "anthropic", 0.95)]
+    before = [sort_key(c) for c in cards]
 
     for level in (0.0, 0.20, 0.90, 0.99, 1.0):
         gated(band_row, _quota(zhipu=level))
-        assert [sort_key(c) for c in band_row.ranked] == before
+        assert [sort_key(c) for c in cards] == before
 
-    # The key is cost ASC then capability DESC — nothing about provider load.
+    # The key is Mohan's cost order then pass rate DESC (ROUTER, 2026-10-01) —
+    # nothing about provider load.
     assert before == sorted(before)
-    assert sort_key(_card("x", "zhipu", 0.5, capability=90.0)) == (0.5, -90.0)
+    assert sort_key(_measured("x", "xai", 0.9)) == (1, -0.9)
 
 
 def test_sort_key_takes_no_quota_and_mentions_none(band_row):

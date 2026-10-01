@@ -152,6 +152,9 @@ def load_measurements(doc: dict | None) -> tuple[dict[str, dict[str, dict]], set
                 "p0_pass": row.get("p0_pass"),
                 "size_class": row.get("size_class") or "small",
                 "cost_basis": row.get("cost_basis") or "measured",
+                # ROUTER: quality and its trial count, carried as the bench wrote them.
+                "pass_rate": row.get("pass_rate"),
+                "trials": row.get("trials"),
             }
         # R27: a floor is DERIVED only from a reference-job PASS. A completed run that
         # failed a P0 item, or one that was never scored (p0_pass None), derives
