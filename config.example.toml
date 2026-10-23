@@ -27,6 +27,10 @@ grok_enabled = false
 # Set to true only if 'kimi' binary is installed and on PATH. OAuth via kimi login.
 kimi_enabled = false
 
+# Apple's on-device fm model, reached over ssh (host with `fm license` agreed).
+# Setting it enables the "apple-fm" candidate; put it first in simple only.
+# fm_host = "mini"
+
 # Headroom proxy base URL (optional) — only matters for HTTP chat DeepSeek/GLM paths
 # Leave commented to use direct API calls
 # headroom_base_url = "http://localhost:8282"

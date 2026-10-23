@@ -75,6 +75,7 @@ class Config:
     codex_enabled: bool = False
     grok_enabled: bool = False
     kimi_enabled: bool = False
+    fm_host: Optional[str] = None  # ssh host running Apple's fm CLI; unset = no apple-fm tier
     jev_key_file: Optional[str] = None
     jev_key_files: Optional[List[str]] = None  # JEV-LOAD pool, tried in order
     decide_backends: Optional[List[Dict[str, str]]] = None  # DECIDE-SWITCH: {name, url, provider, key_file}
@@ -129,6 +130,7 @@ class Config:
             codex_enabled=data.get("codex_enabled", False),
             grok_enabled=data.get("grok_enabled", False),
             kimi_enabled=data.get("kimi_enabled", False),
+            fm_host=data.get("fm_host"),
             jev_key_file=data.get("jev_key_file"),
             jev_key_files=data.get("jev_key_files"),
             decide_backends=data.get("decide_backends"),
@@ -160,6 +162,8 @@ class Config:
             lines.append("grok_enabled = true")
         if self.kimi_enabled:
             lines.append("kimi_enabled = true")
+        if self.fm_host:
+            lines.append(f'fm_host = "{self._escape_toml(self.fm_host)}"')
         if self.jev_key_file:
             lines.append(f'jev_key_file = "{self._escape_toml(self.jev_key_file)}"')
         if self.jev_key_files:

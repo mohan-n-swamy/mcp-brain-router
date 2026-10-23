@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -1654,3 +1655,90 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             failure_kind="configuration_error",
             elapsed_ms=round((time.perf_counter() - started) * 1000),
         )
+
+
+# ============================================================================
+# Apple Foundation Models (fm CLI on the Mac mini, over ssh)
+# ============================================================================
+
+# Measured 2026-10-23 on the mini: 7,564 input tokens answered, 8,161 failed with
+# "exceeded the model's context size" after 12.5 s, so the window is 8,192.
+# ponytail: char estimate (3 chars/token worst case leaves ~1.4k tokens for the
+# reply); switch to `fm count-tokens -q` over ssh if real prompts misfire.
+FM_MAX_PROMPT_CHARS = 20_000
+FM_TIMEOUT_SECONDS = 20
+FM_NEEDS_TOOLS = "NEEDS_TOOLS"
+# The task goes in --instructions and the prompt on stdin: a positional prompt
+# makes fm silently ignore piped stdin and still exit 0.
+FM_SYSTEM = (
+    "You answer using only the text in the prompt. If the request needs anything "
+    "that is not in that text (reading a file or path, running a command, opening "
+    "a URL, editing code, or looking something up), reply with exactly "
+    f"{FM_NEEDS_TOOLS} and nothing else."
+)
+# Deterministic half of the tool check: a 3B model with no tools cannot read a
+# path, a file name or a URL, so skip the round trip. The sentinel catches the
+# rest, mostly. Over-matching only costs a fall-through to the next tier.
+_FM_TOOL_SHAPED = re.compile(
+    r"(?:^|[\s'\"`(])(?:~/|\./|/(?:Users|home|private|tmp|var|etc|opt)/)|https?://"
+    r"|\b[\w.-]+\.(?:py|md|js|ts|tsx|json|toml|ya?ml|txt|sh|csv|html|css|sql|go|rs)\b"
+)
+_FM_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def fm_argv(host: str) -> list:
+    """ssh argv for one fm call. The prompt is never in it (see FM_SYSTEM note)."""
+    if not _FM_HOST.match(host or ""):
+        raise BackendError(
+            "Invalid fm_host", backend="apple-fm", failure_kind="validation_error"
+        )
+    return [
+        "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
+        "fm respond --no-stream --instructions " + shlex.quote(FM_SYSTEM),
+    ]
+
+
+def call_fm(prompt: str, host: str) -> Dict[str, Any]:
+    """One fm call on `host`. Every way it can fail raises BackendError, so the
+    role cascade moves on to the next simple tier (server._delegate_role_impl).
+
+    Kinds: input_too_large and needs_tools fail before ssh; unreachable when
+    ssh itself fails (rc 255) -- not network_error, so the cascade does not
+    retry and a sleeping mini costs one ConnectTimeout, not two (Mohan,
+    2026-10-23); timeout; empty_output; configuration_error for rc 69 (license
+    not agreed); process_error for any other non-zero exit."""
+    started = time.perf_counter()
+
+    def fail(msg: str, kind: str) -> BackendError:
+        return BackendError(
+            f"apple-fm: {msg}", backend="apple-fm", failure_kind=kind,
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+    if len(prompt) > FM_MAX_PROMPT_CHARS:
+        raise fail(f"prompt {len(prompt)} chars > {FM_MAX_PROMPT_CHARS}", "input_too_large")
+    if _FM_TOOL_SHAPED.search(prompt):
+        raise fail("prompt names a path or URL", "needs_tools")
+    argv = fm_argv(host)
+    try:
+        result = subprocess.run(
+            argv, input=prompt, capture_output=True, text=True,
+            timeout=FM_TIMEOUT_SECONDS, check=False, env=_base_cli_env(),
+        )
+    except subprocess.TimeoutExpired:
+        raise fail(f"timed out after {FM_TIMEOUT_SECONDS}s", "timeout")
+    out = (result.stdout or "").strip()
+    if result.returncode != 0:
+        err = _cli_snippet(result.stderr)
+        if result.returncode == 255:
+            raise fail(f"ssh failed: {err}", "unreachable")
+        if result.returncode == 69:
+            raise fail(f"fm license not agreed: {err}", "configuration_error")
+        if "context size" in (result.stderr or ""):
+            raise fail(err, "input_too_large")
+        raise fail(f"fm exit {result.returncode}: {err}", "process_error")
+    if not out:
+        raise fail("empty output", "empty_output")
+    if FM_NEEDS_TOOLS in out and len(out) < 120:  # also "NEEDS_TOOLS — I can't read files."
+        raise fail("model replied NEEDS_TOOLS", "needs_tools")
+    return {"content": out, "usage": None}

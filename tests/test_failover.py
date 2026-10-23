@@ -189,7 +189,7 @@ def test_every_cli_spawn_closes_stdin():
     stdin explicitly: < /dev/null' — the child inherited the MCP stdio pipe."""
     src = inspect.getsource(backends)
     calls = src.count("result = subprocess.run(")
-    assert calls == 8, calls
+    assert calls == 9, calls  # 9th: call_fm (apple-fm), prompt via input=
     # The invariant is the docstring's: a child must NOT inherit the MCP stdio
     # pipe. Two mechanisms satisfy it -- stdin=DEVNULL, or input=, which opens a
     # stdin pipe and closes it. The original assertion demanded DEVNULL
@@ -197,7 +197,8 @@ def test_every_cli_spawn_closes_stdin():
     # ValueError("stdin and input arguments may not both be used") and killed
     # every codex call: 308 validation_errors, the commonest failure in the log.
     # Asserting the property instead of one mechanism is what lets that be fixed.
-    closed = src.count("stdin=subprocess.DEVNULL,") + src.count("input=f\"")
+    closed = (src.count("stdin=subprocess.DEVNULL,") + src.count("input=f\"")
+              + src.count("argv, input=prompt,"))
     assert closed == calls, f"{closed} spawns close stdin, expected {calls}"
     cases = (
         (backends.call_glm_agentic, ("p", "glm-5.3", "/tmp")),
@@ -205,6 +206,7 @@ def test_every_cli_spawn_closes_stdin():
         (backends.call_kimi_agentic, ("p", "kimi", "/tmp")),
         (backends.call_codex_agentic, ("p", "gpt-5.6-terra", "/tmp")),
         (backends.call_anthropic_agentic, ("p", "claude-sonnet-5", "/tmp")),
+        (backends.call_fm, ("p", "mini")),
     )
     for fn, args in cases:
         with patch("mcp_brain_router.backends.subprocess.run") as mrun, patch(

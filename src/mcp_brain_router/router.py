@@ -55,6 +55,7 @@ class Provider(str, Enum):
     XAI = "xai"               # grok-4.5 / grok-composer-* (xAI Grok CLI)
     KIMI = "kimi"             # kimi (Kimi Code CLI, OAuth login)
     DEEPSEEK = "deepseek"
+    APPLE = "apple"           # apple-fm: on-device Apple Foundation Model on the mini (fm CLI over ssh)
 
 
 # Prefix → Provider. First matching prefix wins; order matters only where one
@@ -77,6 +78,7 @@ _MODEL_PROVIDER_PREFIXES = (
     ("grok", Provider.XAI),
     ("kimi", Provider.KIMI),
     ("deepseek", Provider.DEEPSEEK),
+    ("apple", Provider.APPLE),
 )
 
 
@@ -114,6 +116,7 @@ _PROVIDER_TARGETS = {
     Provider.XAI: ("grok", Complexity.CODE),
     Provider.KIMI: ("kimi", Complexity.CODE),
     Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
+    Provider.APPLE: ("apple-fm", Complexity.CHEAP),
 }
 
 
@@ -415,6 +418,20 @@ async def route_assignment(
         result.backend = "kimi"
         result.tried = ["kimi"]
         return result
+    # apple-fm answers text only (no tools, no cwd), so agentic and chat are the
+    # same call. Its failures raise BackendError and the role cascade moves on.
+    if assignment.provider is Provider.APPLE:
+        _validate_credentials("apple-fm", config)
+        result = await asyncio.to_thread(backends.call_fm, prompt, config.fm_host)
+        return RouteResult(
+            content=result["content"],
+            model=assignment.model,
+            backend="apple-fm",
+            complexity=Complexity.CHEAP,
+            headroom_used=False,
+            usage=None,
+            tried=["apple-fm"],
+        )
     _, complexity = _PROVIDER_TARGETS[assignment.provider]
     return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd, effort=effort)
 
@@ -739,6 +756,10 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
     elif backend_name == "codex":
         if not config.codex_enabled:
             raise BackendUnavailableError("codex", "Codex not enabled or not available on PATH")
+    elif backend_name == "apple-fm":
+        # The ssh host doubles as the enable flag: no fm_host, no fm tier.
+        if not config.fm_host:
+            raise BackendUnavailableError("apple-fm", "fm_host not set in config.toml")
 
 
 async def _route_deepseek(

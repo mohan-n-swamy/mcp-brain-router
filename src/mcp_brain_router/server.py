@@ -140,6 +140,7 @@ def _log_delegation(response: dict[str, Any], prompt_len: int, spool_id: str | N
             "fell_back": bool(response.get("fell_back", False)),
             "tried": response.get("tried") or [],
             "retried": response.get("retried") or [],
+            "failures": response.get("failures") or [],  # "<backend>:<failure_kind>" per skipped tier
             "reset_at": response.get("reset_at"),
             "failure_kind": response.get("failure_kind"),
             "failure_reason": response.get("failure_reason"),
@@ -470,6 +471,7 @@ async def _delegate_role_impl(
         tried: list[str] = []
         retried: list[str] = []
         kinds: list[str] = []
+        failures: list[str] = []  # audit: why each tier was skipped (e.g. apple-fm:needs_tools)
         last_reset_at: str | None = None
         last_failure_reason: str | None = None
         last_failure_kind: str | None = None
@@ -502,6 +504,7 @@ async def _delegate_role_impl(
                         "role": role_enum.value,
                         "tried": tried,
                         "retried": retried,
+                        "failures": failures,
                         "exhausted": True,
                         "failure_kind": (
                             "quota_exhausted"
@@ -539,6 +542,7 @@ async def _delegate_role_impl(
                 kind = getattr(e, "failure_kind", None) or "backend_error"
                 elapsed = getattr(e, "elapsed_ms", None)
                 kinds.append(kind)
+                failures.append(f"{name}:{kind}")
                 last_failure_kind = kind
                 last_failure_reason = str(e)
                 n = attempts.get(assignment.provider, 0) + 1
@@ -558,6 +562,7 @@ async def _delegate_role_impl(
             if result.exhausted:
                 exhausted.add(assignment.provider)
                 kinds.append(result.failure_kind or "quota_exhausted")
+                failures.append(f"{name}:{result.failure_kind or 'quota_exhausted'}")
                 last_failure_kind = result.failure_kind or "quota_exhausted"
                 last_reset_at = result.reset_at or last_reset_at
                 last_failure_reason = result.failure_reason or last_failure_reason
@@ -574,6 +579,7 @@ async def _delegate_role_impl(
                 "headroom_used": result.headroom_used,
                 "tried": tried,
                 "retried": retried,
+                "failures": failures,
                 "exhausted": False,
                 "source": "external-untrusted",
             }
