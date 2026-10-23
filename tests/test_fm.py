@@ -72,9 +72,19 @@ def test_oversize_skips_ssh():
     run.assert_not_called()
 
 
-def test_overflow_stderr_is_input_too_large_not_retryable():
-    err = "Error: The session's transcript exceeded the model's context size."
-    result, _ = _call(proc=_proc(rc=1, err=err))
+def test_oversize_boundary_exact_limit_goes_to_ssh():
+    at_limit = "a" * backends.FM_MAX_PROMPT_CHARS
+    result, run = _call(prompt=at_limit, proc=_proc(out="ok"))
+    assert result == {"content": "ok", "usage": None}
+    result, run = _call(prompt=at_limit + "a")
+    assert result.failure_kind == "input_too_large"
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("stream", ["err", "out"])
+def test_overflow_is_input_too_large_not_retryable(stream):
+    msg = "Error: The session's transcript exceeded the model's context size."
+    result, _ = _call(proc=_proc(rc=1, **{stream: msg}))
     assert result.failure_kind == "input_too_large"
     assert result.failure_kind not in server.RETRYABLE_KINDS
 

@@ -1734,7 +1734,7 @@ def call_fm(prompt: str, host: str) -> Dict[str, Any]:
             raise fail(f"ssh failed: {err}", "unreachable")
         if result.returncode == 69:
             raise fail(f"fm license not agreed: {err}", "configuration_error")
-        if "context size" in (result.stderr or ""):
+        if "context size" in (result.stderr or "") + out:  # either stream (Grok review, 2026-10-23)
             raise fail(err, "input_too_large")
         raise fail(f"fm exit {result.returncode}: {err}", "process_error")
     if not out:
