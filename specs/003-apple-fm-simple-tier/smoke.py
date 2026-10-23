@@ -12,6 +12,7 @@ import dataclasses
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 RUN_ID = "fm-smoke-20261023"
@@ -32,7 +33,10 @@ EXTRACT = (
 
 def run(prompt, config):
     server._config = config  # _load_config() returns this
-    r = asyncio.run(server._delegate_role_impl("simple", prompt, "claude", cwd=str(REPO)))
+    # Throwaway cwd: a fall-through tier is an agentic worker and may write files
+    # (the first runs left invoice_*.txt in the repo root).
+    cwd = tempfile.mkdtemp(prefix="fm-smoke-")
+    r = asyncio.run(server._delegate_role_impl("simple", prompt, "claude", cwd=cwd))
     print(json.dumps({k: r.get(k) for k in ("backend", "tried", "failures", "error", "elapsed_ms")}))
     print("answer:", (r.get("answer") or "")[:200])
     return r

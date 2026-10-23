@@ -1,33 +1,25 @@
 # mcp-brain-router — STATUS
 
-**Updated:** 2026-09-05
-**Branch:** main
-**HEAD:** b8e3ae2 — week 0 flip: gate warns (not fails) on short bands, probe skips them, gen skips native rows
-**Tree:** DIRTY
-**Knowledge:** wrap 2026-08-25 (CLI contract) · prior rebase 2026-07-30
-**Safety tag:** rebase-pre-20260730-1016
-**Deploy:** not deployed — `ssh kamakshi` this wrap: hostname vultr; no brain-router git dir; no brain-router container. Open Brain compose is unrelated.
+**Updated:** 2026-10-23
+**Branch/HEAD:** main @ 9fdb496
+**Tree:** Dirty. README.md, tests/test_effort_plumbing.py and `.session/brain-router-effort-fix/` carry earlier sessions' uncommitted edits, left untouched.
 
 ## Current goal
 
-Deck routing live for week 0 (spec 001). Watch it; build nothing until use says so.
-
-## What is now true
-
-- `routing_mode = "deck"`, `deck_min_ranked = 1` in `~/.config/mcp-brain-router/config.toml`. Ranked: B2 glm-5.3-flash + glm-4.7-flash · B3 glm-5.3-flash · B5 glm-5.3-flash · B1/B4 none (legacy walk, router warns per call).
-- 29 generated agents in `~/.claude/agents` (`generated-by: agent-gen`), `agent-lint` 0/39.
-- Route gate in **enforce** for claude, codex, grok, kimi, gemini via `~/.claude/state/route-gate.mode`; observations carry `caller`.
-- Bench: 1 trial/cell; contenders need a probed model id (`bench/reachability.json`); refresh monthly under `--max-calls 250`.
-- Luna cards unmeasured (codex CLI reports no usage) → never ranked. Design failure recorded: cost measured on flat subscriptions; API already scores capability.
+Apple's on-device fm model (Mac mini, over ssh) is the first tier of the `simple` role. Watch real traffic before changing anything.
 
 ## Latest verified evidence
 
-2026-09-05: `gate-routing-mode.py` rc 0 (WARN simple→B1, adversary→B4 legacy) · `probe-band-winners.py` SC13 PASS B2/B3/B5 ALIVE · route-gate probes: curl blocked / git status allowed on all five adapters · pytest 267 passed, 1 skipped · hook selftest 78/79 (timing budget under load 11).
+- Live config: `fm_host = "mini"`, `simple = ["apple-fm", "claude-haiku-4-5-20251001", "grok-4.5"]`; backup `config.toml.bak-20261023-fm` (2026-10-23).
+- Live smoke (`specs/003-apple-fm-simple-tier/smoke.py`): a short extract is answered by fm in ~2.6 s; oversized, unreachable-mini and tool-shaped prompts fall through to haiku with the reason in the audit line's `failures`.
+- Suite: 400 passed, 1 skipped. Rigor: `specs/003-apple-fm-simple-tier/.rigor.md` 36 of 36 green. Cross-provider review by Grok 4.5: one fix (overflow on stdout), the rest recorded in `specs/003-apple-fm-simple-tier/evidence/rigor-standing-review.md`.
+- Commits: `0cfdd49` (tier), `4b2dbc9` (no retry on unreachable, overflow on either stream, `docs/RUNBOOK.md`), `9fdb496` (review evidence). Pushed.
+- Jev `decide` unchanged since 2026-09-18 (`docs/jev-provider.md`); office-email key answers first.
 
 ## Blocker
 
-None.
+None for the fm tier. Known residual: with no tools, fm can invent an answer to a tool-needing prompt that names no path, file or URL (1 of 6 in the probe), and that is logged as an fm success.
 
 ## Next action
 
-Nothing owed. If a glm answer on a B3 job is bad, that is the signal a P0 fixture is too easy. Deletion pass (API order + probe + n=1 P0, drop cost measurement) only if the deck earns it. Codex owns the claim-discipline mechanism: `/Users/mohannarayanswamy/code workshop/notes/2026-09-05-brief-codex-claim-discipline.md`.
+After a day of real `simple` traffic, read the status-line row `fm(mini): 24h a/b answered` and the audit `failures`, and spot-check fm answers. Jev balance in the status line waits on `brew install --formula steipete/tap/codexbar` (two download failures on 2026-10-23) and a CodexBar sign-in to the TypeSafe console.
