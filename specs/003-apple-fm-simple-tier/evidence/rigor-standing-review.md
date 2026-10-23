@@ -35,14 +35,6 @@ Session 406f90c0. Repo mcp-brain-router, commits 0cfdd49 and the follow-up below
 - F29 — fm output is free text from free text, so a model is required; the deterministic part (path/URL/file detection, size gate) is code (A1).
 - F30 — Existing source: the role cascade and `[roles] simple`. Addition: a free first tier. Users: delegate-first skills and `complexity="cheap"` callers.
 
-## work-review
-
-- F1 — manuf-product-design was not invoked. Exemption claimed: internal routing tier, no product or UI surface; authority = Mohan's pasted brief plus .rigor.md. Mohan may reject it.
-- F2 — n/a: no UI.
-- F3 — Gate misfires, recorded with evidence and not worked around by editing correct artifacts: the integration gate fired on the word "codex" in an edit (switched to the Edit tool); the claims hook cannot match paths containing spaces (re-ran a probe whose object path has none); doctrine-check H6 (F9 above).
-- F4 — Cross-project claims: "kimi/glm/ds caches read by provider-quota.sh, statusline-hosts.sh, tmux" = grep hits only, files not read. No reuse claims made.
-- F5 — Debugging conclusions and their data: checklist lint failure ← Source lines include ~/.agents/AGENTS.md (grep) + lint passes after re-stamp; Codex failure ← 401 lines in its log; brew failure ← curl 35 in brew output and a working 302 to release-assets.githubusercontent.com.
-
 ## Cross-provider review
 
 Grok 4.5 (xAI, `grok --prompt-file … -m grok-4.5`), given the original request and the full diff of 0cfdd49 plus the uncommitted working tree, no tools. Raw output: scratchpad `grokreview/review.md` (4,487 bytes). Findings and disposition:
