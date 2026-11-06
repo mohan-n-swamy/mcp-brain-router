@@ -18,18 +18,17 @@ from mcp_brain_router.router import (
 def role_config():
     return Config(
         deepseek_key="ds",
-        glm_key="glm",
         codex_enabled=True,
         roles={
             "thinker": ["fable-planner", "sol-planner"],
             "adversary": ["opus-refuter", "sol-refuter"],
             "worker": [
-                "glm-5.2",
+                "kimi",
                 "grok-4.5",
-                "gpt-5.6-terra",
+                "gpt-6.1-sol",
                 "sonnet-worker",
             ],
-            "simple": ["glm-4.7", "luna-simple", "haiku-simple"],
+            "simple": ["kimi", "luna-simple", "haiku-simple"],
         },
     )
 
@@ -41,12 +40,12 @@ def role_config():
         (Role.THINKER, "codex", Provider.ANTHROPIC, True),
         (Role.ADVERSARY, "opus", Provider.CODEX, False),
         (Role.ADVERSARY, "codex", Provider.ANTHROPIC, True),
-        (Role.WORKER, "opus", Provider.ZHIPU, False),
-        (Role.WORKER, "codex", Provider.ZHIPU, False),
-        (Role.SIMPLE, "opus", Provider.ZHIPU, False),
-        (Role.SIMPLE, "codex", Provider.ZHIPU, False),
-        (Role.WORKER, Provider.ANTHROPIC, Provider.ZHIPU, False),
-        (Role.SIMPLE, Provider.CODEX, Provider.ZHIPU, False),
+        (Role.WORKER, "opus", Provider.KIMI, False),
+        (Role.WORKER, "codex", Provider.KIMI, False),
+        (Role.SIMPLE, "opus", Provider.KIMI, False),
+        (Role.SIMPLE, "codex", Provider.KIMI, False),
+        (Role.WORKER, Provider.ANTHROPIC, Provider.KIMI, False),
+        (Role.SIMPLE, Provider.CODEX, Provider.KIMI, False),
     ],
 )
 def test_role_truth_table(role_config, role, orchestrator, provider, native):
@@ -69,11 +68,11 @@ def test_adversary_skips_orchestrator_provider(role_config, orchestrator):
 
 
 def test_worker_does_not_skip_self(role_config):
-    # rigor: small — skip-self is adversary-only (2026-09-07): a zhipu
-    # orchestrator keeps glm-5.2, the leftmost worker candidate.
-    assignment = resolve_role(Role.WORKER, "zhipu", role_config)
-    assert assignment.provider is Provider.ZHIPU
-    assert assignment.model == "glm-5.2"
+    # rigor: small — skip-self is adversary-only (2026-09-07): a kimi
+    # orchestrator keeps kimi, the leftmost worker candidate.
+    assignment = resolve_role(Role.WORKER, "kimi", role_config)
+    assert assignment.provider is Provider.KIMI
+    assert assignment.model == "kimi"
 
 
 def test_exhaustion_walks_candidate_providers(role_config):
@@ -81,7 +80,7 @@ def test_exhaustion_walks_candidate_providers(role_config):
         Role.WORKER,
         Provider.ANTHROPIC,
         role_config,
-        exhausted_providers={Provider.ZHIPU},
+        exhausted_providers={Provider.KIMI},
     )
     assert assignment.provider is Provider.XAI
     assert assignment.model == "grok-4.5"
@@ -92,7 +91,7 @@ def test_anthropic_fallback_is_native(role_config):
         Role.WORKER,
         Provider.CODEX,
         role_config,
-        exhausted_providers={Provider.ZHIPU, Provider.XAI, Provider.CODEX},
+        exhausted_providers={Provider.KIMI, Provider.XAI, Provider.CODEX},
     )
     assert assignment.provider is Provider.ANTHROPIC
     assert assignment.backend is None
@@ -105,7 +104,7 @@ def test_orchestrator_role_is_never_resolved(role_config):
 
 
 def test_same_provider_only_adversary_rejected():
-    config = Config(roles={"adversary": ["gpt-5.6-sol", "terra-refuter"]})
+    config = Config(roles={"adversary": ["gpt-6.1-sol", "terra-refuter"]})
     with pytest.raises(ValueError, match="differs"):
         resolve_role(Role.ADVERSARY, "codex", config)
 
@@ -136,7 +135,6 @@ async def test_delegate_role_rejects_chat_even_if_explicit(role_config):
 async def test_native_assignment_never_calls_backend(role_config):
     with (
         patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as ds,
-        patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as glm,
         patch("mcp_brain_router.router.backends.call_codex") as codex,
     ):
         assignment = resolve_role(
@@ -146,7 +144,6 @@ async def test_native_assignment_never_calls_backend(role_config):
         )
         assert assignment.execute_natively is True
         ds.assert_not_called()
-        glm.assert_not_called()
         codex.assert_not_called()
 
 
@@ -209,11 +206,11 @@ async def test_delegate_role_walks_quota_through_full_worker_cascade(role_config
 
     assert response["answer"] == "built"
     assert response["provider"] == "anthropic"
-    assert response["tried"] == ["glm", "grok", "codex", "anthropic-cli"]
+    assert response["tried"] == ["kimi", "grok", "codex", "anthropic-cli"]
     assert route_call.await_count == 4
     assert [
         call.args[0].model for call in route_call.await_args_list
-    ] == ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "sonnet-worker"]
+    ] == ["kimi", "grok-4.5", "gpt-6.1-sol", "sonnet-worker"]
 
 
 @pytest.mark.asyncio
@@ -235,8 +232,8 @@ async def test_delegate_role_advances_on_non_quota_error(role_config):
             new_callable=AsyncMock,
             side_effect=[
                 BackendError(
-                    "GLM process failed",
-                    backend="glm",
+                    "Kimi process failed",
+                    backend="kimi",
                     failure_kind="process_error",
                     elapsed_ms=190_000,
                 ),
@@ -250,7 +247,7 @@ async def test_delegate_role_advances_on_non_quota_error(role_config):
 
     assert response["answer"] == "built"
     assert response["backend"] == "grok"
-    assert response["tried"] == ["glm", "grok"]
+    assert response["tried"] == ["kimi", "grok"]
     assert route_call.await_count == 2
 
 
@@ -303,19 +300,19 @@ async def test_anthropic_cli_transient_advances_cascade_not_quota(role_config, t
 
 
 @pytest.mark.asyncio
-async def test_worker_transient_on_glm_fails_over_to_next_provider(role_config):
+async def test_worker_transient_on_first_provider_fails_over_to_next(role_config):
     """§9.6 end-to-end G-guard: a transient error on the FIRST worker provider
-    (GLM) must fail over to the next (Grok), proving the cascade advances on
+    must fail over to the next (Grok), proving the cascade advances on
     transient — the exact cascade-abort defect the fix repairs."""
-    glm_transient = RouteResult(
-        content="glm transient",
+    first_transient = RouteResult(
+        content="kimi transient",
         model="",
         backend="none",
         complexity=None,
         headroom_used=False,
         exhausted=True,
         failure_kind="transient_error",
-        failure_reason="GLM provider error 503",
+        failure_reason="provider error 503",
     )
     grok_ok = RouteResult(
         content="PONG",
@@ -330,14 +327,14 @@ async def test_worker_transient_on_glm_fails_over_to_next_provider(role_config):
         patch(
             "mcp_brain_router.server.route_assignment",
             new_callable=AsyncMock,
-            side_effect=[glm_transient, grok_ok],
+            side_effect=[first_transient, grok_ok],
         ),
     ):
         response = await server._delegate_role_impl("worker", "build", "opus", cwd="/tmp")
     assert response["exhausted"] is False  # a later provider succeeded
     assert response["backend"] == "grok"
     assert response["answer"] == "PONG"
-    assert response["tried"] == ["glm", "grok"]  # advanced past the transient GLM
+    assert response["tried"] == ["kimi", "grok"]  # advanced past the first transient
 
 
 @pytest.mark.asyncio
@@ -365,7 +362,7 @@ async def test_all_role_candidates_exhausted_keeps_quota_contract(role_config):
         )
     assert response["exhausted"] is True
     assert response["failure_kind"] == "quota_exhausted"
-    assert response["tried"] == ["glm", "grok", "codex", "anthropic-cli"]
+    assert response["tried"] == ["kimi", "grok", "codex", "anthropic-cli"]
     assert response["reset_at"] == "2026-07-15 09:00"
 
 
@@ -416,7 +413,7 @@ async def test_spoofed_caller_cannot_bypass_orchestrator_match(role_config, monk
             "mcp_brain_router.server.route_assignment",
             new_callable=AsyncMock,
             return_value=RouteResult(
-                content="ok", model="glm-5.2", backend="glm",
+                content="ok", model="kimi", backend="kimi",
                 complexity=None, headroom_used=False, exhausted=False,
             ),
         ),

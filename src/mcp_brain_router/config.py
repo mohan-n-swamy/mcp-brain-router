@@ -3,7 +3,9 @@
 Loads from ~/.config/mcp-brain-router/config.toml with 0600 permissions.
 """
 
+import logging
 import os
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,31 @@ class ConfigError(Exception):
 
 CONFIG_DIR = Path.home() / ".config" / "mcp-brain-router"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
+COMPUTE_ENV = Path.home() / ".config" / "mohan" / "compute.env"
+
+
+def compute_settings() -> Dict[str, str]:
+    """Read shared inference settings without executing shell code; env wins."""
+    keys = ("MOHAN_OLLAMA_HOST",)
+    values = {}
+    try:
+        for line in COMPUTE_ENV.read_text().splitlines():
+            key, sep, raw = line.strip().removeprefix("export ").partition("=")
+            if sep and key.strip() in keys:
+                try:
+                    parts = shlex.split(raw, comments=True)
+                except ValueError as exc:
+                    raise ConfigError(f"Invalid compute.env setting: {key.strip()}") from exc
+                if len(parts) > 1:
+                    raise ConfigError(f"Invalid compute.env setting: {key.strip()}")
+                values[key.strip()] = parts[0] if parts else ""
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError, ConfigError) as exc:
+        # Optional local inference must never disable the independent cloud lanes.
+        logging.getLogger(__name__).warning("compute.env unavailable (%s); Ollama needs env overrides", type(exc).__name__)
+        values = {}
+    return values | {key: os.environ[key] for key in keys if key in os.environ}
 
 # Code default for per-role execution mode (spec 002). The worker role is
 # agentic by default (shells to a CLI harness that writes files). HTTP-only
@@ -37,21 +64,16 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    # Protection-ordered 2026-08-14 (Mohan): burn the cheap/large pools first,
-    # protect the scarce ones. Cascade shape is the same in every role:
-    #   GLM → Kimi → Grok → Claude → Codex.
-    # Rationale: GLM pro sat at ~2% weekly and Kimi at ~22% while Claude was the
-    # pool actually being drained. Claude and Codex are now last-resort tiers,
-    # reached only after GLM/Kimi/Grok confirm quota exhaustion.
-    # TRADE-OFF: GLM was yanked from cascades 2026-07-21 for a quality
-    # regression on agentic workers. It leads again by explicit budget
-    # instruction — expect weaker worker output than the Kimi-first order.
-    # Reasoning roles are quality-gated, not budget-gated (2026-08-14): GLM and
-    # Kimi are excluded entirely — Grok leads, Claude is the real fallback.
-    "thinker": ["grok-4.5", "claude-fable-5", "gpt-5.6-sol"],
-    "adversary": ["grok-4.5", "claude-opus-4-8", "gpt-5.6-sol"],
-    "worker": ["glm-5.3", "kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"],
-    "simple": ["glm-5.3", "kimi", "grok-4.5", "claude-haiku-4-5-20251001", "gpt-5.6-luna"],
+    # D5 (Mohan, 2026-11-06), free first. The orders live here, in the repo,
+    # where the retired-ID scan (lean-rig I18) sees them; a host config.toml
+    # [roles] table is ignored (Config.load). A missing binary or key is a free
+    # skip, so Kimi (not installed) and DeepSeek (unkeyed) cost nothing.
+    # gpt-oss runs only when warm and only for `simple` (backends.call_ollama).
+    "simple": ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5"],
+    "worker": ["kimi", "grok-4.5", "deepseek-v4-pro", "claude-sonnet-5", "gpt-6.1-sol"],
+    "adversary": ["gpt-6.1-sol", "claude-opus-5-5", "kimi"],
+    # Not in D5; only its Codex entry moves to the one model the ChatGPT login takes.
+    "thinker": ["grok-4.5", "claude-fable-5", "gpt-6.1-sol"],
 }
 
 
@@ -71,7 +93,6 @@ DEFAULT_ROLE_BANDS: Dict[str, str] = {
 class Config:
     """Configuration for mcp-brain-router."""
     deepseek_key: Optional[str] = None
-    glm_key: Optional[str] = None
     codex_enabled: bool = False
     grok_enabled: bool = False
     kimi_enabled: bool = False
@@ -80,8 +101,12 @@ class Config:
     jev_key_files: Optional[List[str]] = None  # JEV-LOAD pool, tried in order
     decide_backends: Optional[List[Dict[str, str]]] = None  # DECIDE-SWITCH: {name, url, provider, key_file}
     headroom_base_url: Optional[str] = None
+    ollama_host: Optional[str] = None  # shared compute.env, not duplicated in router TOML
     model_overrides: Optional[Dict[str, str]] = None
     roles: Optional[Dict[str, List[str]]] = None
+    # Data class a delegate call gets when the caller names none. "orange"
+    # (Orange work; the Orange host's default) reaches Claude only.
+    default_class: Optional[str] = None
     # Per-role default execution mode (spec 002): 'agentic' shells to a CLI
     # harness in the real cwd (writes files); 'chat' is the text-only path.
     # A code default is merged on load so a config.toml that omits the section
@@ -124,9 +149,14 @@ class Config:
         except Exception as e:
             raise ConfigError(f"Failed to parse config: {e}")
 
+        if data.get("roles"):
+            # D5 orders live in the repo (DEFAULT_ROLES). A host table would
+            # hide them from the retired-ID scan, so it no longer routes.
+            logging.getLogger(__name__).warning(
+                "config.toml [roles] ignored: role orders come from the router repo")
+        compute = compute_settings()
         return cls(
             deepseek_key=data.get("deepseek_key"),
-            glm_key=data.get("glm_key"),
             codex_enabled=data.get("codex_enabled", False),
             grok_enabled=data.get("grok_enabled", False),
             kimi_enabled=data.get("kimi_enabled", False),
@@ -135,8 +165,10 @@ class Config:
             jev_key_files=data.get("jev_key_files"),
             decide_backends=data.get("decide_backends"),
             headroom_base_url=data.get("headroom_base_url"),
+            ollama_host=compute.get("MOHAN_OLLAMA_HOST"),
             model_overrides=data.get("model_overrides"),
-            roles=DEFAULT_ROLES | (data.get("roles") or {}),
+            roles={role: list(order) for role, order in DEFAULT_ROLES.items()},
+            default_class=data.get("default_class"),
             # Role delegation is agentic-only. Older config files may still
             # contain chat overrides; normalize them during the shard migration.
             role_modes=DEFAULT_ROLE_MODES.copy(),
@@ -154,8 +186,6 @@ class Config:
         lines = []
         if self.deepseek_key:
             lines.append(f'deepseek_key = "{self._escape_toml(self.deepseek_key)}"')
-        if self.glm_key:
-            lines.append(f'glm_key = "{self._escape_toml(self.glm_key)}"')
         if self.codex_enabled:
             lines.append("codex_enabled = true")
         if self.grok_enabled:
@@ -174,6 +204,8 @@ class Config:
             lines.append(
                 f'headroom_base_url = "{self._escape_toml(self.headroom_base_url)}"'
             )
+        if self.default_class:
+            lines.append(f'default_class = "{self._escape_toml(self.default_class)}"')
         if self.model_overrides:
             lines.append("[model_overrides]")
             for complexity, model in self.model_overrides.items():
@@ -187,13 +219,6 @@ class Config:
             lines.append("[role_bands]")
             for role, band in self.role_bands.items():
                 lines.append(f'{role} = "{self._escape_toml(band)}"')
-        if self.roles:
-            lines.append("[roles]")
-            for role, models in self.roles.items():
-                encoded = ", ".join(
-                    f'"{self._escape_toml(model)}"' for model in models
-                )
-                lines.append(f"{role} = [{encoded}]")
         if self.role_modes:
             lines.append("[role_modes]")
             for role, mode in self.role_modes.items():

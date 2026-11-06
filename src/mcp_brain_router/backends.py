@@ -1,9 +1,13 @@
-"""Backend implementations for DeepSeek, GLM, and Codex.
+"""Backend implementations: DeepSeek, Codex, Grok, Kimi, Claude, Apple fm, Ollama.
 
 Each backend is isolated; router.py calls these functions.
 """
 
+import asyncio
 import contextlib
+import contextvars
+import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -13,8 +17,25 @@ import subprocess
 import tempfile
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 import httpx
+
+# One deadline per delegate call (lean-rig §6: `simple` 120 s, `worker` 15 min).
+# server._delegate_role_impl sets it (time.monotonic() seconds); every backend
+# clamps its own timeout to the time left. asyncio.to_thread copies the context,
+# so the CLI threads see it too.
+DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "brain_router_deadline", default=None
+)
+
+
+def _timeout(cap: float) -> float:
+    """`cap` seconds, or the time left before the call's deadline if less."""
+    deadline = DEADLINE.get()
+    if deadline is None:
+        return cap
+    return max(1.0, min(cap, deadline - time.monotonic()))
 
 
 class BackendError(Exception):
@@ -79,6 +100,8 @@ _CODEX_BIN = shutil.which("codex") or (
 # 23,145 tokens / ~69s for PONG; these flags used 14,907 / 10.6s. Delegated
 # prompts are self-contained workers: no user config, rules, plugins, hooks,
 # memories, apps, multi-agent fan-out, persisted session, MCPs, or repo context.
+# Tools-off (lean-rig §6): no shell tool, read-only sandbox; live 2026-11-06 a
+# "run uname -s" prompt answered NO_TOOLS. The caller adds `-C <empty dir>`.
 _CODEX_EXEC_BASE_TMPL = [
     _CODEX_BIN,
     "exec",
@@ -86,6 +109,8 @@ _CODEX_EXEC_BASE_TMPL = [
     "--ignore-user-config",
     "--ignore-rules",
     "--ephemeral",
+    "--sandbox",
+    "read-only",
     "--disable",
     "plugins",
     "--disable",
@@ -96,14 +121,17 @@ _CODEX_EXEC_BASE_TMPL = [
     "apps",
     "--disable",
     "multi_agent",
+    "--disable",
+    "shell_tool",
+    # Codex memory v2: importing other agents' memories stays off (REJECTED §3).
+    "--disable",
+    "external_agent_memory_import",
     "-c",
     "mcp_servers={}",
     "-c",
     "__EFFORT__",
     "-c",
     'approval_policy="never"',
-    "-C",
-    "/private/tmp",
 ]
 
 CODEX_TIMEOUT_SECONDS = 360  # 004 C410: 180s starved long adversarial prompts (2026-07-12)
@@ -137,83 +165,32 @@ def _resolve_bin(primary: str, fallback_dirs: tuple[str, ...] = ("~/.local/bin",
     return primary
 
 
-_CC_GLM_BIN = _resolve_bin("cc-glm")
 _CC_BRAIN_BIN = _resolve_bin("cc-brain")
-# xAI Grok CLI (grok.com OAuth login, no API key). A native Mach-O binary
-# (NOT a node shim like codex/cc-glm), so its subprocess needs only grok's own
-# bin dir on PATH — no node runtime resolution. Both the chat (`grok -p`) and
-# agentic (`grok --permission-mode bypassPermissions --always-approve`) paths
-# shell to it. The caller-supplied absolute cwd controls placement; it is not
-# an OS-level filesystem sandbox.
+# xAI Grok CLI (grok.com OAuth login, no API key). A native binary (NOT a node
+# shim like codex), so its subprocess needs only grok's own bin dir on PATH.
+# The router runs it tools-off in an empty temp dir (call_grok).
 _GROK_BIN = _resolve_bin("grok")
-# Kimi Code CLI (kimi.com OAuth device-code login, no API key). A bundled
-# binary (NOT a node shim like codex/cc-glm), so its subprocess needs only
-# kimi's own bin dir on PATH — no node runtime resolution. Both the chat
-# (`kimi -p`) and agentic (`kimi -p --auto`) paths shell to it. The
-# caller-supplied absolute cwd controls placement; it is not an OS-level
-# filesystem sandbox. Fallback dir is ~/.kimi-code/bin (the installer layout)
-# for the empty-PATH MCP-process case.
-_KIMI_BIN = _resolve_bin("kimi", ("~/.kimi-code/bin",))
 
 
-# Codex agentic base flags — SAME lean worker profile as CODEX_EXEC_BASE
-# (skip-git-repo-check, ignore-user-config, ephemeral, all --disable, no MCPs,
-# low reasoning) EXCEPT two flags dropped so the agentic worker can edit the
-# caller's repo:
-#   - `-C /private/tmp`  → run in the REAL cwd (files must land in the repo)
-#   - `--ignore-rules`  → removed so codex's edit/permission rules can apply
-# (spec 002 SC-6). The cwd is set per-call via subprocess.run(cwd=...).
-_CODEX_EXEC_BASE_AGENTIC_TMPL = [
-    _CODEX_BIN,
-    "exec",
-    "--skip-git-repo-check",
-    "--ignore-user-config",
-    "--ephemeral",
-    "--sandbox",
-    "workspace-write",
-    "--disable",
-    "plugins",
-    "--disable",
-    "hooks",
-    "--disable",
-    "memories",
-    "--disable",
-    "apps",
-    "--disable",
-    "multi_agent",
-    "-c",
-    "mcp_servers={}",
-    "-c",
-    "__EFFORT__",
-    "-c",
-    'approval_policy="never"',
-]
-
-
-def _codex_exec_base(agentic: bool, effort: Optional[str] = None) -> list:
+def _codex_exec_base(effort: Optional[str] = None) -> list:
     """The lean Codex argv with reasoning effort THREADED, not typed.
 
-    C06 (specs/001-agent-capability-routing): two hardcoded reasoning-effort
-    literals (both "low") sat inside the argv blobs, so an effort
-    request could not reach Codex without rebuilding the whole list. One builder,
-    both shapes. effort=None reproduces today's argv byte-for-byte -- the default
-    stays "low" -- which is the whole safety property: every existing caller passes
-    no effort and must see no change."""
+    C06 (specs/001-agent-capability-routing): a hardcoded reasoning-effort
+    literal ("low") sat inside the argv blob, so an effort request could not
+    reach Codex without rebuilding the whole list. effort=None keeps "low"."""
     level = effort or "low"
-    tmpl = _CODEX_EXEC_BASE_AGENTIC_TMPL if agentic else _CODEX_EXEC_BASE_TMPL
-    return [(f'model_reasoning_effort="{level}"' if a == "__EFFORT__" else a) for a in tmpl]
+    return [(f'model_reasoning_effort="{level}"' if a == "__EFFORT__" else a)
+            for a in _CODEX_EXEC_BASE_TMPL]
 
 
 # Shared with install.py's smoke test; built with effort=None so they cannot drift.
-CODEX_EXEC_BASE = _codex_exec_base(agentic=False)
-CODEX_EXEC_BASE_AGENTIC = _codex_exec_base(agentic=True)
+CODEX_EXEC_BASE = _codex_exec_base()
 
-# C06: providers whose CLI exposes no reasoning-effort control at all. kimi accepts
-# -p and --output-format and nothing about effort (kimi --help, 2026-09-05). An
-# effort request to one of these is ACCEPTED by the signature and NOT applied, and
-# the router reports effort_applied=False -- a flag that did nothing must never
-# look like a verified claim (C05 STOP).
-EFFORT_UNSUPPORTED = frozenset({"kimi"})
+# C06: providers that expose no reasoning-effort control at all. An effort
+# request to one of these is ACCEPTED by the signature and NOT applied, and the
+# router reports effort_applied=False -- a flag that did nothing must never look
+# like a verified claim (C05 STOP).
+EFFORT_UNSUPPORTED = frozenset({"kimi", "ollama"})
 
 
 def _find_mise_node() -> str:
@@ -266,12 +243,13 @@ def _grok_env() -> Dict[str, str]:
     return env
 
 
-# Isolated GROK_HOME so the agentic worker does not inherit the user's MCP
-# servers, skills, hooks, or compat scans. Codex's equivalent is
-# `--ignore-user-config` + `mcp_servers={}`. Grok has no such flag (live
-# 2026-08-25 CLI 1.0.5). A failed worker in itam-orange started 10 MCP
-# servers (4 failed), inherited `grok-build-plan` + high reasoning, then
-# died at `--max-turns 10`.
+# Isolated GROK_HOME so the worker does not inherit the user's MCP servers,
+# skills, hooks, or compat scans. Codex's equivalent is `--ignore-user-config`
+# + `mcp_servers={}`. Grok has no such flag (live 2026-08-25 CLI 1.0.5). Timed
+# 2026-11-06 (grok 1.0.77, one tools-off turn, 3 runs each): default home
+# 6.2-6.5 s and 23-31k input tokens; this home 4.5-5.9 s and 14-21k. The
+# GROK_CLAUDE_*_ENABLED env switches alone changed nothing in `grok inspect`;
+# this config file's [compat.claude] table is what disables those surfaces.
 _GROK_LEAN_HOME = os.path.expanduser("~/.local/state/brain-router-grok-home")
 _GROK_LEAN_CONFIG = """\
 # brain-router lean grok worker. No MCP, no skills, no hooks, no compat scans.
@@ -317,29 +295,15 @@ def _ensure_grok_lean_home() -> str:
     return dest
 
 
-def _grok_agentic_env() -> Dict[str, str]:
-    """Chat `_grok_env` plus lean-home isolation. GROK_MEMORY=0 is the
-    documented memory kill switch (`--no-memory` is not a grok CLI flag)."""
+def _grok_lean_env() -> Dict[str, str]:
+    """`_grok_env` plus lean-home isolation. GROK_MEMORY=0 is the documented
+    memory kill switch (`--no-memory` is not a grok CLI flag)."""
     env = _grok_env()
     env["GROK_HOME"] = _ensure_grok_lean_home()
     env["GROK_MEMORY"] = "0"
     env["GROK_DISABLE_AUTOUPDATER"] = "1"
     env["GROK_CLAUDE_MCPS_ENABLED"] = "false"
     env["GROK_CURSOR_MCPS_ENABLED"] = "false"
-    return env
-
-
-def _kimi_env() -> Dict[str, str]:
-    """Env for the kimi subprocess. Kimi is a bundled binary (not an
-    `#!/usr/bin/env node` shim like codex/cc-glm), so ONLY kimi's own bin dir
-    needs prepending for the empty-env MCP-process case (`"env": {}`) — there is
-    no node-runtime shebang to resolve. Existing PATH is preserved; the dir is
-    only prepended, so a normal shell launch is unaffected."""
-    env = _base_cli_env()
-    kimi_bin = os.path.dirname(_KIMI_BIN) if os.path.sep in _KIMI_BIN else ""
-    if kimi_bin:
-        current = env.get("PATH", "")
-        env["PATH"] = os.pathsep.join([kimi_bin, current]) if current else kimi_bin
     return env
 
 
@@ -370,9 +334,9 @@ def _grok_prompt_file(text: str):
 
 
 def _agentic_cli_env() -> Dict[str, str]:
-    """Env for the cc-glm / cc-brain agentic subprocesses with a PATH that
-    resolves the wrapper (cc-glm/cc-brain), the `claude` binary it `exec`s, AND
-    `claude`'s node runtime. Same empty-env MCP-process failure as codex
+    """Env for the cc-brain agentic subprocess with a PATH that resolves the
+    wrapper (cc-brain), the `claude` binary it `exec`s, AND `claude`'s node
+    runtime. Same empty-env MCP-process failure as codex
     (root-caused 2026-07-12): the server runs with `"env": {}`, so cc-glm's
     `exec claude "$@"` dies with `line 56: exec: claude: not found` (or degrades
     to a bare chat completion that writes no file and exits 0 — silent). Prepend
@@ -385,9 +349,8 @@ def _agentic_cli_env() -> Dict[str, str]:
     node_bin = os.path.dirname(node_path) if node_path else ""
     claude_path = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
     claude_bin = os.path.dirname(claude_path) if os.path.exists(claude_path) else ""
-    ccglm_bin = os.path.dirname(_CC_GLM_BIN) if os.path.sep in _CC_GLM_BIN else ""
     ccbrain_bin = os.path.dirname(_CC_BRAIN_BIN) if os.path.sep in _CC_BRAIN_BIN else ""
-    for d in (ccglm_bin, ccbrain_bin, claude_bin, node_bin):
+    for d in (ccbrain_bin, claude_bin, node_bin):
         if d and d not in extra:
             extra.append(d)
     env = _base_cli_env()
@@ -532,8 +495,8 @@ def _normalize_stop_reason(value: object) -> str:
 # deliverable: call_codex (chat) + the HTTP backends (DeepSeek / GLM). One
 # constant across those: DRY single source of truth.
 #
-# ⚠️ DO NOT prepend this to an AGENTIC CLI worker (call_glm_agentic /
-# call_codex_agentic / call_anthropic_agentic). Use AGENTIC_SYSTEM there.
+# ⚠️ DO NOT prepend this to the AGENTIC CLI worker (call_anthropic_agentic).
+# Use AGENTIC_SYSTEM there.
 # Root-caused 2026-07-12: "answer only what was asked; no preamble; terse" is a
 # tool-USE SUPPRESSANT for a weaker Claude-Code-driven worker — GLM read it and
 # emitted "DONE" while the subprocess exited 0 having written NOTHING to disk
@@ -549,8 +512,8 @@ CAVEMAN_SYSTEM = (
     "no restating the question, no meta-commentary. Terse."
 )
 
-# System directive for the AGENTIC CLI workers (call_glm_agentic /
-# call_codex_agentic / call_anthropic_agentic). Root-caused 2026-07-12: the
+# System directive for the AGENTIC CLI worker (call_anthropic_agentic; the
+# non-Claude agentic workers are gone, lean-rig §6). Root-caused 2026-07-12: the
 # chat-shaped CAVEMAN_SYSTEM above ("answer only what was asked; no preamble;
 # terse") makes a weaker Claude-Code-driven worker (cc-glm on GLM, cc-brain on
 # Sonnet/Haiku) SKIP its file/shell tools and just emit a chat reply — the
@@ -694,6 +657,8 @@ async def call_deepseek(
         BackendError: On HTTP error or parse failure (never logs the key).
     """
     url = "https://api.deepseek.com/anthropic/v1/messages"
+    # DeepSeek's Anthropic endpoint ignores `cache_control` and `mcp_servers`
+    # (api-docs.deepseek.com guides/anthropic_api), so the body carries neither.
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -717,7 +682,7 @@ async def call_deepseek(
         payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
 
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=_timeout(HTTP_TIMEOUT_SECONDS)) as client:
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
@@ -784,7 +749,7 @@ async def call_deepseek_via_headroom(
         payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
 
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=_timeout(HTTP_TIMEOUT_SECONDS)) as client:
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
@@ -809,148 +774,6 @@ async def call_deepseek_via_headroom(
         raise BackendError(
             f"DeepSeek headroom response parse error: {e}",
             backend="deepseek",
-            failure_kind="response_error",
-        )
-
-
-# ============================================================================
-# GLM (HTTP, Anthropic-compatible endpoint)
-# ============================================================================
-
-
-async def call_glm(
-    prompt: str,
-    model: str,
-    api_key: str,
-    effort: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Call GLM API directly.
-
-    Returns:
-        {
-            "content": "response text",
-            "usage": {"input_tokens": N, "output_tokens": M}
-        }
-
-    Raises:
-        BackendError: On HTTP error or parse failure (never logs the key).
-    """
-    url = "https://api.z.ai/api/anthropic/v1/messages"
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "max_tokens": 4096,
-        "system": CAVEMAN_SYSTEM,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    if effort:
-        # These endpoints take the Anthropic Messages body, whose reasoning knob is
-        # `thinking.type` (the C06 table names exactly that for GLM), not OpenAI's
-        # reasoning_effort. Levels above "low" enable it; "low" disables it. The
-        # key is constructed only when requested so an effort=None request stays
-        # byte-identical to today's (C06 STOP). NOTE: role delegation is agentic-
-        # only, so this chat path carries no live traffic in the rig; the mapping
-        # follows the spec and is not verified against the provider -- recorded
-        # as such in verification.md rather than claimed.
-        payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
-
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=payload, headers=headers)
-
-            if response.status_code != 200:
-                raise _classify_http_error("GLM", response.status_code, response.text)
-
-            data = response.json()
-
-        content = _extract_text(data, data.get("model", "GLM"))
-        usage = data.get("usage", {})
-
-        return {
-            "content": content,
-            "usage": usage,
-        }
-    except httpx.RequestError as e:
-        raise BackendError(
-            f"GLM request failed: {e}",
-            backend="glm",
-            failure_kind="network_error",
-        )
-    except (KeyError, IndexError, ValueError) as e:
-        raise BackendError(
-            f"GLM response parse error: {e}",
-            backend="glm",
-            failure_kind="response_error",
-        )
-
-
-async def call_glm_via_headroom(
-    prompt: str,
-    model: str,
-    api_key: str,
-    headroom_url: str,
-    effort: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Call GLM through headroom proxy.
-
-    Raises:
-        BackendError: On HTTP error or parse failure (never logs the key).
-    """
-    url = f"{headroom_url}/anthropic/v1/messages"
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "max_tokens": 4096,
-        "system": CAVEMAN_SYSTEM,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    if effort:
-        # These endpoints take the Anthropic Messages body, whose reasoning knob is
-        # `thinking.type` (the C06 table names exactly that for GLM), not OpenAI's
-        # reasoning_effort. Levels above "low" enable it; "low" disables it. The
-        # key is constructed only when requested so an effort=None request stays
-        # byte-identical to today's (C06 STOP). NOTE: role delegation is agentic-
-        # only, so this chat path carries no live traffic in the rig; the mapping
-        # follows the spec and is not verified against the provider -- recorded
-        # as such in verification.md rather than claimed.
-        payload["thinking"] = {"type": "disabled" if effort == "low" else "enabled"}
-
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=payload, headers=headers)
-
-            if response.status_code != 200:
-                raise _classify_http_error("GLM-headroom", response.status_code, response.text)
-
-            data = response.json()
-
-        content = _extract_text(data, data.get("model", "GLM-headroom"))
-        usage = data.get("usage", {})
-
-        return {
-            "content": content,
-            "usage": usage,
-        }
-    except httpx.RequestError as e:
-        raise BackendError(
-            f"GLM headroom request failed: {e}",
-            backend="glm",
-            failure_kind="network_error",
-        )
-    except (KeyError, IndexError, ValueError) as e:
-        raise BackendError(
-            f"GLM headroom response parse error: {e}",
-            backend="glm",
             failure_kind="response_error",
         )
 
@@ -1013,18 +836,15 @@ def call_codex(
     model: str,
     effort: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Call Codex CLI via subprocess: codex exec -m <model> <prompt>.
+    """Call Codex tools-off: `codex exec <lean flags> -C <empty dir> -m <model> -`.
 
-    Args:
-        model: Codex model string (e.g., "gpt-5.6-sol")
-        prompt: The prompt/code to send
+    The prompt goes on stdin (`-` plus `input=`), which also closes stdin: on an
+    open stdin `codex exec` waits for EOF (lean-rig, 2026-11-06). No shell tool,
+    read-only sandbox, an empty temp dir as the workdir, so the answer comes from
+    the prompt alone.
 
     Returns:
-        {
-            "content": "response text",
-            "usage": None (Codex CLI doesn't expose token counts)
-        }
+        {"content": "response text", "usage": None}
 
     Raises:
         BackendError: If model name is invalid or subprocess fails (never logs secrets).
@@ -1033,25 +853,21 @@ def call_codex(
     _validate_model_name(model)
 
     started = time.perf_counter()
+    limit = _timeout(CODEX_TIMEOUT_SECONDS)
     try:
-        result = subprocess.run(
-            # "--" ends option parsing so a prompt starting with "-" can't be
-            # read as a codex flag (live-verified: without it, prompt="-h"
-            # prints CLI help instead of delegating).
-            _codex_exec_base(agentic=False, effort=effort) + ["-m", model, "-"],
-            input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
-            # NOTE: no stdin= here. `input=` already opens a stdin pipe and
-            # closes it, which is exactly what stops the CLI waiting on the
-            # inherited MCP pipe. Passing stdin= as well raises ValueError:
-            # "stdin and input arguments may not both be used" -- which killed
-            # every codex call and shows up as 308 validation_errors in the log.
-            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            capture_output=True,
-            text=True,
-            timeout=CODEX_TIMEOUT_SECONDS,
-            check=False,
-            env=_codex_env(),
-        )
+        with tempfile.TemporaryDirectory(prefix="brain-router-codex-") as workdir:
+            result = subprocess.run(
+                _codex_exec_base(effort=effort) + ["-C", workdir, "-m", model, "-"],
+                # `input=` opens a stdin pipe and closes it. Passing stdin= as
+                # well raises ValueError ("stdin and input arguments may not
+                # both be used") -- 308 validation_errors in the log once.
+                input=f"{CAVEMAN_SYSTEM}\n\n{prompt}",
+                capture_output=True,
+                text=True,
+                timeout=limit,
+                check=False,
+                env=_codex_env(),
+            )
 
         _raise_cli_failure(
             provider="Codex",
@@ -1070,7 +886,7 @@ def call_codex(
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
             "codex",
-            f"Codex subprocess timed out after {CODEX_TIMEOUT_SECONDS}s",
+            f"Codex subprocess timed out after {limit:.0f}s",
             failure_kind="timeout",
             elapsed_ms=elapsed_ms,
         )
@@ -1088,43 +904,80 @@ def call_codex(
 # ============================================================================
 
 
+# lean-rig §6: Grok workers run tools-off, one turn, no subagents, no plan, no web.
+GROK_TOOLS_OFF = ["--max-turns", "1", "--no-subagents", "--no-plan", "--disable-web-search"]
+
+
+def grok_final_message(stdout: str) -> tuple[str, Dict[str, Any]]:
+    """The final message of one tools-off `--output-format json` run, and the payload.
+
+    Grok answers carried narration ("I'll count the lines in DECISIONS.md
+    now.15", live 2026-11-06): the JSON `text` joins every turn's text. In one
+    tools-off turn the narration lands in `thought` and `text` is the answer.
+    A run that stopped on anything but end_turn (narration, then a tool call
+    cut by --max-turns) or spanned turns has no clean final message, so it
+    raises and the role walk moves on: narration never reaches the caller."""
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise BackendError("grok returned invalid JSON", backend="grok",
+                           failure_kind="invalid_output") from exc
+    if not isinstance(payload, dict):
+        raise BackendError("grok returned invalid JSON", backend="grok",
+                           failure_kind="invalid_output")
+    stop = payload.get("stopReason")
+    turns = int(payload.get("num_turns") or 0)
+    if _normalize_stop_reason(stop) != "endturn" or turns > 1:
+        raise BackendError(
+            f"grok ended without a final message (stopReason={stop!r}, num_turns={turns})",
+            backend="grok", failure_kind="no_final_message")
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise BackendError("grok returned an empty final message", backend="grok",
+                           failure_kind="empty_output")
+    return text, payload
+
+
 def call_grok(
     prompt: str,
     model: str,
     effort: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Call Grok CLI via subprocess (chat mode): `grok --prompt-file <f> -m <model>`.
+    """Call Grok tools-off and return only its final message.
 
-    The prompt (CAVEMAN_SYSTEM-prefixed) is written to a private temp file read
-    via `--prompt-file` — NOT passed as `-p <value>`, because grok's clap parser
-    rejects a `-p` value that starts with "-" (live-verified 2026-07-13), which
-    would break on any dash-leading prompt AND is not the injection-safe token an
-    earlier revision assumed. File content is opaque (dashes/--flags/newlines are
-    literal). Model name is validated against argument injection; no secret is
-    echoed. Grok is a native binary so only _grok_env's grok-bin PATH prepend is
-    needed.
+    `grok --prompt-file <f> -m <model> --max-turns 1 --no-subagents --no-plan
+    --disable-web-search --output-format json`, in an empty temp dir, with the
+    lean GROK_HOME. The prompt (CAVEMAN_SYSTEM-prefixed) goes through a private
+    temp file, not `-p <value>`: grok's clap parser rejects a `-p` value that
+    starts with "-" (live-verified 2026-07-13). Model name is validated against
+    argument injection; no secret is echoed.
 
     Returns:
-        {"content": "response text", "usage": None}  (grok CLI exposes no token counts)
+        {"content": final message, "usage": {...} when the CLI reports it}
 
     Raises:
-        BackendError / BackendTransientError on invalid model, non-zero exit, or timeout.
+        BackendError / BackendTransientError on invalid model, non-zero exit,
+        timeout, or no clean final message.
     """
     _validate_model_name(model)
 
     started = time.perf_counter()
+    limit = _timeout(CODEX_TIMEOUT_SECONDS)
     try:
-        with _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
+        with tempfile.TemporaryDirectory(prefix="brain-router-grok-") as workdir, \
+                _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
             result = subprocess.run(
-                [_GROK_BIN, "--prompt-file", pf, "-m", model, "--output-format", "plain"]
+                [_GROK_BIN, "--prompt-file", pf, "-m", model, *GROK_TOOLS_OFF,
+                 "--output-format", "json"]
                 + (["--reasoning-effort", effort] if effort else []),
                 # inherited stdin is the MCP stdio pipe; the CLIs wait on it
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=CODEX_TIMEOUT_SECONDS,
+                timeout=limit,
                 check=False,
-                env=_grok_env(),
+                cwd=workdir,
+                env=_grok_lean_env(),
             )
 
         _raise_cli_failure(
@@ -1134,17 +987,28 @@ def call_grok(
             result=result,
             started=started,
         )
-
-        return {
-            "content": result.stdout.strip(),
-            "usage": None,
-        }
+        try:
+            content, payload = grok_final_message(result.stdout)
+        except BackendError as exc:
+            exc.elapsed_ms = round((time.perf_counter() - started) * 1000)
+            raise
+        raw = payload.get("usage") or {}
+        usage = None
+        if raw or payload.get("total_cost_usd") is not None:
+            usage = {
+                "input_tokens": int(raw.get("input_tokens") or 0),
+                "output_tokens": int(raw.get("output_tokens") or 0),
+                "source": "cli-json",
+            }
+            if isinstance(payload.get("total_cost_usd"), (int, float)):
+                usage["cost_usd"] = float(payload["total_cost_usd"])
+        return {"content": content, "usage": usage}
 
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
             "grok",
-            f"Grok subprocess timed out after {CODEX_TIMEOUT_SECONDS}s",
+            f"Grok subprocess timed out after {limit:.0f}s",
             failure_kind="timeout",
             elapsed_ms=elapsed_ms,
         )
@@ -1167,82 +1031,22 @@ def call_kimi(
     model: str,
     effort: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Call Kimi CLI via subprocess (chat mode): `kimi -p <prompt> --output-format text`.
-
-    The prompt (CAVEMAN_SYSTEM-prefixed) travels as ONE argv token after `-p`.
-    Unlike grok's clap (which rejects a `-p` value starting with "-"), kimi's
-    parser is only at risk from a dash-leading value — and the system directive
-    is ALWAYS prepended, so the token can never start with a dash; no
-    prompt-file indirection is needed. The `model` arg is accepted for
-    signature parity with the other backends but NOT passed to the CLI: kimi
-    runs its configured default model (the router model id is just "kimi").
-    Kimi is a bundled binary so only _kimi_env's kimi-bin PATH prepend is
-    needed. Auth is OAuth (device-code login done on the machine); no API key.
-
-    Returns:
-        {"content": "response text", "usage": None}  (kimi CLI exposes no token counts)
-
-    Raises:
-        BackendError / BackendTransientError on invalid model, non-zero exit, or timeout.
-    """
-    _validate_model_name(model)
-
-    started = time.perf_counter()
-    try:
-        result = subprocess.run(
-            [
-                _KIMI_BIN,
-                "-p",
-                f"{CAVEMAN_SYSTEM}\n\n{prompt}",
-                "--output-format",
-                "text",
-            ],
-            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=CODEX_TIMEOUT_SECONDS,
-            check=False,
-            env=_kimi_env(),
-        )
-
-        _raise_cli_failure(
-            provider="Kimi",
-            backend="kimi",
-            default_msg="Kimi subprocess failed",
-            result=result,
-            started=started,
-        )
-
-        return {
-            "content": result.stdout.strip(),
-            "usage": None,
-        }
-
-    except subprocess.TimeoutExpired:
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        raise BackendTransientError(
-            "kimi",
-            f"Kimi subprocess timed out after {CODEX_TIMEOUT_SECONDS}s",
-            failure_kind="timeout",
-            elapsed_ms=elapsed_ms,
-        )
-    except FileNotFoundError:
-        raise BackendError(
-            "Kimi binary not found on PATH",
-            backend="kimi",
-            failure_kind="configuration_error",
-            elapsed_ms=round((time.perf_counter() - started) * 1000),
-        )
+    """Refuse: non-Claude workers run tools-off (lean-rig §6), and Kimi's `-p`
+    mode auto-approves its own tools (live 2026-07-19) with no verified way to
+    turn them off. Kimi is also not installed on any rig host (2026-11-06), so
+    this is the free skip D5 expects until a tools-off invocation is verified."""
+    raise BackendError(
+        "kimi: no verified tools-off mode; skipped",
+        backend="kimi",
+        failure_kind="tools_unsupported",
+        elapsed_ms=0,
+    )
 
 
 # ============================================================================
-# Agentic worker backends (spec 002) — shell to a per-provider CLI harness in
-# the REAL working directory so the worker reads the spec, writes files, and
-# runs checks itself. Each returns the {content, ...} dict shape the chat
-# backends return; the prompt is passed as an argv token (cc-glm / claude -p)
-# or after a `--` separator (codex), the same secure pattern as call_codex —
-# never echo a secret and never let an untrusted prompt be parsed as a CLI flag.
+# Agentic worker backend (spec 002) — the Claude worker only: `cc-brain claude`
+# in the REAL working directory, tools on. Non-Claude workers run tools-off
+# (lean-rig §6). The prompt is one argv token after -p, never echoed.
 # ============================================================================
 
 
@@ -1292,304 +1096,6 @@ def _cc_family_output(stdout: str) -> tuple[str, Optional[Dict[str, int]]]:
     return content.strip(), usage
 
 
-def call_glm_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
-    """Agentic GLM worker: `cc-glm -p <prompt> --model <model>` in the REAL cwd.
-
-    cc-glm is the rig's headless GLM CLI; it has file + shell tools and writes
-    into the caller's working directory. The resolved model (the tier's glm id,
-    e.g. glm-5.3) is passed via --model so the caller decides which
-    GLM variant runs.
-    """
-    _validate_model_name(model)
-    cwd = _resolve_agentic_cwd(cwd, "glm")
-    started = time.perf_counter()
-    argv = [
-        _CC_GLM_BIN,
-        "-p",
-        f"{AGENTIC_SYSTEM}\n\n{prompt}",
-        "--model",
-        model,
-        "--safe-mode",
-        "--disable-slash-commands",
-        "--no-chrome",
-        "--no-session-persistence",
-        "--tools",
-        "default",
-        "--output-format",
-        "json",
-        "--allowedTools",
-        "Read,Edit,Write,Bash",
-        "--permission-mode",
-        "bypassPermissions",
-    ]
-    if effort:
-        argv += ["--effort", effort]  # cc-glm --help: "Effort level for the current session"
-    try:
-        result = subprocess.run(
-            argv,
-            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=AGENTIC_TIMEOUT_SECONDS,
-            check=False,
-            cwd=cwd,
-            env=_agentic_cli_env(),
-        )
-        _raise_cli_failure(
-            provider="GLM",
-            backend="glm",
-            default_msg="cc-glm agentic subprocess failed",
-            result=result,
-            started=started,
-        )
-        _content, _usage = _cc_family_output(result.stdout)
-        return {"content": _content, "usage": _usage}
-    except subprocess.TimeoutExpired:
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        raise BackendTransientError(
-            "glm",
-            f"cc-glm agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
-            failure_kind="timeout",
-            elapsed_ms=elapsed_ms,
-        )
-    except FileNotFoundError:
-        raise BackendError(
-            "cc-glm binary not found on PATH",
-            backend="glm",
-            failure_kind="configuration_error",
-            elapsed_ms=round((time.perf_counter() - started) * 1000),
-        )
-
-
-def call_grok_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
-    """Agentic Grok worker: `grok --prompt-file <f> -m <model>` in the REAL cwd.
-
-    Lean profile (Codex-parity): isolated GROK_HOME (no user MCP/skills/hooks),
-    GROK_MEMORY=0, --no-plan --no-subagents --disable-web-search, full
-    bypassPermissions. No `--max-turns 10` — that cancelled real workers
-    (live 2026-08-25: 114 `process_error` with turn_ended max_turns_reached).
-    No `--tools Bash,Read,Write,Edit` — those are Claude Code IDs; grok's
-    shell tool is `run_terminal_cmd` (docs). Default built-ins + lean home is
-    the allowlist. JSON stopReason is snake_case `end_turn`, not `EndTurn`.
-    Prompt still goes via `--prompt-file` (clap rejects `-p` values starting
-    with "-"). AGENTIC_SYSTEM, not CAVEMAN_SYSTEM — file write is the
-    deliverable (root-caused 2026-07-12 for GLM)."""
-    _validate_model_name(model)
-    cwd = _resolve_agentic_cwd(cwd, "grok")
-    started = time.perf_counter()
-    try:
-        with _grok_prompt_file(f"{AGENTIC_SYSTEM}\n\n{prompt}") as pf:
-            result = subprocess.run(
-                [
-                    _GROK_BIN,
-                    "--prompt-file",
-                    pf,
-                    "-m",
-                    model,
-                    "--cwd",
-                    cwd,
-                    "--permission-mode",
-                    "bypassPermissions",
-                    "--always-approve",
-                    "--no-plan",
-                    "--no-subagents",
-                    "--disable-web-search",
-                    "--output-format",
-                    "json",
-                ]
-                + (["--reasoning-effort", effort] if effort else []),  # grok --help: alias --effort
-                # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=AGENTIC_TIMEOUT_SECONDS,
-                check=False,
-                cwd=cwd,
-                env=_grok_agentic_env(),
-            )
-        _raise_cli_failure(
-            provider="Grok",
-            backend="grok",
-            default_msg="grok agentic subprocess failed",
-            result=result,
-            started=started,
-        )
-        try:
-            payload = json.loads(result.stdout)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise BackendError(
-                "grok agentic returned invalid JSON",
-                backend="grok",
-                failure_kind="invalid_output",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            ) from exc
-        content = str(payload.get("text", "")).strip()
-        stop_reason = payload.get("stopReason")
-        num_turns = int(payload.get("num_turns") or 0)
-        # Live grok CLI 1.0.5 emits snake_case `end_turn`. Treating only
-        # `EndTurn` as success classified real file-writes as no_tool_effect.
-        if (
-            _normalize_stop_reason(stop_reason) != "endturn"
-            or not content
-            or num_turns < 2
-        ):
-            raise BackendError(
-                "grok agentic completed without confirmed tool execution"
-                f" (stopReason={stop_reason!r}, num_turns={num_turns})",
-                backend="grok",
-                failure_kind="no_tool_effect",
-                elapsed_ms=round((time.perf_counter() - started) * 1000),
-            )
-        raw_usage = payload.get("usage") or {}
-        usage = {
-            "input_tokens": raw_usage.get("input_tokens", 0),
-            "output_tokens": raw_usage.get("output_tokens", 0),
-        }
-        return {"content": content, "usage": usage}
-    except subprocess.TimeoutExpired:
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        raise BackendTransientError(
-            "grok",
-            f"grok agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
-            failure_kind="timeout",
-            elapsed_ms=elapsed_ms,
-        )
-    except FileNotFoundError:
-        raise BackendError(
-            "grok binary not found on PATH",
-            backend="grok",
-            failure_kind="configuration_error",
-            elapsed_ms=round((time.perf_counter() - started) * 1000),
-        )
-
-
-def call_kimi_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
-    """Agentic Kimi worker: `kimi -p <prompt> --output-format text` in the
-    REAL cwd.
-
-    Kimi's prompt mode already runs non-interactively and auto-approves its
-    tool calls — live-verified 2026-07-19: a `-p` file-write task wrote the
-    file in the subprocess cwd and exited 0 with no approval flag. `--auto` /
-    `--yolo` are interactive-session flags and are REJECTED when combined with
-    `-p` ("Cannot combine --prompt with --auto"), so none is passed; `cwd=`
-    roots the subprocess in the caller's repo. The prompt (AGENTIC_SYSTEM-
-    prefixed — the file write is the deliverable, and the chat-terse directive
-    suppresses tool use in weaker workers, root-caused 2026-07-12 for GLM)
-    travels as ONE argv token after `-p`; the directive guarantees the token
-    never starts with a dash. `model` is accepted for signature parity but NOT
-    passed: kimi runs its configured default model. Kimi is a bundled binary,
-    so only _kimi_env's kimi-bin PATH prepend is needed. Auth is OAuth; no API
-    key."""
-    _validate_model_name(model)
-    cwd = _resolve_agentic_cwd(cwd, "kimi")
-    started = time.perf_counter()
-    try:
-        result = subprocess.run(
-            [
-                _KIMI_BIN,
-                "-p",
-                f"{AGENTIC_SYSTEM}\n\n{prompt}",
-                # NOT "json". Kimi's CLI accepts only text and stream-json, and
-                # rejects json with exit 1 in ~450ms. C16 switched this to json to
-                # harvest the usage envelope the Claude-family CLIs emit; kimi has no
-                # such envelope, so every agentic kimi call has failed since. Kimi is
-                # first candidate for worker AND simple, so the fail-open cascade sent
-                # the whole rig to glm without anything appearing to break.
-                "--output-format",
-                "text",
-            ],
-            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=AGENTIC_TIMEOUT_SECONDS,
-            check=False,
-            cwd=cwd,
-            env=_kimi_env(),
-        )
-        _raise_cli_failure(
-            provider="Kimi",
-            backend="kimi",
-            default_msg="kimi agentic subprocess failed",
-            result=result,
-            started=started,
-        )
-        _content, _usage = _cc_family_output(result.stdout)
-        return {"content": _content, "usage": _usage}
-    except subprocess.TimeoutExpired:
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        raise BackendTransientError(
-            "kimi",
-            f"kimi agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
-            failure_kind="timeout",
-            elapsed_ms=elapsed_ms,
-        )
-    except FileNotFoundError:
-        raise BackendError(
-            "kimi binary not found on PATH",
-            backend="kimi",
-            failure_kind="configuration_error",
-            elapsed_ms=round((time.perf_counter() - started) * 1000),
-        )
-
-
-def call_codex_agentic(prompt: str, model: str, cwd: Optional[str] = None, effort: Optional[str] = None) -> Dict[str, Any]:
-    """Agentic Codex worker: `codex exec` in the REAL cwd (NOT /private/tmp).
-
-    Reuses CODEX_EXEC_BASE_AGENTIC — the lean worker flags (no MCPs, low
-    reasoning, no plugins/hooks/memories/apps/multi_agent) EXCEPT the
-    sandbox-cwd flag (`-C /private/tmp`) and `--ignore-rules` are dropped so
-    the worker can edit the repo (spec 002 SC-6).
-    """
-    _validate_model_name(model)
-    cwd = _resolve_agentic_cwd(cwd, "codex")
-    started = time.perf_counter()
-    try:
-        result = subprocess.run(
-            # "--" ends option parsing so a prompt starting with "-" can't be
-            # read as a codex flag (same protection as call_codex).
-            _codex_exec_base(agentic=True, effort=effort) + ["-m", model, "-"],
-            input=f"{AGENTIC_SYSTEM}\n\n{prompt}",
-            # NOTE: no stdin= here. `input=` already opens a stdin pipe and
-            # closes it, which is exactly what stops the CLI waiting on the
-            # inherited MCP pipe. Passing stdin= as well raises ValueError:
-            # "stdin and input arguments may not both be used" -- which killed
-            # every codex call and shows up as 308 validation_errors in the log.
-            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            capture_output=True,
-            text=True,
-            timeout=AGENTIC_TIMEOUT_SECONDS,
-            check=False,
-            cwd=cwd,
-            env=_codex_env(),
-        )
-        _raise_cli_failure(
-            provider="Codex",
-            backend="codex",
-            default_msg="Codex agentic subprocess failed",
-            result=result,
-            started=started,
-        )
-        _content, _usage = _cc_family_output(result.stdout)
-        return {"content": _content, "usage": _usage}
-    except subprocess.TimeoutExpired:
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        raise BackendTransientError(
-            "codex",
-            f"Codex agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
-            failure_kind="timeout",
-            elapsed_ms=elapsed_ms,
-        )
-    except FileNotFoundError:
-        raise BackendError(
-            "Codex binary not found on PATH",
-            backend="codex",
-            failure_kind="configuration_error",
-            elapsed_ms=round((time.perf_counter() - started) * 1000),
-        )
-
-
 def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Anthropic (Opus/Sonnet/Haiku) worker: `cc-brain claude -p` in
     the REAL cwd. This is the agentic-CLI fallback for: the codex-orchestrator
@@ -1619,6 +1125,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         "--permission-mode",
         "bypassPermissions",
     ]
+    limit = _timeout(AGENTIC_TIMEOUT_SECONDS)
     try:
         result = subprocess.run(
             argv,
@@ -1626,7 +1133,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=AGENTIC_TIMEOUT_SECONDS,
+            timeout=limit,
             check=False,
             cwd=cwd,
             env=_agentic_cli_env(),
@@ -1644,7 +1151,7 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
             "anthropic-cli",
-            f"cc-brain claude agentic subprocess timed out after {AGENTIC_TIMEOUT_SECONDS}s",
+            f"cc-brain claude agentic subprocess timed out after {limit:.0f}s",
             failure_kind="timeout",
             elapsed_ms=elapsed_ms,
         )
@@ -1723,10 +1230,10 @@ def call_fm(prompt: str, host: str) -> Dict[str, Any]:
     try:
         result = subprocess.run(
             argv, input=prompt, capture_output=True, text=True,
-            timeout=FM_TIMEOUT_SECONDS, check=False, env=_base_cli_env(),
+            timeout=_timeout(FM_TIMEOUT_SECONDS), check=False, env=_base_cli_env(),
         )
     except subprocess.TimeoutExpired:
-        raise fail(f"timed out after {FM_TIMEOUT_SECONDS}s", "timeout")
+        raise fail("timed out", "timeout")
     out = (result.stdout or "").strip()
     if result.returncode != 0:
         err = _cli_snippet(result.stderr)
@@ -1742,3 +1249,112 @@ def call_fm(prompt: str, host: str) -> Dict[str, Any]:
     if FM_NEEDS_TOOLS in out and len(out) < 120:  # also "NEEDS_TOOLS — I can't read files."
         raise fail("model replied NEEDS_TOOLS", "needs_tools")
     return {"content": out, "usage": None}
+
+
+# ============================================================================
+# Ollama (gpt-oss:20b on the host's own Ollama, `simple` only)
+# ============================================================================
+
+# lean-rig §6 and MEASURE-gptoss.md: CPU-only at ~8.5 tok/s generation and a
+# 110 s cold load. So: run only when /api/ps shows the model loaded (cold means
+# the next tier, no wait); one generation at a time across this host's router
+# processes (flock, 5 s wait); 60 s deadline; short classify-sized input.
+OLLAMA_TIMEOUT_SECONDS = 60
+OLLAMA_LOCK_WAIT_SECONDS = 5
+OLLAMA_PS_TIMEOUT_SECONDS = 5
+OLLAMA_MAX_PROMPT_CHARS = 4000
+OLLAMA_LOCK = os.path.expanduser("~/.local/state/brain-router-gpt-oss.lock")
+
+
+async def _ollama_lock(path: str, wait: float) -> Optional[int]:
+    """An exclusive flock on `path`, polled until `wait` seconds pass. The fd,
+    or None when another generation still holds it."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    give_up = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= give_up:
+                os.close(fd)
+                return None
+            await asyncio.sleep(0.1)
+
+
+async def call_ollama(prompt: str, host: str, model: str) -> Dict[str, Any]:
+    """Bounded text inference on the approved private endpoint. Auth: tailnet ACLs."""
+    started = time.perf_counter()
+
+    def fail(message: str, kind: str) -> BackendError:
+        return BackendError(message, backend="ollama", failure_kind=kind,
+                            elapsed_ms=round((time.perf_counter() - started) * 1000))
+
+    try:
+        url = urlsplit(host or "")
+        address = ipaddress.ip_address(url.hostname or "")
+        valid = (url.scheme == "http" and not url.username and not url.password
+                 and url.path in ("", "/") and not url.query and not url.fragment
+                 and (address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")))
+        url.port  # malformed port fails before the request
+    except ValueError:
+        valid = False
+    if not valid:
+        raise fail("Ollama endpoint must be loopback or tailnet HTTP", "configuration_error")
+    # CPU prefill at ~22 tokens/s exceeded 180s for a 16k-char input in live tests.
+    if len(prompt) > OLLAMA_MAX_PROMPT_CHARS:
+        raise fail("Ollama input exceeds the text tier limit", "input_too_large")
+    if _FM_TOOL_SHAPED.search(prompt):
+        raise fail("Text-only Ollama task needs tools", "needs_tools")
+    base = host.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=_timeout(OLLAMA_PS_TIMEOUT_SECONDS),
+                                     trust_env=False) as client:
+            response = await client.get(base + "/api/ps")
+            response.raise_for_status()
+            loaded = response.json().get("models") or []
+    except httpx.HTTPError:
+        raise fail("Ollama endpoint unavailable", "unreachable") from None
+    except (ValueError, AttributeError):
+        raise fail("Invalid Ollama /api/ps response", "response_error") from None
+    names = {m.get(k) for m in loaded if isinstance(m, dict) for k in ("name", "model")}
+    if model not in names:
+        raise fail(f"{model} is cold (not in /api/ps); next tier, no wait", "cold")
+    fd = await _ollama_lock(OLLAMA_LOCK, OLLAMA_LOCK_WAIT_SECONDS)
+    if fd is None:
+        raise fail(f"{model} is busy: one generation at a time, lock not free in "
+                   f"{OLLAMA_LOCK_WAIT_SECONDS}s", "busy")
+    try:
+        async with httpx.AsyncClient(timeout=_timeout(OLLAMA_TIMEOUT_SECONDS),
+                                     trust_env=False) as client:
+            response = await client.post(base + "/api/generate", json={
+                "model": model, "prompt": prompt, "system": FM_SYSTEM, "stream": False,
+                "options": {"num_predict": 512, "num_ctx": 8192, "num_thread": 2},
+                # Default GPT-OSS reasoning consumed the entire bounded output in live tests.
+                **({"think": "low"} if model.startswith("gpt-oss:") else {}),
+            })
+            response.raise_for_status()
+            data = response.json()
+    except httpx.TimeoutException:
+        raise fail("Ollama inference timed out", "timeout") from None
+    except httpx.HTTPError:
+        raise fail("Ollama endpoint unavailable", "unreachable") from None
+    except ValueError:
+        raise fail("Invalid Ollama JSON response", "response_error") from None
+    finally:
+        os.close(fd)  # releases the flock
+    if not isinstance(data, dict) or data.get("done") is not True or data.get("done_reason") == "length":
+        raise fail("Ollama did not complete the response", "response_error")
+    count = data.get("eval_count", 0)
+    if data.get("done_reason") != "stop" and isinstance(count, int) and count >= 512:
+        raise fail("Ollama hit the output limit without confirming completion", "response_error")
+    output = data.get("response")
+    if not isinstance(output, str) or not output.strip():
+        raise fail("Empty or invalid Ollama output", "empty_output")
+    if FM_NEEDS_TOOLS in output and len(output) < 120:
+        raise fail("Text-only Ollama task needs tools", "needs_tools")
+    return {"content": output.strip(), "usage": {
+        "input_tokens": data.get("prompt_eval_count", 0),
+        "output_tokens": data.get("eval_count", 0), "source": "ollama",
+    }}
