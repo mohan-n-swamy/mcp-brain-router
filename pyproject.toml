@@ -26,7 +26,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=0.1.0",
+    # FastMCP arrived in 1.2; mcp 2.x renamed it (server.py needs the 1.x API).
+    "mcp>=1.2,<2",
     "httpx>=0.24.0",
     "tomli>=2.0.0; python_version<'3.11'",
 ]
