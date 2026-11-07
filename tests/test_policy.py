@@ -46,6 +46,12 @@ GROK_JOINED = {"stopReason": "end_turn", "num_turns": 2,
                "text": "I'll count the lines in DECISIONS.md now.15"}
 
 
+@pytest.fixture(autouse=True)
+def _gpt_oss_lock_in_tmp(tmp_path, monkeypatch):
+    """A warm gpt-oss call takes the generation lock; never the live one."""
+    monkeypatch.setattr(backends, "OLLAMA_LOCK", str(tmp_path / "gpt-oss.lock"))
+
+
 def _cfg(**kw) -> Config:
     base = dict(deepseek_key="ds", codex_enabled=True, grok_enabled=True, kimi_enabled=True,
                 fm_host="fm-host", ollama_host="http://127.0.0.1:11435",
@@ -313,10 +319,9 @@ async def test_gpt_oss_warm_answers():
     assert out["content"] == "label_b"
 
 
-async def test_gpt_oss_lock_second_caller_skips_after_5s(tmp_path, monkeypatch):
+async def test_gpt_oss_lock_second_caller_skips_after_5s():
     assert backends.OLLAMA_LOCK_WAIT_SECONDS == 5 and backends.OLLAMA_TIMEOUT_SECONDS == 60
-    lock = tmp_path / "gpt-oss.lock"
-    monkeypatch.setattr(backends, "OLLAMA_LOCK", str(lock))
+    lock = backends.OLLAMA_LOCK  # the autouse fixture's tmp path
     paths = []
 
     def handler(request):
