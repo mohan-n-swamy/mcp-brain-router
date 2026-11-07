@@ -100,6 +100,21 @@ def test_host_roles_table_cannot_reorder(tmp_path, monkeypatch):
     assert config_mod.Config.load().roles["worker"] == DEFAULT_ROLES["worker"]
 
 
+def test_host_deck_mode_and_stale_codex_override_are_ignored(tmp_path, monkeypatch):
+    """An older host config: deck routing and an adversarial override the
+    ChatGPT login refuses. Neither may displace the D5 walk or gpt-6.1-sol."""
+    from mcp_brain_router import config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.toml")
+    (tmp_path / "config.toml").write_text(
+        'routing_mode = "deck"\n[model_overrides]\nadversarial = "gpt-6-astra"\n')
+    (tmp_path / "config.toml").chmod(0o600)
+    cfg = config_mod.Config.load()
+    assert cfg.routing_mode == "legacy"
+    assert router._resolve_backend_and_model(router.Complexity.ADVERSARIAL, None, cfg) == (
+        "codex", "gpt-6.1-sol")
+
+
 def test_codex_default_model_is_sol():
     assert router._get_backend_default_model("codex", _cfg()) == "gpt-6.1-sol"
 

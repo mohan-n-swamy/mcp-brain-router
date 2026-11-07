@@ -76,6 +76,10 @@ DEFAULT_ROLES: Dict[str, List[str]] = {
     "thinker": ["grok-4.5", "claude-fable-5", "gpt-6.1-sol"],
 }
 
+# The Codex models a host [model_overrides] adversarial entry may name: the
+# ChatGPT login refuses the rest (D5, tested 2026-11-06).
+CODEX_MODELS = ("gpt-6.1-sol",)
+
 
 def ensure_config_dir() -> Path:
     """Create config directory with secure permissions if needed."""
@@ -149,11 +153,21 @@ class Config:
         except Exception as e:
             raise ConfigError(f"Failed to parse config: {e}")
 
+        log = logging.getLogger(__name__)
         if data.get("roles"):
             # D5 orders live in the repo (DEFAULT_ROLES). A host table would
             # hide them from the retired-ID scan, so it no longer routes.
-            logging.getLogger(__name__).warning(
-                "config.toml [roles] ignored: role orders come from the router repo")
+            log.warning("config.toml [roles] ignored: role orders come from the router repo")
+        if data.get("routing_mode") not in (None, "legacy"):
+            # Deck mode picks cards from a state file outside the repo, the
+            # same hole as a host [roles] table, so the D5 walk is the only one.
+            log.warning("config.toml routing_mode=%r ignored: the D5 role orders route",
+                        data.get("routing_mode"))
+        overrides = dict(data.get("model_overrides") or {})
+        if overrides.get("adversarial") not in (None, *CODEX_MODELS):
+            # An older install wrote the model the ChatGPT login now refuses.
+            log.warning("config.toml adversarial override %r ignored: Codex runs %s",
+                        overrides.pop("adversarial"), CODEX_MODELS[0])
         compute = compute_settings()
         return cls(
             deepseek_key=data.get("deepseek_key"),
@@ -166,13 +180,13 @@ class Config:
             decide_backends=data.get("decide_backends"),
             headroom_base_url=data.get("headroom_base_url"),
             ollama_host=compute.get("MOHAN_OLLAMA_HOST"),
-            model_overrides=data.get("model_overrides"),
+            model_overrides=overrides or None,
             roles={role: list(order) for role, order in DEFAULT_ROLES.items()},
             default_class=data.get("default_class"),
             # Role delegation is agentic-only. Older config files may still
             # contain chat overrides; normalize them during the shard migration.
             role_modes=DEFAULT_ROLE_MODES.copy(),
-            routing_mode=str(data.get("routing_mode") or "legacy"),
+            routing_mode="legacy",
             role_bands=DEFAULT_ROLE_BANDS | (data.get("role_bands") or {}),
             daily_call_cap=data.get("daily_call_cap") or None,
             deck_min_ranked=int(data.get("deck_min_ranked") or 3),

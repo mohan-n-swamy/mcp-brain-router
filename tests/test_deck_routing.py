@@ -209,15 +209,18 @@ def test_routing_hole_never_hands_work_to_the_gated_provider(tmp_path, monkeypat
     assert any("routing hole" in r.message for r in caplog.records)
 
 
-def test_config_save_round_trips_routing_mode_and_role_bands(tmp_path, monkeypatch):
+def test_config_save_round_trips_role_bands_and_load_keeps_legacy(tmp_path, monkeypatch):
+    # lean-rig router-pins: D5 role orders live in the repo, so a host's
+    # routing_mode=deck is saved as written but loads as legacy.
     from mcp_brain_router import config as cfgmod
     monkeypatch.setattr(cfgmod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfgmod, "CONFIG_FILE", tmp_path / "config.toml")
     c = _cfg("deck"); c.role_bands = {"worker": "B2"}
     c.save()
     (tmp_path / "config.toml").chmod(0o600)
+    assert 'routing_mode = "deck"' in (tmp_path / "config.toml").read_text()
     back = Config.load()
-    assert back.routing_mode == "deck"
+    assert back.routing_mode == "legacy"
     assert back.role_bands["worker"] == "B2"
 
 
