@@ -1289,6 +1289,7 @@ def call_fm(prompt: str, host: str) -> Dict[str, Any]:
 OLLAMA_TIMEOUT_SECONDS = 60
 OLLAMA_LOCK_WAIT_SECONDS = 5
 OLLAMA_PS_TIMEOUT_SECONDS = 5
+OLLAMA_GENERATE_PORT = 11435
 OLLAMA_MAX_PROMPT_CHARS = 4000
 OLLAMA_LOCK = os.path.expanduser("~/.local/state/brain-router-gpt-oss.lock")
 
@@ -1324,11 +1325,13 @@ async def call_ollama(prompt: str, host: str, model: str) -> Dict[str, Any]:
         valid = (url.scheme == "http" and not url.username and not url.password
                  and url.path in ("", "/") and not url.query and not url.fragment
                  and (address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")))
-        url.port  # malformed port fails before the request
+        # I17: gpt-oss serves on :11435 only; :11434 is the bge-m3 embedder.
+        valid = valid and url.port == OLLAMA_GENERATE_PORT  # a malformed port raises
     except ValueError:
         valid = False
     if not valid:
-        raise fail("Ollama endpoint must be loopback or tailnet HTTP", "configuration_error")
+        raise fail(f"Ollama endpoint must be loopback or tailnet HTTP on "
+                   f":{OLLAMA_GENERATE_PORT}", "configuration_error")
     # CPU prefill at ~22 tokens/s exceeded 180s for a 16k-char input in live tests.
     if len(prompt) > OLLAMA_MAX_PROMPT_CHARS:
         raise fail("Ollama input exceeds the text tier limit", "input_too_large")

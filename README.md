@@ -198,7 +198,8 @@ adversarial = "gpt-6.1-sol"
 
 Role orders are not configured here; they live in `config.DEFAULT_ROLES`.
 gpt-oss reads its endpoint from `MOHAN_OLLAMA_HOST` (env, or
-`~/.config/mohan/compute.env`).
+`~/.config/mohan/compute.env`); it must be port `:11435`, never the
+embedder's `:11434` (lean-rig I17).
 
 ### Codex model
 

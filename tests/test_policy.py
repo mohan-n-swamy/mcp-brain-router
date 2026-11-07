@@ -382,6 +382,16 @@ async def test_gpt_oss_trickled_body_stops_at_the_deadline():
     assert time.monotonic() - started < 2
 
 
+@pytest.mark.parametrize("host", ["http://127.0.0.1:11434", "http://127.0.0.1"])
+async def test_gpt_oss_generates_on_11435_only(host):
+    """I17: :11434 is the embedder. Refused before any request."""
+    def handler(request):
+        raise AssertionError(f"no request may leave: {request.url}")
+    with _ollama(handler), pytest.raises(BackendError) as err:
+        await backends.call_ollama("Classify: x", host, "gpt-oss:20b")
+    assert err.value.failure_kind == "configuration_error"
+
+
 def test_gpt_oss_serves_simple_only():
     cfg = _cfg(roles={"worker": ["gpt-oss:20b", "claude-sonnet-5"]})
     assignment = router.resolve_role(router.Role.WORKER, "claude", cfg, mode="agentic")
