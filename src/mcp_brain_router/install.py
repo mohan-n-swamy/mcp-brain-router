@@ -7,7 +7,7 @@ Entry point: main()
 
 Flow:
 1. Banner + purpose
-2. Prompt for GLM (z.ai) and DeepSeek API keys (required, using getpass)
+2. Prompt for the DeepSeek API key (required, using getpass)
 3. Detect Codex on PATH; optionally enable + configure
 4. Detect headroom proxy (env var or localhost); optional configuration
 5. Write ~/.config/mcp-brain-router/config.toml with chmod 0600 (idempotent)
@@ -53,7 +53,7 @@ def print_banner():
     print(f"{Color.BOLD}{Color.BLUE}╚════════════════════════════════════════════════════════════╝{Color.RESET}")
     print()
     print("This installer will:")
-    print("  1. Collect API keys for GLM (z.ai) and DeepSeek")
+    print("  1. Collect the DeepSeek API key")
     print("  2. Optionally enable Codex adversarial backend")
     print("  3. Configure headroom proxy (if available)")
     print("  4. Store secrets in ~/.config/mcp-brain-router/config.toml (mode 0600)")
@@ -67,7 +67,7 @@ def prompt_for_key(label: str, required: bool = True) -> Optional[str]:
     Prompt for an API key using getpass (hidden input).
 
     Args:
-        label: Descriptive label for the key (e.g., "GLM (z.ai) API Key")
+        label: Descriptive label for the key (e.g., "DeepSeek API Key")
         required: If True, re-prompt until a non-empty value is provided
 
     Returns:
@@ -104,7 +104,7 @@ def ask_enable_codex() -> bool:
 
     try:
         response = input(
-            f"{Color.YELLOW}Enable Codex adversarial backend (gpt-5.5 default; GPT-5.6 candidates require eval)? [y/N]: {Color.RESET}"
+            f"{Color.YELLOW}Enable Codex adversarial backend (gpt-6.1-sol default)? [y/N]: {Color.RESET}"
         ).strip().lower()
     except (KeyboardInterrupt, EOFError):
         print("\n" + Color.RED + "Installation cancelled." + Color.RESET)
@@ -114,16 +114,16 @@ def ask_enable_codex() -> bool:
 
 
 def prompt_codex_model() -> str:
-    """Prompt for Codex model name (default: gpt-5.5)."""
+    """Prompt for Codex model name (default: gpt-6.1-sol, the one the ChatGPT login takes)."""
     try:
         model = input(
-            f"{Color.YELLOW}Codex model name [gpt-5.5]: {Color.RESET}"
+            f"{Color.YELLOW}Codex model name [gpt-6.1-sol]: {Color.RESET}"
         ).strip()
     except (KeyboardInterrupt, EOFError):
         print("\n" + Color.RED + "Installation cancelled." + Color.RESET)
         sys.exit(1)
 
-    return model or "gpt-5.5"
+    return model or "gpt-6.1-sol"
 
 
 def detect_headroom_proxy() -> Optional[str]:
@@ -201,7 +201,6 @@ def ask_headroom_config() -> Optional[str]:
 
 
 def write_config(
-    glm_key: str,
     deepseek_key: str,
     codex_enabled: bool,
     codex_model: Optional[str],
@@ -233,7 +232,6 @@ def write_config(
 
     config = Config(
         deepseek_key=deepseek_key,
-        glm_key=glm_key,
         codex_enabled=codex_enabled,
         grok_enabled=(
             existing.grok_enabled
@@ -242,7 +240,9 @@ def write_config(
         ),
         headroom_base_url=headroom_url,
         model_overrides=model_overrides,
-        roles=existing.roles if existing is not None else DEFAULT_ROLES.copy(),
+        # Role orders live in the repo (DEFAULT_ROLES); the host keeps its class.
+        roles=DEFAULT_ROLES.copy(),
+        default_class=existing.default_class if existing is not None else None,
         role_modes=DEFAULT_ROLE_MODES.copy(),
     )
 
@@ -359,7 +359,6 @@ def register_in_supported_clients() -> bool:
 
 
 def run_smoke_test(
-    glm_key: str,
     deepseek_key: str,
     codex_enabled: bool,
     codex_model: Optional[str],
@@ -378,60 +377,14 @@ def run_smoke_test(
 
     print(f"\n{Color.BOLD}Running smoke tests...{Color.RESET}")
 
-    # Test GLM (z.ai)
-    results["GLM (z.ai)"] = _test_backend_glm(glm_key, headroom_url)
-
     # Test DeepSeek
     results["DeepSeek"] = _test_backend_deepseek(deepseek_key, headroom_url)
 
     # Test Codex (if enabled)
     if codex_enabled:
-        results["Codex"] = _test_backend_codex(codex_model or "gpt-5.5")
+        results["Codex"] = _test_backend_codex(codex_model or "gpt-6.1-sol")
 
     return results
-
-
-def _test_backend_glm(api_key: str, headroom_url: Optional[str]) -> bool:
-    """Test GLM (z.ai) backend connectivity."""
-    try:
-        import httpx
-    except ImportError:
-        print(f"  {Color.YELLOW}⊘{Color.RESET} GLM: httpx not available")
-        return False
-
-    try:
-        start = time.time()
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-
-        # Use headroom proxy if configured
-        if headroom_url:
-            url = f"{headroom_url}/anthropic/v1/messages"
-        else:
-            url = "https://api.z.ai/api/anthropic/v1/messages"
-
-        payload = {
-            "model": "glm-5.3",
-            "max_tokens": 10,
-            "messages": [{"role": "user", "content": "OK"}],
-        }
-
-        with httpx.Client(timeout=10) as client:
-            response = client.post(url, json=payload, headers=headers)
-
-        elapsed = time.time() - start
-        if response.status_code in (200, 400):  # 400 = malformed, but endpoint is reachable
-            print(f"  {Color.GREEN}✓{Color.RESET} GLM (z.ai): {elapsed:.2f}s")
-            return True
-        else:
-            print(f"  {Color.RED}✗{Color.RESET} GLM (z.ai): HTTP {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"  {Color.RED}✗{Color.RESET} GLM (z.ai): {type(e).__name__}")
-        return False
 
 
 def _test_backend_deepseek(api_key: str, headroom_url: Optional[str]) -> bool:
@@ -457,7 +410,7 @@ def _test_backend_deepseek(api_key: str, headroom_url: Optional[str]) -> bool:
             url = "https://api.deepseek.com/anthropic/v1/messages"
 
         payload = {
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "max_tokens": 10,
             "messages": [{"role": "user", "content": "OK"}],
         }
@@ -477,13 +430,17 @@ def _test_backend_deepseek(api_key: str, headroom_url: Optional[str]) -> bool:
         return False
 
 
-def _test_backend_codex(model: str = "gpt-5.5") -> bool:
+def _test_backend_codex(model: str = "gpt-6.1-sol") -> bool:
     """Test Codex CLI availability."""
     try:
         start = time.time()
+        import tempfile
+
         from .backends import CODEX_EXEC_BASE
         result = subprocess.run(
-            CODEX_EXEC_BASE + ["-m", model, "--", "reply: OK"],
+            CODEX_EXEC_BASE + ["-C", tempfile.gettempdir(), "-m", model, "--", "reply: OK"],
+            # On an open stdin `codex exec` waits for EOF (lean-rig, 2026-11-06).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             # codex answers in ~20-30s even with MCP boot skipped; 10s was
@@ -545,8 +502,7 @@ def main():
         print_banner()
 
         # Prompt for required keys
-        print(f"{Color.BOLD}Step 1: API Keys (required){Color.RESET}")
-        glm_key = prompt_for_key("GLM (z.ai) API Key", required=True)
+        print(f"{Color.BOLD}Step 1: API Key (required){Color.RESET}")
         deepseek_key = prompt_for_key("DeepSeek API Key", required=True)
 
         # Optional: Codex
@@ -567,7 +523,6 @@ def main():
         # Write config
         print(f"\n{Color.BOLD}Step 4: Writing Configuration{Color.RESET}")
         config_file = write_config(
-            glm_key=glm_key,
             deepseek_key=deepseek_key,
             codex_enabled=codex_enabled,
             codex_model=codex_model,
@@ -581,7 +536,6 @@ def main():
         # Smoke test
         print(f"\n{Color.BOLD}Step 6: Smoke Tests{Color.RESET}")
         smoke_results = run_smoke_test(
-            glm_key=glm_key,
             deepseek_key=deepseek_key,
             codex_enabled=codex_enabled,
             codex_model=codex_model,

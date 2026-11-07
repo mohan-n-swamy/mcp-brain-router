@@ -25,7 +25,7 @@ JEV_OK = {"model": "jev-1.13.0", "answers": {
               "probabilities": {"timeout": 0.95, "syntax": 0.03, "network": 0.02}},
     "urgent": {"type": "noul", "noul": 0.7}}, "usage": {"input_tokens": 50, "output_tokens": 3}}
 LAYA_KEY, JEV_KEY = "LAYA-SECRET-333", "JEV-SECRET-444"
-LAYA_URL = "http://100.100.10.20:8090/v1/systemone"
+LAYA_URL = "http://100.64.0.1:8090/v1/systemone"
 
 
 @pytest.fixture(autouse=True)
@@ -89,9 +89,9 @@ async def test_jev_provider_still_rejects_non_jev_model(monkeypatch):
 
 @pytest.mark.parametrize("url,ok", [
     ("https://api.typesafe.ai/v1/systemone", True), ("http://127.0.0.1:8090/v1/systemone", True),
-    ("http://localhost:8090/v1/systemone", True), ("http://100.100.10.20:8090/v1/systemone", True),
-    ("http://100.100.10.30:8090/v1/systemone", True), ("http://192.168.1.20:8090/v1/systemone", False),
-    ("http://example.com/v1/systemone", False), ("ftp://100.100.10.20/x", False), ("not a url", False)])
+    ("http://localhost:8090/v1/systemone", True), ("http://100.64.0.1:8090/v1/systemone", True),
+    ("http://100.64.0.1:8090/v1/systemone", True), ("http://192.168.1.20:8090/v1/systemone", False),
+    ("http://example.com/v1/systemone", False), ("ftp://100.64.0.1/x", False), ("not a url", False)])
 def test_endpoint_scheme_https_or_loopback_or_tailnet(url, ok, tmp_path):
     k = tmp_path / "k"
     k.write_text("x")

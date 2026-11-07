@@ -1,17 +1,14 @@
 """Each CLI's --output-format value must be one THAT CLI accepts.
 
 This file exists because of a regression it would have caught. C16 switched the
-agentic kimi call from `text` to `json` to harvest the usage envelope the
-Claude-family CLIs emit. Kimi's CLI accepts only `text` and `stream-json`; it
-rejects `json` with exit 1 in about 450ms. Kimi is first candidate for BOTH the
-worker and simple roles, so from that commit every agentic kimi call in the rig
-failed -- and the fail-open cascade advanced to glm, so nothing appeared to break.
-The work still got done, on a different provider, at a different cost.
+agentic kimi call from `text` to `json`; kimi's CLI accepts only `text` and
+`stream-json` and exited 1 in about 450ms, so every agentic kimi call failed and
+the fail-open cascade hid it by advancing. (Kimi no longer spawns at all: it has
+no verified tools-off mode, lean-rig §6.)
 
-Every other test in this suite mocks the subprocess, which is why 172 of them
-passed while the binary was being handed an argument it refuses. These assert the
-ARGUMENT VALUE against a per-CLI allowlist, so a family-wide edit cannot silently
-apply a flag to a CLI that has no such mode.
+Every other test in this suite mocks the subprocess. These assert the ARGUMENT
+VALUE against a per-CLI allowlist, so a family-wide edit cannot silently apply a
+flag to a CLI that has no such mode.
 """
 from __future__ import annotations
 
@@ -22,14 +19,11 @@ import pytest
 
 from mcp_brain_router import backends
 
-# What each binary actually accepts, read from its own error text:
-#   kimi  -> "Allowed choices are text, stream-json."
-#   claude/glm (Claude-Code family) and codex accept json.
+# What each binary accepts:
+#   grok   -> `grok --help` 1.0.77: plain, json, streaming-json, streaming-messages-json
+#   claude -> json, stream-json, text
 ACCEPTED: dict[str, set[str]] = {
-    "call_kimi_agentic": {"text", "stream-json"},
-    "call_kimi": {"text", "stream-json"},
-    "call_glm_agentic": {"json", "stream-json", "text"},
-    "call_grok_agentic": {"json", "stream-json", "text"},
+    "call_grok": {"plain", "json", "streaming-json", "streaming-messages-json"},
     "call_anthropic_agentic": {"json", "stream-json", "text"},
 }
 
@@ -52,10 +46,6 @@ def test_output_format_is_one_the_cli_accepts(fn_name: str, allowed: set[str]) -
     )
 
 
-def test_kimi_agentic_is_not_json() -> None:
-    """Pins the exact regression. Kept separate from the table so the failure
-    message names the incident rather than a parametrised case id."""
-    assert "json" not in _output_formats("call_kimi_agentic"), (
-        "kimi -p --output-format json exits 1: 'Allowed choices are text, stream-json'. "
-        "This broke every agentic kimi call in the rig once before."
-    )
+def test_grok_reads_json_so_only_the_final_message_returns() -> None:
+    """lean-rig G3: plain output cannot tell narration from the answer; json can."""
+    assert _output_formats("call_grok") == ["json"]

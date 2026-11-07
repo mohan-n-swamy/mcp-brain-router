@@ -22,7 +22,7 @@ def _cfg(mode: str, **kw) -> Config:
     # three providers the rig still uses, Codex first so the reason stays plain.
     return Config(
         roles={"worker": ["gpt-5.6-terra", "grok-4.5", "claude-sonnet-5"],
-               "simple": ["grok-4.5", "claude-haiku-4-5-20251001"],
+               "simple": ["grok-4.5", "claude-haiku-5-5"],
                "adversary": ["grok-4.5", "claude-opus-5-5"], "thinker": ["claude-fable-5-1", "grok-4.5"]},
         routing_mode=mode, role_bands=dict(DEFAULT_ROLE_BANDS), **kw,
     )
@@ -196,7 +196,7 @@ def test_routing_hole_never_hands_work_to_the_gated_provider(tmp_path, monkeypat
     """C03 STOP: when the gate empties a band, the legacy walk must not select the
     very provider the gate removed. Codex is legacy-first for worker; gate it out."""
     p = _deck_file(tmp_path, {"B3": [_card("gpt-5.6-terra", "openai"),
-                                     _card("gpt-5.5", "openai"),
+                                     _card("gpt-6.1-sol", "openai"),
                                      _card("gpt-6-astra", "openai")]})
     monkeypatch.setattr(deckmod, "load_deck", lambda path=None: _load(p))
     monkeypatch.setattr(deckmod, "read_quota", lambda path=None: {"openai": 0.99})
@@ -209,15 +209,18 @@ def test_routing_hole_never_hands_work_to_the_gated_provider(tmp_path, monkeypat
     assert any("routing hole" in r.message for r in caplog.records)
 
 
-def test_config_save_round_trips_routing_mode_and_role_bands(tmp_path, monkeypatch):
+def test_config_save_round_trips_role_bands_and_load_keeps_legacy(tmp_path, monkeypatch):
+    # lean-rig router-pins: D5 role orders live in the repo, so a host's
+    # routing_mode=deck is saved as written but loads as legacy.
     from mcp_brain_router import config as cfgmod
     monkeypatch.setattr(cfgmod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfgmod, "CONFIG_FILE", tmp_path / "config.toml")
     c = _cfg("deck"); c.role_bands = {"worker": "B2"}
     c.save()
     (tmp_path / "config.toml").chmod(0o600)
+    assert 'routing_mode = "deck"' in (tmp_path / "config.toml").read_text()
     back = Config.load()
-    assert back.routing_mode == "deck"
+    assert back.routing_mode == "legacy"
     assert back.role_bands["worker"] == "B2"
 
 

@@ -32,55 +32,18 @@ class TestRouteFunction:
     """Test the route() async function."""
 
     @pytest.mark.asyncio
-    async def test_route_cheap_uses_glm(self):
-        """002: CHEAP tier now routes to GLM (DeepSeek removed from routing)."""
-        config = Config(
-            deepseek_key="test_key",
-            glm_key="test_glm",
-            codex_enabled=False,
-        )
-
-        with patch(
-            "mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock
-        ) as mock_glm:
-            mock_glm.return_value = {
-                "content": "response",
-                "usage": {"input_tokens": 10, "output_tokens": 20},
-            }
-
-            result = await route(Complexity.CHEAP, "test prompt", config=config)
-
-            assert result.backend == "glm"
-            assert result.content == "response"
-            assert mock_glm.called
-
-    @pytest.mark.asyncio
-    async def test_route_code_uses_glm(self):
-        """Test that complexity=CODE routes to GLM."""
-        config = Config(
-            deepseek_key="test_ds",
-            glm_key="test_glm",
-            codex_enabled=False,
-        )
-
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mock_glm:
-            mock_glm.return_value = {
-                "content": "glm_response",
-                "usage": {"input_tokens": 5, "output_tokens": 15},
-            }
-
-            result = await route(Complexity.CODE, "test prompt", config=config)
-
-            assert result.backend == "glm"
-            assert result.content == "glm_response"
-            assert mock_glm.called
+    @pytest.mark.parametrize("tier", [Complexity.CHEAP, Complexity.CODE])
+    async def test_route_cheap_and_code_have_no_single_backend(self, tier):
+        """GLM left the rig (D5): cheap and code walk the simple and worker roles
+        in server._delegate_impl, so route() has no backend for them."""
+        with pytest.raises(ValueError):
+            await route(tier, "test prompt", config=Config(codex_enabled=True))
 
     @pytest.mark.asyncio
     async def test_route_adversarial_uses_codex(self):
         """Test that complexity=ADVERSARIAL routes to Codex."""
         config = Config(
             deepseek_key="test_ds",
-            glm_key="test_glm",
             codex_enabled=True,
         )
 
@@ -115,7 +78,6 @@ class TestConfigPersistence:
 
         config = Config(
             deepseek_key="test_ds",
-            glm_key="test_glm",
             codex_enabled=False,
         )
 
@@ -137,13 +99,10 @@ class TestConfigPersistence:
         # Save
         original = Config(
             deepseek_key="test_ds_key",
-            glm_key="test_glm_key",
             codex_enabled=True,
             headroom_base_url="http://localhost:8000",
-            roles={
-                "worker": ["glm-5.2", "gpt-5.6-sol", "sonnet-worker"],
-                "simple": ["glm-4.7", "luna-simple", "haiku-simple"],
-            },
+            default_class="orange",
+            roles={"worker": ["kimi", "gpt-6.1-sol", "sonnet-worker"]},
         )
         original.save()
 
@@ -151,14 +110,22 @@ class TestConfigPersistence:
         loaded = Config.load()
 
         assert loaded.deepseek_key == original.deepseek_key
-        assert loaded.glm_key == original.glm_key
         assert loaded.codex_enabled == original.codex_enabled
         assert loaded.headroom_base_url == original.headroom_base_url
-        assert loaded.roles == DEFAULT_ROLES | original.roles
+        assert loaded.default_class == "orange"
+        # D5 orders live in the repo; a host [roles] table never routes.
+        assert loaded.roles == DEFAULT_ROLES
+
+    def test_host_roles_table_is_ignored(self, temp_config_dir, monkeypatch):
+        config_file = temp_config_dir / "config.toml"
+        config_file.write_text('deepseek_key = "k"\n[roles]\nsimple = ["kimi"]\n')
+        config_file.chmod(0o600)
+        monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", config_file)
+        assert Config.load().roles == DEFAULT_ROLES
 
     def test_config_without_roles_loads_empty(self, temp_config_dir, monkeypatch):
         config_file = temp_config_dir / "config.toml"
-        config_file.write_text('glm_key = "test"\n')
+        config_file.write_text('deepseek_key = "test"\n')
         config_file.chmod(0o600)
         monkeypatch.setattr("mcp_brain_router.config.CONFIG_FILE", config_file)
 
@@ -175,12 +142,12 @@ class TestConfigPersistence:
         monkeypatch.setattr(install, "CONFIG_FILE", config_file)
         monkeypatch.setattr(install.shutil, "which", lambda name: f"/bin/{name}")
 
-        install.write_config("glm", "ds", True, "gpt-5.5", None)
+        install.write_config("ds", True, "gpt-6.1-sol", None)
         loaded = Config.load()
         assert loaded.roles == DEFAULT_ROLES
         assert loaded.grok_enabled is True
 
-    def test_installer_rerun_preserves_existing_grok_and_roles(
+    def test_installer_rerun_preserves_existing_grok_and_class(
         self, temp_config_dir, monkeypatch
     ):
         from mcp_brain_router import config as config_module
@@ -189,52 +156,34 @@ class TestConfigPersistence:
         config_file = temp_config_dir / "config.toml"
         monkeypatch.setattr(config_module, "CONFIG_FILE", config_file)
         monkeypatch.setattr(install, "CONFIG_FILE", config_file)
-        custom_roles = {"worker": ["glm-custom", "grok-custom"]}
-        Config(grok_enabled=True, roles=custom_roles).save()
+        Config(grok_enabled=True, default_class="orange").save()
 
-        install.write_config("glm-new", "ds-new", True, "gpt-5.5", None)
+        install.write_config("ds-new", True, "gpt-6.1-sol", None)
         loaded = Config.load()
         assert loaded.grok_enabled is True
-        assert loaded.roles["worker"] == custom_roles["worker"]
+        assert loaded.default_class == "orange"
+        assert loaded.roles == DEFAULT_ROLES
 
 
 class TestMissingKeyErrors:
     """Test that missing keys raise appropriate errors."""
 
     @pytest.mark.asyncio
-    async def test_missing_glm_key_raises_error_for_cheap(self):
-        """002: CHEAP tier now routes to GLM, so a missing GLM key is the error."""
-        config = Config(
-            deepseek_key=None,
-            glm_key=None,
-            codex_enabled=False,
-        )
+    async def test_missing_deepseek_key_raises_error(self):
+        from mcp_brain_router.router import Role, resolve_role, route_assignment
 
+        config = Config(roles={"worker": ["deepseek-v4-pro"]})
+        assignment = resolve_role(Role.WORKER, "claude", config, mode="agentic")
         with pytest.raises(MissingCredentialError) as exc_info:
-            await route(Complexity.CHEAP, "test prompt", config=config)
+            await route_assignment(assignment, "p", config, mode="agentic", cwd="/tmp")
 
-        assert "glm" in str(exc_info.value).lower()
-
-    @pytest.mark.asyncio
-    async def test_missing_glm_key_raises_error(self):
-        """Test that missing GLM key raises MissingCredentialError."""
-        config = Config(
-            deepseek_key="test_ds",
-            glm_key=None,
-            codex_enabled=False,
-        )
-
-        with pytest.raises(MissingCredentialError) as exc_info:
-            await route(Complexity.CODE, "test prompt", config=config)
-
-        assert "glm" in str(exc_info.value).lower()
+        assert "deepseek" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
     async def test_codex_disabled_raises_error(self):
         """Test that adversarial tier with codex disabled raises error."""
         config = Config(
             deepseek_key="test_ds",
-            glm_key="test_glm",
             codex_enabled=False,
         )
 
@@ -282,7 +231,6 @@ class TestCodexSubprocessArgs:
         """Test that codex args are a list, not a shell string."""
         config = Config(
             deepseek_key="test_ds",
-            glm_key="test_glm",
             codex_enabled=True,
         )
 
@@ -316,7 +264,6 @@ class TestCodexSubprocessArgs:
         """Test that malicious prompts can't break shell."""
         config = Config(
             deepseek_key="test_ds",
-            glm_key="test_glm",
             codex_enabled=True,
         )
 
@@ -370,19 +317,13 @@ class TestIntegrationSmoke:
         """Test that RouteResult contains all expected fields."""
         config = Config(
             deepseek_key="test_key",
-            glm_key="test_glm",
-            codex_enabled=False,
+            codex_enabled=True,
         )
 
-        with patch(
-            "mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock
-        ) as mock_glm:
-            mock_glm.return_value = {
-                "content": "test response",
-                "usage": {"input_tokens": 10, "output_tokens": 20},
-            }
+        with patch("mcp_brain_router.router.backends.call_codex") as mock_codex:
+            mock_codex.return_value = {"content": "test response", "usage": None}
 
-            result = await route(Complexity.CHEAP, "test prompt", config=config)
+            result = await route(Complexity.ADVERSARIAL, "test prompt", config=config)
 
             assert hasattr(result, "content")
             assert hasattr(result, "model")
@@ -403,9 +344,9 @@ class TestModelValidation:
     def test_valid_model_names(self):
         """Test that valid model names pass validation."""
         valid_models = [
-            "gpt-5.6-sol",
-            "deepseek-v4-flash",
-            "glm-5.2",
+            "gpt-6.1-sol",
+            "deepseek-v4-pro",
+            "claude-haiku-5-5",
             "gpt_5_5",
             "model.v1",
         ]
@@ -480,23 +421,12 @@ class TestHeadroomUrlSubstitution:
             or "f'{headroom_url}/anthropic/v1/messages'" in source
         )
 
-    def test_glm_via_headroom_url_construction(self):
-        """Verify GLM via headroom constructs the correct URL."""
+    def test_deepseek_paths_use_reasoning_safe_text_extraction(self):
+        """Both DeepSeek paths skip thinking blocks instead of assuming content[0]."""
         import inspect
 
-        source = inspect.getsource(backends.call_glm_via_headroom)
-        # Should construct URL as {headroom_url}/anthropic/v1/messages
-        assert (
-            'f"{headroom_url}/anthropic/v1/messages"' in source
-            or "f'{headroom_url}/anthropic/v1/messages'" in source
-        )
-
-    def test_glm_paths_use_reasoning_safe_text_extraction(self):
-        """Both GLM paths skip thinking blocks instead of assuming content[0]."""
-        import inspect
-
-        assert "_extract_text" in inspect.getsource(backends.call_glm)
-        assert "_extract_text" in inspect.getsource(backends.call_glm_via_headroom)
+        assert "_extract_text" in inspect.getsource(backends.call_deepseek)
+        assert "_extract_text" in inspect.getsource(backends.call_deepseek_via_headroom)
 
     def test_extract_text_skips_thinking_blocks(self):
         data = {
@@ -505,47 +435,28 @@ class TestHeadroomUrlSubstitution:
                 {"type": "text", "text": "usable answer"},
             ]
         }
-        assert backends._extract_text(data, "GLM") == "usable answer"
+        assert backends._extract_text(data, "DeepSeek") == "usable answer"
 
 
 class TestPureTierRouting:
     """Each tier owns one backend; orchestrators own cross-tier cascades."""
 
     def _cfg(self):
-        return Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True)
-
-    @pytest.mark.asyncio
-    async def test_code_glm_429_does_not_call_deepseek(self):
-        """CODE quota exhaustion is returned without crossing into CHEAP."""
-        with (
-            patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm,
-            patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds,
-        ):
-            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit reached")
-
-            result = await route(Complexity.CODE, "p", config=self._cfg())
-
-            assert result.backend == "none"
-            assert result.exhausted is True
-            assert result.tried == ["glm"]
-            assert result.failure_kind == "quota_exhausted"
-            assert "limit reached" in result.failure_reason
-            assert mglm.called
-            assert not mds.called
+        return Config(deepseek_key="sk-ds", codex_enabled=True)
 
     @pytest.mark.asyncio
     async def test_quota_exhaustion_carries_reset_metadata(self):
         """A real 429 carries reset metadata for orchestrator policy."""
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
-            mglm.side_effect = backends.BackendQuotaError(
-                "GLM", 429, "reset at 2026-06-29 15:56:33", reset_at="2026-06-29 15:56:33"
+        with patch("mcp_brain_router.router.backends.call_codex") as mcx:
+            mcx.side_effect = backends.BackendQuotaError(
+                "Codex", 429, "reset at 2026-06-29 15:56:33", reset_at="2026-06-29 15:56:33"
             )
 
-            result = await route(Complexity.CODE, "p", config=self._cfg())
+            result = await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
 
             assert result.exhausted is True
             assert result.backend == "none"
-            assert result.tried == ["glm"]
+            assert result.tried == ["codex"]
             assert result.reset_at == "2026-06-29 15:56:33"
             assert "another tier" in result.content.lower()
 
@@ -554,14 +465,14 @@ class TestPureTierRouting:
         """A non-retryable BackendError (e.g. auth/4xx) must propagate, NOT
         get masked by a fallback — config errors should be loud."""
         with (
-            patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm,
+            patch("mcp_brain_router.router.backends.call_codex") as mcx,
             patch("mcp_brain_router.router.backends.call_deepseek", new_callable=AsyncMock) as mds,
         ):
-            mglm.side_effect = backends.BackendError("GLM API error 401: bad key")
+            mcx.side_effect = backends.BackendError("Codex API error 401: bad key")
             mds.return_value = {"content": "should-not-be-used", "usage": {}}
 
             with pytest.raises(backends.BackendError):
-                await route(Complexity.CODE, "p", config=self._cfg())
+                await route(Complexity.ADVERSARIAL, "p", config=self._cfg())
             assert not mds.called  # never fell through on a hard error
 
     @pytest.mark.asyncio
@@ -591,19 +502,6 @@ class TestPureTierRouting:
             assert result.reset_at is None  # transient carries no reset time
 
     @pytest.mark.asyncio
-    async def test_cheap_glm_429_does_not_cross_tier(self):
-        """002: CHEAP now routes to GLM; a 429 returns exhausted without crossing."""
-        with patch("mcp_brain_router.router.backends.call_glm", new_callable=AsyncMock) as mglm:
-            mglm.side_effect = backends.BackendQuotaError("GLM", 429, "limit")
-
-            result = await route(Complexity.CHEAP, "p", config=self._cfg())
-
-            assert result.exhausted is True
-            assert result.tried == ["glm"]
-            assert result.failure_kind == "quota_exhausted"
-            assert mglm.called
-
-    @pytest.mark.asyncio
     async def test_adversarial_tier_is_codex_only(self):
         """ADVERSARIAL success returns only Codex."""
         with patch("mcp_brain_router.router.backends.call_codex") as mcx:
@@ -631,7 +529,7 @@ class TestTerminalMetadata:
     """Server contract distinguishes quota, timeout, and hard errors."""
 
     def _cfg(self):
-        return Config(deepseek_key="sk-ds", glm_key="glm-k", codex_enabled=True)
+        return Config(deepseek_key="sk-ds", codex_enabled=True)
 
     @pytest.mark.asyncio
     async def test_public_complexity_path_defaults_to_cli_and_requires_cwd(self):
@@ -662,27 +560,28 @@ class TestTerminalMetadata:
     @pytest.mark.asyncio
     async def test_quota_result_is_logged_with_reason_and_elapsed(self):
         quota_result = RouteResult(
-            content="glm quota exhausted; call another tier",
+            content="codex quota exhausted; call another tier",
             model="",
             backend="none",
-            complexity=Complexity.CODE,
+            complexity=Complexity.ADVERSARIAL,
             headroom_used=False,
             exhausted=True,
-            tried=["glm"],
+            tried=["codex"],
             reset_at="2026-07-11 12:00:00",
             failure_kind="quota_exhausted",
-            failure_reason="GLM quota error 429",
+            failure_reason="Codex quota error 429",
         )
         with (
             patch.object(server, "_load_config", return_value=self._cfg()),
+            patch.object(server, "_read_caller", return_value="claude"),
             patch.object(server, "route", new_callable=AsyncMock, return_value=quota_result),
             patch.object(server, "_log_delegation") as log_call,
         ):
-            response = await server._delegate_impl("code", "p", cwd="/tmp")
+            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
 
         assert response["exhausted"] is True
         assert response["failure_kind"] == "quota_exhausted"
-        assert response["failure_reason"] == "GLM quota error 429"
+        assert response["failure_reason"] == "Codex quota error 429"
         assert response["elapsed_ms"] >= 0
         log_call.assert_called_once()
 
@@ -721,7 +620,7 @@ class TestTerminalMetadata:
 
         assert response["backend"] == "anthropic-cli"
         role_call.assert_awaited_once_with(
-            "adversary", "p", "codex", mode="agentic", cwd="/tmp"
+            "adversary", "p", "codex", mode="agentic", cwd="/tmp", data_class=None
         )
 
     @pytest.mark.asyncio
@@ -810,7 +709,7 @@ class TestCodexArgvSafety:
         and waits for stdin, which previously caused the 360s timeout."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("-h --evil-flag", "gpt-5.6-sol")
+            backends.call_codex("-h --evil-flag", "gpt-6.1-sol")
             argv = mrun.call_args[0][0]
         assert argv[-1] == "-"
         assert mrun.call_args.kwargs["input"].endswith("-h --evil-flag")
@@ -821,7 +720,7 @@ class TestCodexArgvSafety:
         server in ~/.codex/config.toml and blows the subprocess timeout."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("p", "gpt-5.6-sol")
+            backends.call_codex("p", "gpt-6.1-sol")
             argv = mrun.call_args[0][0]
         assert "-c" in argv and "mcp_servers={}" in argv
         assert "--skip-git-repo-check" in argv
@@ -830,14 +729,18 @@ class TestCodexArgvSafety:
         """Delegated Codex must not load the full interactive user rig."""
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("p", "gpt-5.6-sol")
+            backends.call_codex("p", "gpt-6.1-sol")
             argv = mrun.call_args[0][0]
 
         for flag in ("--ignore-user-config", "--ignore-rules", "--ephemeral"):
             assert flag in argv
         disabled = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--disable"]
-        assert disabled == ["plugins", "hooks", "memories", "apps", "multi_agent"]
-        assert argv[argv.index("-C") + 1] == "/private/tmp"
+        # tools-off (lean-rig §6): no shell tool; memory v2 import off (REJECTED §3)
+        assert disabled == ["plugins", "hooks", "memories", "apps", "multi_agent",
+                            "shell_tool", "external_agent_memory_import"]
+        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        workdir = argv[argv.index("-C") + 1]
+        assert "brain-router-codex-" in workdir  # a fresh empty dir, gone after the call
         assert 'model_reasoning_effort="low"' in argv
 
     def test_codex_timeout_carries_kind_reason_and_elapsed(self):
@@ -848,7 +751,7 @@ class TestCodexArgvSafety:
             patch("mcp_brain_router.backends.time.perf_counter", side_effect=[10.0, 370.0]),
         ):
             with pytest.raises(backends.BackendTransientError) as exc_info:
-                backends.call_codex("p", "gpt-5.6-sol")
+                backends.call_codex("p", "gpt-6.1-sol")
 
         err = exc_info.value
         assert err.backend == "codex"
@@ -871,13 +774,21 @@ class TestCodexArgvSafety:
         from mcp_brain_router import install
 
         with (
-            patch.object(install, "_test_backend_glm", return_value=True),
             patch.object(install, "_test_backend_deepseek", return_value=True),
             patch.object(install, "_test_backend_codex", return_value=True) as codex,
         ):
-            install.run_smoke_test("glm-key", "deepseek-key", True, "gpt-5.6-terra", None)
+            install.run_smoke_test("deepseek-key", True, "gpt-5.6-terra", None)
 
         codex.assert_called_once_with("gpt-5.6-terra")
+
+    def test_installer_codex_smoke_closes_stdin(self):
+        """On an open stdin `codex exec` waits for EOF (lean-rig, 2026-11-06)."""
+        from mcp_brain_router import install
+
+        with patch("mcp_brain_router.install.subprocess.run") as mrun:
+            mrun.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+            install._test_backend_codex("gpt-6.1-sol")
+        assert mrun.call_args.kwargs.get("stdin") is backends.subprocess.DEVNULL
 
     def test_claude_registration_declares_caller_identity(self):
         """Fresh Claude registrations must activate the nested-Codex guard."""
@@ -922,16 +833,16 @@ class TestCavemanSystemDirective:
     def test_codex_prompt_prepends_caveman(self):
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:
             mrun.return_value = MagicMock(returncode=0, stdout="ok")
-            backends.call_codex("do X", "gpt-5.6-sol")
+            backends.call_codex("do X", "gpt-6.1-sol")
             stdin = mrun.call_args.kwargs["input"]
         assert stdin.startswith(backends.CAVEMAN_SYSTEM)  # directive leads
         assert stdin.endswith("do X")  # task preserved verbatim
 
 
 class TestAgenticSystemDirective:
-    """G-guard for the 2026-07-12 silent-no-write bug. The AGENTIC CLI workers
-    (call_glm_agentic / call_codex_agentic / call_anthropic_agentic) must carry
-    the TOOL-USE directive (AGENTIC_SYSTEM), NOT the chat caveman directive.
+    """G-guard for the 2026-07-12 silent-no-write bug. The AGENTIC CLI worker
+    (call_anthropic_agentic) must carry the TOOL-USE directive
+    (AGENTIC_SYSTEM), NOT the chat caveman directive.
     CAVEMAN_SYSTEM's "answer only what was asked; no preamble; terse" made a
     weaker Claude-Code-driven GLM worker emit a "DONE" chat reply and write NO
     file (verified: 3/5 then 0/3 with caveman; 5/5 with AGENTIC_SYSTEM). In
@@ -948,8 +859,8 @@ class TestAgenticSystemDirective:
         assert "failure" in low  # "a textual answer with no tool call is a FAILURE"
 
     def _prompt_arg(self, mrun):
-        """Extract the prompt argument whether it travels via stdin (codex) or
-        the `-p` argv token (cc-glm / cc-brain claude)."""
+        """Extract the prompt argument whether it travels via stdin or the
+        `-p` argv token (cc-brain claude)."""
         kwargs = mrun.call_args.kwargs
         if "input" in kwargs and kwargs["input"] is not None:
             return kwargs["input"]
@@ -958,8 +869,6 @@ class TestAgenticSystemDirective:
 
     def test_agentic_workers_prepend_agentic_directive_not_caveman(self):
         for fn, args in (
-            (backends.call_glm_agentic, ("do X", "glm-5.2")),
-            (backends.call_codex_agentic, ("do X", "gpt-5.6-terra")),
             (backends.call_anthropic_agentic, ("do X", "claude-opus-4-8")),
         ):
             with patch("mcp_brain_router.backends.subprocess.run") as mrun:

@@ -57,10 +57,10 @@ def _sets() -> list[dict]:
 
     return [
         {"band": "B1", "floor": 10.0, "excluded": {},
-         "contenders": [card("glm-5-3-flash", "zhipu", 0.10, 70.0),
+         "contenders": [card("zai-flash", "zhipu", 0.10, 70.0),
                         card("kimi-k3", "moonshot", 0.18, 75.0)]},
         {"band": "B3", "floor": 55.0, "excluded": {},
-         "contenders": [card("glm-5-3-flash", "zhipu", 0.10, 70.0)]},
+         "contenders": [card("zai-flash", "zhipu", 0.10, 70.0)]},
     ]
 
 

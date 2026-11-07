@@ -1,8 +1,9 @@
 """Fail-open role cascade (rig-consolidation D-R-01, 2026-09-02).
 
 Before: the role loop advanced only on quota / transient results, so a
-process_error from the first tier ended the call. Live 2026-09-02: glm failed
-after ~190 s on 35 of 35 `simple` calls in 48 h and nothing reached kimi.
+process_error from the first tier ended the call. Live 2026-09-02: the then
+first tier failed after ~190 s on 35 of 35 `simple` calls in 48 h and nothing
+reached the next one.
 """
 from __future__ import annotations
 
@@ -23,11 +24,10 @@ from mcp_brain_router.router import RouteResult
 def role_config():
     return Config(
         deepseek_key="ds",
-        glm_key="glm",
         codex_enabled=True,
         roles={
-            "worker": ["glm-5.2", "grok-4.5", "gpt-5.6-terra", "sonnet-worker"],
-            "simple": ["glm-4.7", "luna-simple", "haiku-simple"],
+            "worker": ["kimi", "grok-4.5", "gpt-6.1-sol", "claude-sonnet-5"],
+            "simple": ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5"],
         },
     )
 
@@ -38,7 +38,7 @@ def _ok(model="grok-4.5", backend="grok"):
     )
 
 
-def _err(kind="process_error", elapsed_ms=190_000, backend="glm"):
+def _err(kind="process_error", elapsed_ms=190_000, backend="kimi"):
     return BackendError(
         f"{backend} {kind}", backend=backend, failure_kind=kind, elapsed_ms=elapsed_ms
     )
@@ -69,7 +69,7 @@ async def test_delegate_role_advances_on_process_error(role_config):
     response, route_call = await _run(role_config, [_err(), _ok()])
     assert response["answer"] == "built"
     assert response["backend"] == "grok"
-    assert response["tried"] == ["glm", "grok"]
+    assert response["tried"] == ["kimi", "grok"]
     assert response["retried"] == []
     assert "failure_kind" not in response
     assert route_call.await_count == 2
@@ -78,7 +78,7 @@ async def test_delegate_role_advances_on_process_error(role_config):
 @pytest.mark.asyncio
 async def test_all_candidates_failed_reports_last_failure_kind(role_config):
     # rigor: small — skip-self is adversary-only (2026-09-07), so the worker
-    # walk under an opus orchestrator is glm, grok, codex, anthropic-cli.
+    # walk under an opus orchestrator is kimi, grok, codex, anthropic-cli.
     response, route_call = await _run(
         role_config, [_err(), _err(backend="grok"), _err(backend="codex"),
                       _err("invalid_output", backend="anthropic-cli")]
@@ -86,7 +86,7 @@ async def test_all_candidates_failed_reports_last_failure_kind(role_config):
     assert response["backend"] == "none"
     assert response["exhausted"] is True
     assert response["failure_kind"] == "invalid_output"
-    assert response["tried"] == ["glm", "grok", "codex", "anthropic-cli"]
+    assert response["tried"] == ["kimi", "grok", "codex", "anthropic-cli"]
     assert route_call.await_count == 4
 
 
@@ -109,12 +109,12 @@ async def test_all_quota_keeps_quota_contract(role_config):
 
 @pytest.mark.asyncio
 async def test_fast_failure_retried_once(role_config):
-    response, route_call = await _run(role_config, [_err(elapsed_ms=800), _ok("glm-5.2", "glm")])
+    response, route_call = await _run(role_config, [_err(elapsed_ms=800), _ok("kimi", "kimi")])
     assert response["answer"] == "built"
-    assert response["tried"] == ["glm", "glm"]
-    assert response["retried"] == ["glm"]
+    assert response["tried"] == ["kimi", "kimi"]
+    assert response["retried"] == ["kimi"]
     assert route_call.await_count == 2
-    assert [c.args[0].model for c in route_call.await_args_list] == ["glm-5.2", "glm-5.2"]
+    assert [c.args[0].model for c in route_call.await_args_list] == ["kimi", "kimi"]
 
 
 @pytest.mark.asyncio
@@ -123,8 +123,8 @@ async def test_fast_failure_twice_then_advances(role_config):
         role_config, [_err(elapsed_ms=800), _err(elapsed_ms=900), _ok()]
     )
     assert response["answer"] == "built"
-    assert response["tried"] == ["glm", "glm", "grok"]
-    assert response["retried"] == ["glm"]
+    assert response["tried"] == ["kimi", "kimi", "grok"]
+    assert response["retried"] == ["kimi"]
     assert route_call.await_count == 3
 
 
@@ -132,7 +132,7 @@ async def test_fast_failure_twice_then_advances(role_config):
 async def test_slow_failure_never_retried(role_config):
     response, route_call = await _run(role_config, [_err(elapsed_ms=190_000), _ok()])
     assert response["retried"] == []
-    assert response["tried"] == ["glm", "grok"]
+    assert response["tried"] == ["kimi", "grok"]
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_timeout_never_retried(role_config):
     )
     response, route_call = await _run(role_config, [timeout, _ok()])
     assert response["retried"] == []
-    assert response["tried"] == ["glm", "grok"]
+    assert response["tried"] == ["kimi", "grok"]
     # and a raised timeout-kind error with tiny elapsed is still not retried
     response, route_call = await _run(role_config, [_err("timeout", elapsed_ms=10), _ok()])
     assert response["retried"] == []
@@ -154,7 +154,7 @@ async def test_timeout_never_retried(role_config):
 async def test_configuration_error_never_retried(role_config):
     response, _ = await _run(role_config, [_err("configuration_error", elapsed_ms=5), _ok()])
     assert response["retried"] == []
-    assert response["tried"] == ["glm", "grok"]
+    assert response["tried"] == ["kimi", "grok"]
 
 
 def test_retry_window_is_well_under_the_agentic_timeout():
@@ -176,12 +176,12 @@ def test_retry_predicate_does_not_read_tokens_out():
 async def test_log_record_carries_role_and_retried(role_config, tmp_path):
     log = tmp_path / "log.jsonl"
     with patch.object(server, "_DELEGATION_LOG", log):
-        await _run(role_config, [_err(elapsed_ms=800), _ok("glm-5.2", "glm")])
+        await _run(role_config, [_err(elapsed_ms=800), _ok("kimi", "kimi")])
     rows = [json.loads(l) for l in log.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["role"] == "worker"
-    assert rows[0]["retried"] == ["glm"]
-    assert rows[0]["tried"] == ["glm", "glm"]
+    assert rows[0]["retried"] == ["kimi"]
+    assert rows[0]["tried"] == ["kimi", "kimi"]
 
 
 def test_every_cli_spawn_closes_stdin():
@@ -189,7 +189,9 @@ def test_every_cli_spawn_closes_stdin():
     stdin explicitly: < /dev/null' — the child inherited the MCP stdio pipe."""
     src = inspect.getsource(backends)
     calls = src.count("result = subprocess.run(")
-    assert calls == 9, calls  # 9th: call_fm (apple-fm), prompt via input=
+    # codex, grok, the Claude worker and apple-fm: the non-Claude agentic
+    # workers left with tools-off (lean-rig §6).
+    assert calls == 4, calls
     # The invariant is the docstring's: a child must NOT inherit the MCP stdio
     # pipe. Two mechanisms satisfy it -- stdin=DEVNULL, or input=, which opens a
     # stdin pipe and closes it. The original assertion demanded DEVNULL
@@ -201,10 +203,8 @@ def test_every_cli_spawn_closes_stdin():
               + src.count("argv, input=prompt,"))
     assert closed == calls, f"{closed} spawns close stdin, expected {calls}"
     cases = (
-        (backends.call_glm_agentic, ("p", "glm-5.3", "/tmp")),
-        (backends.call_grok_agentic, ("p", "grok-4.5", "/tmp")),
-        (backends.call_kimi_agentic, ("p", "kimi", "/tmp")),
-        (backends.call_codex_agentic, ("p", "gpt-5.6-terra", "/tmp")),
+        (backends.call_codex, ("p", "gpt-6.1-sol")),
+        (backends.call_grok, ("p", "grok-4.5")),
         (backends.call_anthropic_agentic, ("p", "claude-sonnet-5", "/tmp")),
         (backends.call_fm, ("p", "mini")),
     )
@@ -227,7 +227,7 @@ def test_every_cli_spawn_closes_stdin():
 
 
 def test_cli_snippet_keeps_tail():
-    banner = "Claude Code -> GLM (glm-5.3[1m], fast=glm-5.3-flash) via z.ai. " * 6
+    banner = "Claude Code -> provider (big[1m], fast=flash) via a proxy. " * 6
     text = backends._cli_snippet(banner + "real error: connect ECONNREFUSED at the end")
     assert "real error: connect ECONNREFUSED at the end" in text
     assert len(text) <= 240

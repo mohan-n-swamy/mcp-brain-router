@@ -44,7 +44,7 @@ def run(prompt, config):
 
 def override(**kw):
     base = Config.load()
-    roles = dict(base.roles, simple=["apple-fm", "claude-haiku-4-5-20251001"])
+    roles = dict(base.roles, simple=["apple-fm", "claude-haiku-5-5"])
     return dataclasses.replace(base, roles=roles, fm_host=kw.get("fm_host", "mini"))
 
 

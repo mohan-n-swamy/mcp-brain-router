@@ -10,7 +10,7 @@ Apple's on-device fm model (Mac mini, over ssh) is the first tier of the `simple
 
 ## Latest verified evidence
 
-- Live config: `fm_host = "mini"`, `simple = ["apple-fm", "claude-haiku-4-5-20251001", "grok-4.5"]`; backup `config.toml.bak-20261023-fm` (2026-10-23).
+- Live config: `fm_host = "mini"`, `simple` = apple-fm, the Haiku 4.5 dated ID, grok-4.5 (2026-11: D5 orders now live in `config.DEFAULT_ROLES`); backup `config.toml.bak-20261023-fm` (2026-10-23).
 - Live smoke (`specs/003-apple-fm-simple-tier/smoke.py`): a short extract is answered by fm in ~2.6 s; oversized, unreachable-mini and tool-shaped prompts fall through to haiku with the reason in the audit line's `failures`.
 - Suite: 400 passed, 1 skipped. Rigor: `specs/003-apple-fm-simple-tier/.rigor.md` 36 of 36 green. Cross-provider review by Grok 4.5: one fix (overflow on stdout), the rest recorded in `specs/003-apple-fm-simple-tier/evidence/rigor-standing-review.md`.
 - Commits: `0cfdd49` (tier), `4b2dbc9` (no retry on unreachable, overflow on either stream, `docs/RUNBOOK.md`), `9fdb496` (review evidence). Pushed.

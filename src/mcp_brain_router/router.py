@@ -51,17 +51,20 @@ class Provider(str, Enum):
 
     ANTHROPIC = "anthropic"   # opus / sonnet / haiku / fable — NEVER called by the router
     CODEX = "codex"           # every gpt-* / sol / terra / luna id (OpenAI Codex CLI)
-    ZHIPU = "zhipu"           # glm-5.3
     XAI = "xai"               # grok-4.5 / grok-composer-* (xAI Grok CLI)
     KIMI = "kimi"             # kimi (Kimi Code CLI, OAuth login)
-    DEEPSEEK = "deepseek"
+    DEEPSEEK = "deepseek"     # deepseek-v4-pro / deepseek-flash (Anthropic-shape HTTP)
     APPLE = "apple"           # apple-fm: on-device Apple Foundation Model on the mini (fm CLI over ssh)
+    OLLAMA = "ollama"         # gpt-oss:20b on the host's Ollama, simple role only
 
 
-# Prefix → Provider. First matching prefix wins; order matters only where one
-# prefix could shadow another (none currently do). Extend here when a new model
-# family appears — this is the single source of truth for id→provider.
+# Prefix → Provider. First matching prefix wins; order matters where one prefix
+# shadows another: "gpt-oss" must precede "gpt-" (an open-weight model on
+# Ollama, not Codex). Extend here when a new model family appears — this is the
+# single source of truth for id→provider.
 _MODEL_PROVIDER_PREFIXES = (
+    ("gpt-oss", Provider.OLLAMA),
+    ("ollama", Provider.OLLAMA),
     ("opus", Provider.ANTHROPIC),
     ("sonnet", Provider.ANTHROPIC),
     ("haiku", Provider.ANTHROPIC),
@@ -73,8 +76,6 @@ _MODEL_PROVIDER_PREFIXES = (
     ("sol", Provider.CODEX),
     ("terra", Provider.CODEX),
     ("luna", Provider.CODEX),
-    ("o3", Provider.CODEX),
-    ("glm", Provider.ZHIPU),
     ("grok", Provider.XAI),
     ("kimi", Provider.KIMI),
     ("deepseek", Provider.DEEPSEEK),
@@ -112,11 +113,11 @@ class Assignment:
 
 _PROVIDER_TARGETS = {
     Provider.DEEPSEEK: ("deepseek", Complexity.CHEAP),
-    Provider.ZHIPU: ("glm", Complexity.CODE),
     Provider.XAI: ("grok", Complexity.CODE),
     Provider.KIMI: ("kimi", Complexity.CODE),
     Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
     Provider.APPLE: ("apple-fm", Complexity.CHEAP),
+    Provider.OLLAMA: ("ollama", Complexity.CHEAP),
 }
 
 
@@ -146,8 +147,13 @@ def resolve_role(
     config: Config,
     exhausted_providers: Iterable[Provider] = (),
     mode: str = "chat",
+    claude_only: bool = False,
 ) -> Assignment:
     """Resolve one configured role without calling any backend.
+
+    claude_only (data class `orange`): every non-Anthropic candidate is out, in
+    the deck path and the legacy walk alike, so the walk ends in a refusal
+    instead of falling through to another provider.
 
     mode='agentic' (spec 002) changes ONE thing: an Anthropic candidate is NOT
     handed back for native execution — it targets the anthropic-cli agentic
@@ -219,6 +225,8 @@ def resolve_role(
                     continue
                 if provider in exhausted or (skip_self and provider is orchestrator_owner):
                     continue
+                if not _eligible(role, provider, claude_only):
+                    continue
                 return _assignment_for(role, card.router_model, provider, mode,
                                        reason=f"deck {band}: eligible-cheapest (within the band's best, cost order)")
 
@@ -235,6 +243,8 @@ def resolve_role(
         # role walks its configured list in order, own provider included.
         if skip_self and provider is orchestrator_owner:
             continue
+        if not _eligible(role, provider, claude_only):
+            continue
         return _assignment_for(role, model, provider, mode,
                                reason=fallback_reason or "first eligible configured candidate")
 
@@ -245,6 +255,13 @@ def resolve_role(
     raise ValueError(
         f"no eligible candidate for role: {role.value} (all providers exhausted)"
     )
+
+
+def _eligible(role: Role, provider: Provider, claude_only: bool) -> bool:
+    """Class orange reaches Claude only; Ollama answers short `simple` text only."""
+    if claude_only and provider is not Provider.ANTHROPIC:
+        return False
+    return provider is not Provider.OLLAMA or role is Role.SIMPLE
 
 
 def _router_provider_ok(model_id: str) -> bool:
@@ -334,117 +351,68 @@ async def route_assignment(
                 failure_kind="transient_error",
                 failure_reason=str(e),
             )
-    # Grok is a coding provider inside the role candidate list, not a public
-    # complexity tier. Dispatch it through the code machinery with its resolved
-    # model/backend while preserving role-owned quota fallback.
-    if assignment.provider is Provider.XAI:
-        _validate_credentials("grok", config)
-        try:
-            if mode == "agentic":
-                result = await _route_agentic(
-                    "grok", prompt, assignment.model, config, cwd, effort=effort
-                )
-            else:
-                result = await _route_grok(prompt, assignment.model, config, effort=effort)
-        except BackendQuotaError as e:
-            return RouteResult(
-                content="grok quota exhausted; advance to the next role candidate",
-                model="",
-                backend="none",
-                complexity=Complexity.CODE,
-                headroom_used=False,
-                exhausted=True,
-                tried=["grok"],
-                reset_at=e.reset_at,
-                failure_kind="quota_exhausted",
-                failure_reason=str(e),
-            )
-        except BackendTransientError as e:
-            # Transient 5xx/timeout → advance the cascade (see anthropic-cli note).
-            return RouteResult(
-                content="grok transient error; advance to the next role candidate",
-                model="",
-                backend="none",
-                complexity=Complexity.CODE,
-                headroom_used=False,
-                exhausted=True,
-                tried=["grok"],
-                failure_kind="transient_error",
-                failure_reason=str(e),
-            )
-        result.complexity = Complexity.CODE
-        result.backend = "grok"
-        result.tried = ["grok"]
-        return result
-    # Kimi, like Grok, is a coding provider inside the role candidate list, not
-    # a public complexity tier. Dispatch it through the code machinery with its
-    # resolved model/backend while preserving role-owned quota fallback.
-    if assignment.provider is Provider.KIMI:
-        _validate_credentials("kimi", config)
-        try:
-            if mode == "agentic":
-                result = await _route_agentic(
-                    "kimi", prompt, assignment.model, config, cwd
-                )
-            else:
-                result = await _route_kimi(prompt, assignment.model, config)
-        except BackendQuotaError as e:
-            return RouteResult(
-                content="kimi quota exhausted; advance to the next role candidate",
-                model="",
-                backend="none",
-                complexity=Complexity.CODE,
-                headroom_used=False,
-                exhausted=True,
-                tried=["kimi"],
-                reset_at=e.reset_at,
-                failure_kind="quota_exhausted",
-                failure_reason=str(e),
-            )
-        except BackendTransientError as e:
-            # Transient 5xx/timeout → advance the cascade (see anthropic-cli note).
-            return RouteResult(
-                content="kimi transient error; advance to the next role candidate",
-                model="",
-                backend="none",
-                complexity=Complexity.CODE,
-                headroom_used=False,
-                exhausted=True,
-                tried=["kimi"],
-                failure_kind="transient_error",
-                failure_reason=str(e),
-            )
-        result.complexity = Complexity.CODE
-        result.backend = "kimi"
-        result.tried = ["kimi"]
-        return result
-    # apple-fm answers text only (no tools, no cwd), so agentic and chat are the
-    # same call. Its failures raise BackendError and the role cascade moves on.
-    if assignment.provider is Provider.APPLE:
+    # Non-Claude workers run tools-off with the prompt inline (lean-rig §6): one
+    # text answer, no file or shell access, whatever `mode` says. A worker that
+    # needs tools runs in the review sandbox (scripts/sandbox.sh), not here.
+    provider = assignment.provider
+    if provider is Provider.APPLE:
+        # apple-fm answers text only (no tools, no cwd). Its failures raise
+        # BackendError and the role walk moves on.
         _validate_credentials("apple-fm", config)
         result = await asyncio.to_thread(backends.call_fm, prompt, config.fm_host)
         return RouteResult(
-            content=result["content"],
-            model=assignment.model,
-            backend="apple-fm",
-            complexity=Complexity.CHEAP,
-            headroom_used=False,
-            usage=None,
-            tried=["apple-fm"],
+            content=result["content"], model=assignment.model, backend="apple-fm",
+            complexity=Complexity.CHEAP, headroom_used=False, usage=None, tried=["apple-fm"],
         )
-    _, complexity = _PROVIDER_TARGETS[assignment.provider]
-    return await route(complexity, prompt, assignment.model, config, mode=mode, cwd=cwd, effort=effort)
+    if provider is Provider.OLLAMA:
+        _validate_credentials("ollama", config)
+        result = await backends.call_ollama(prompt, config.ollama_host, assignment.model)
+        return RouteResult(
+            content=result["content"], model=assignment.model, backend="ollama",
+            complexity=Complexity.CHEAP, headroom_used=False, usage=result.get("usage"),
+            tried=["ollama"],
+        )
+    name = _PROVIDER_TARGETS[provider][0]
+    _validate_credentials(name, config)
+    try:
+        if provider is Provider.XAI:
+            result = await _route_grok(prompt, assignment.model, config, effort=effort)
+        elif provider is Provider.KIMI:
+            result = await asyncio.to_thread(backends.call_kimi, prompt, assignment.model)
+        elif provider is Provider.DEEPSEEK:
+            result = await _route_deepseek(prompt, assignment.model, config)
+        else:
+            result = await _route_codex(prompt, assignment.model, config, effort=effort)
+    except (BackendQuotaError, BackendTransientError) as e:
+        return _advance_result(name, e)
+    result.backend = name
+    result.tried = [name]
+    return result
 
 
-# Pure tier ownership. The router selects exactly one backend and never crosses
-# tiers. The calling orchestrator owns any cascade (for example GLM -> Codex ->
-# native Claude). This keeps caller-specific fallback policy out of the MCP.
-# 002: DeepSeek removed from routing — `cheap` AND `code` both map to GLM (GLM
-# is the first port of call for worker AND cheap). DeepSeek stays a Provider
-# enum member for back-compat but no tier routes to it.
+def _advance_result(name: str, e: Exception) -> "RouteResult":
+    """Quota or transient failure: the role walk advances to the next candidate.
+    failure_kind stays honest (a 5xx or timeout is never labelled quota)."""
+    quota = isinstance(e, BackendQuotaError)
+    return RouteResult(
+        content=f"{name} {'quota exhausted' if quota else 'transient error'}; "
+                "advance to the next role candidate",
+        model="",
+        backend="none",
+        complexity=Complexity.CODE,
+        headroom_used=False,
+        exhausted=True,
+        tried=[name],
+        reset_at=getattr(e, "reset_at", None),
+        failure_kind="quota_exhausted" if quota else "transient_error",
+        failure_reason=str(e),
+    )
+
+
+# Legacy tier ownership. `adversarial` is the one single-backend tier left
+# (Codex, tools-off). GLM expired 2026-10-25 and left the rig (D5), so `cheap`
+# and `code` walk the `simple` and `worker` roles (server._delegate_impl).
 _TIER_BACKENDS = {
-    Complexity.CHEAP: "glm",
-    Complexity.CODE: "glm",
     Complexity.ADVERSARIAL: "codex",
 }
 
@@ -549,24 +517,9 @@ async def route(
     _validate_credentials(backend_name, config)
 
     try:
-        if mode == "agentic":
-            # C06: effort rides the agentic dispatch. The refuter found it dropped
-            # here for glm/kimi/codex while the xai and anthropic branches carried it --
-            # the live worker cascade lands on glm, so the flag was silently lost on
-            # the path that actually runs.
-            result = await _route_agentic(backend_name, prompt, model, config, cwd, effort=effort)
-        elif backend_name == "deepseek":
-            result = await _route_deepseek(prompt, model, config)
-        elif backend_name == "glm":
-            result = await _route_glm(prompt, model, config)
-        elif backend_name == "grok":
-            result = await _route_grok(prompt, model, config)
-        elif backend_name == "kimi":
-            result = await _route_kimi(prompt, model, config)
-        elif backend_name == "codex":
-            result = await _route_codex(prompt, model, config)
-        else:  # pragma: no cover - _TIER_BACKENDS is the closed set
-            raise ValueError(f"Unknown backend: {backend_name}")
+        # Codex is the one tier backend; it runs tools-off whatever `mode` says
+        # (lean-rig §6). C06: effort rides the call.
+        result = await _route_codex(prompt, model, config, effort=effort)
     except BackendQuotaError as e:
         reset_hint = f" Earliest reset: {e.reset_at}" if e.reset_at else ""
         return RouteResult(
@@ -621,49 +574,21 @@ async def _route_agentic(
     cwd: Optional[str] = None,
     effort: Optional[str] = None,
 ) -> RouteResult:
-    """Agentic dispatch — shell to the per-provider CLI harness in the REAL cwd
-    (spec 002). GLM→cc-glm, codex→codex exec (real cwd), and an explicit
-    anthropic-cli target for the codex-orchestrator adversary + the
-    GLM+codex-exhausted final fallback. All three run blocking subprocess.run,
-    so offload to a worker thread (same reason as _route_codex).
+    """Agentic dispatch — the Claude worker only (`cc-brain claude` in the REAL
+    cwd, tools on). Non-Claude workers run tools-off (route_assignment). The
+    call is a blocking subprocess.run, so it is offloaded to a worker thread.
 
-    cwd is the orchestrator-supplied working directory (see route()). Threaded
-    into every backend so the worker writes files into the caller's repo, not
-    the MCP server's fixed launch cwd. None → backend falls back to
-    os.getcwd() (server dir) — a caller that wants correct file placement MUST
-    pass cwd."""
-    if backend_name == "glm":
-        result = await asyncio.to_thread(
-            backends.call_glm_agentic, prompt, model, cwd, effort
-        )
-        label = "glm"
-    elif backend_name == "grok":
-        result = await asyncio.to_thread(
-            backends.call_grok_agentic, prompt, model, cwd, effort
-        )
-        label = "grok"
-    elif backend_name == "kimi":
-        result = await asyncio.to_thread(
-            backends.call_kimi_agentic, prompt, model, cwd, effort
-        )
-        label = "kimi"
-    elif backend_name == "codex":
-        result = await asyncio.to_thread(
-            backends.call_codex_agentic, prompt, model, cwd, effort
-        )
-        label = "codex"
-    elif backend_name == "anthropic-cli":
-        result = await asyncio.to_thread(
-            backends.call_anthropic_agentic, prompt, model, cwd
-        )
-        label = "anthropic-cli"
-    else:  # pragma: no cover - agentic mode only targets these harnesses
+    cwd is the orchestrator-supplied working directory (see route()); None
+    falls back to the server's launch dir, so callers must pass it."""
+    if backend_name != "anthropic-cli":  # pragma: no cover - closed set
         raise ValueError(f"No agentic harness for backend: {backend_name}")
-
+    result = await asyncio.to_thread(
+        backends.call_anthropic_agentic, prompt, model, cwd
+    )
     return RouteResult(
         content=result["content"],
         model=model,
-        backend=label,
+        backend="anthropic-cli",
         complexity=None,
         headroom_used=False,
         usage=result.get("usage"),
@@ -697,10 +622,7 @@ def _resolve_backend_and_model(
     elif config.model_overrides and complexity.value in config.model_overrides:
         model = config.model_overrides[complexity.value]
     else:
-        # Use backend default. `cheap` and `code` both route to GLM-5.3
-        # (2026-08-15: latest Coding Plan model for worker + simple).
-        default_key = "glm-cheap" if complexity is Complexity.CHEAP else backend_name
-        model = _get_backend_default_model(default_key, config)
+        model = _get_backend_default_model(backend_name, config)
 
     return backend_name, model
 
@@ -708,12 +630,8 @@ def _resolve_backend_and_model(
 def _get_backend_default_model(backend_name: str, config: Config) -> str:
     """Get the default model for a backend."""
     defaults = {
-        "deepseek": "deepseek-v4-flash",
-        "glm": "glm-5.3",
-        # 2026-08-15: worker + simple both burn GLM-5.3. cheap/code stay on
-        # the same id so an explicit complexity call matches the role shards.
-        # [model_overrides] cheap= / code= still wins over this default.
-        "glm-cheap": "glm-5.3",
+        # D5 names: deepseek-flash (bulk reads) and deepseek-v4-pro (worker).
+        "deepseek": "deepseek-flash",
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",
@@ -722,9 +640,8 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # tier. No -m flag is passed — the CLI runs its configured default
         # model, so the router model id is just "kimi".
         "kimi": "kimi",
-        # Keep production default until the representative adversarial eval
-        # promotes a GPT-5.6 candidate. Terra/Luna remain explicit overrides.
-        "codex": "gpt-5.5",
+        # D5: the only model the ChatGPT login accepts (tested 2026-11-06).
+        "codex": "gpt-6.1-sol",
     }
     return defaults.get(backend_name, "unknown")
 
@@ -739,9 +656,6 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
     if backend_name == "deepseek":
         if not config.deepseek_key:
             raise MissingCredentialError("DEEPSEEK_KEY", "deepseek")
-    elif backend_name == "glm":
-        if not config.glm_key:
-            raise MissingCredentialError("GLM_KEY", "glm")
     elif backend_name == "grok":
         # Grok is a CLI worker (grok.com OAuth login, no API key). Availability
         # is a boolean enable flag like Codex, not a stored credential.
@@ -760,6 +674,9 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
         # The ssh host doubles as the enable flag: no fm_host, no fm tier.
         if not config.fm_host:
             raise BackendUnavailableError("apple-fm", "fm_host not set in config.toml")
+    elif backend_name == "ollama":
+        if not getattr(config, "ollama_host", None):
+            raise BackendUnavailableError("ollama", "MOHAN_OLLAMA_HOST not set in compute.env")
 
 
 async def _route_deepseek(
@@ -796,51 +713,17 @@ async def _route_deepseek(
     )
 
 
-async def _route_glm(
-    prompt: str,
-    model: str,
-    config: Config,
-) -> RouteResult:
-    """Route to GLM backend."""
-    headroom_used = False
-
-    if config.headroom_base_url:
-        headroom_used = True
-        result = await backends.call_glm_via_headroom(
-            prompt=prompt,
-            model=model,
-            api_key=config.glm_key,
-            headroom_url=config.headroom_base_url,
-        )
-    else:
-        result = await backends.call_glm(
-            prompt=prompt,
-            model=model,
-            api_key=config.glm_key,
-        )
-
-    return RouteResult(
-        content=result["content"],
-        model=model,
-        backend="glm",
-        complexity=Complexity.CODE,
-        headroom_used=headroom_used,
-        usage=result.get("usage"),
-    )
-
-
 async def _route_grok(
     prompt: str,
     model: str,
     config: Config,
     effort: Optional[str] = None,
 ) -> RouteResult:
-    """Route to Grok backend (subprocess-based, chat mode).
+    """Route to Grok (subprocess, tools-off, final message only).
 
-    Like Codex, the Grok CLI is subprocess-based (BLOCKING subprocess.run), so
-    offload to a worker thread to keep the async MCP stdio event loop responsive
-    (same freeze/keepalive reasoning as _route_codex). Grok is not HTTP-based,
-    so it never uses headroom.
+    The Grok CLI is subprocess-based (BLOCKING subprocess.run), so offload to a
+    worker thread to keep the async MCP stdio event loop responsive (same
+    freeze/keepalive reasoning as _route_codex). Never uses headroom.
     """
     result = await asyncio.to_thread(
         backends.call_grok,
@@ -857,40 +740,13 @@ async def _route_grok(
     )
 
 
-async def _route_kimi(
-    prompt: str,
-    model: str,
-    config: Config,
-) -> RouteResult:
-    """Route to Kimi backend (subprocess-based, chat mode).
-
-    Like Grok/Codex, the Kimi CLI is subprocess-based (BLOCKING
-    subprocess.run), so offload to a worker thread to keep the async MCP stdio
-    event loop responsive (same freeze/keepalive reasoning as _route_codex).
-    Kimi is not HTTP-based, so it never uses headroom.
-    """
-    result = await asyncio.to_thread(
-        backends.call_kimi,
-        prompt,
-        model,
-    )
-
-    return RouteResult(
-        content=result["content"],
-        model=model,
-        backend="kimi",
-        complexity=Complexity.CODE,
-        headroom_used=False,
-        usage=result.get("usage"),
-    )
-
-
 async def _route_codex(
     prompt: str,
     model: str,
     config: Config,
+    effort: Optional[str] = None,
 ) -> RouteResult:
-    """Route to Codex backend (subprocess-based)."""
+    """Route to Codex backend (subprocess-based, tools-off)."""
     # Codex does not use headroom (it's not HTTP-based).
     # call_codex uses BLOCKING subprocess.run (~15-19s). Under the async MCP
     # stdio server this would freeze the event loop for the whole codex run →
@@ -903,6 +759,7 @@ async def _route_codex(
         backends.call_codex,
         prompt,
         model,
+        effort,
     )
 
     return RouteResult(

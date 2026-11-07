@@ -49,11 +49,11 @@ def band_row() -> BandRow:
         floor=55.0,
         floor_status="ESTIMATE",
         ranked=[
-            _card("glm-5-3-flash", "zhipu", 0.001),
-            _card("gpt-5-6-terra", "openai", 0.002),
+            _card("zai-flash", "zhipu", 0.001),
+            _card("gpt-6-1-sol", "openai", 0.002),
             _card("deepseek-v4", "deepseek", 0.003),
             _card("kimi-k3", "moonshot", 0.004),
-            _card("glm-5-3-air", "zhipu", 0.005),
+            _card("zai-air", "zhipu", 0.005),
             _card("grok-5", "xai", 0.006),
         ],
         unranked=[],
@@ -88,15 +88,15 @@ def test_order_of_survivors_is_identical_at_20_percent_and_95_percent(band_row):
     # Stated once more as literal sequences, so a future reorder cannot pass by
     # satisfying a clever set comparison.
     assert [c.slug for c in rested] == [
-        "glm-5-3-flash",
-        "gpt-5-6-terra",
+        "zai-flash",
+        "gpt-6-1-sol",
         "deepseek-v4",
         "kimi-k3",
-        "glm-5-3-air",
+        "zai-air",
         "grok-5",
     ]
     assert [c.slug for c in busy] == [
-        "gpt-5-6-terra",
+        "gpt-6-1-sol",
         "deepseek-v4",
         "kimi-k3",
         "grok-5",
@@ -124,8 +124,8 @@ def test_gated_provider_cards_are_absent_at_95_percent(band_row):
     survivors = gated(band_row, _quota(zhipu=0.95))
 
     assert all(c.provider != "zhipu" for c in survivors)
-    assert "glm-5-3-flash" not in {c.slug for c in survivors}
-    assert "glm-5-3-air" not in {c.slug for c in survivors}
+    assert "zai-flash" not in {c.slug for c in survivors}
+    assert "zai-air" not in {c.slug for c in survivors}
     # Removed, not demoted: the count drops by exactly the gated provider's cards.
     assert len(survivors) == len(band_row.ranked) - 2
 
@@ -204,8 +204,8 @@ def test_exactly_at_threshold_is_gated_just_under_is_not(band_row):
 
     under = gated(band_row, _quota(zhipu=0.8999999))
     assert [c.slug for c in under if c.provider == "zhipu"] == [
-        "glm-5-3-flash",
-        "glm-5-3-air",
+        "zai-flash",
+        "zai-air",
     ]
 
 
@@ -295,11 +295,11 @@ def test_gated_does_not_mutate_the_band_row(band_row):
 
     assert band_row.ranked == original
     assert [c.slug for c in band_row.ranked] == [
-        "glm-5-3-flash",
-        "gpt-5-6-terra",
+        "zai-flash",
+        "gpt-6-1-sol",
         "deepseek-v4",
         "kimi-k3",
-        "glm-5-3-air",
+        "zai-air",
         "grok-5",
     ]
 

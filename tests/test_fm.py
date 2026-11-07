@@ -131,9 +131,9 @@ def test_timeout():
 
 def test_provider_apple_fm_and_no_existing_id_moves():
     assert provider_for_model("apple-fm") is Provider.APPLE
-    ids = {m for models in DEFAULT_ROLES.values() for m in models} | {
-        "claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-5-5",
-        "grok-4.5", "gpt-6-astra", "gpt-5.6-terra", "glm-5.3", "kimi", "deepseek-v4-flash",
+    ids = {m for models in DEFAULT_ROLES.values() for m in models if m != "apple-fm"} | {
+        "claude-haiku-5-5", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-5-5",
+        "grok-4.5", "gpt-6-astra", "gpt-6.1-sol", "kimi", "deepseek-flash", "gpt-oss:20b",
     }
     assert all(provider_for_model(m) is not Provider.APPLE for m in ids)
 
@@ -141,7 +141,7 @@ def test_provider_apple_fm_and_no_existing_id_moves():
 # ------------------------------------------------------------------- cascade
 
 def _config(**kw):
-    base = dict(fm_host="mini", roles={"simple": ["apple-fm", "claude-haiku-4-5-20251001"]})
+    base = dict(fm_host="mini", roles={"simple": ["apple-fm", "claude-haiku-5-5"]})
     base.update(kw)
     return Config(**base)
 
