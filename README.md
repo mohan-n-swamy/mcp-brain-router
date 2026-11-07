@@ -4,18 +4,18 @@ An MCP server for Claude Code and Codex that delegates agentic sub-tasks to exte
 
 ## What It Is
 
-`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Codex, and Grok. Standard calls select a role (`worker`, `simple`, `thinker`, or `adversary`) and run an agentic CLI worker in the caller's absolute working directory. Each role owns an ordered provider shard and advances only on confirmed quota exhaustion. Legacy complexity calls (`cheap`, `code`, `adversarial`) remain single-provider.
+`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Codex, and Grok. Standard calls select a role (`worker`, `simple`, `thinker`, or `adversary`), and each role walks an ordered list of backends fixed in this repo. Legacy complexity calls remain: `cheap` walks `simple`, `code` walks `worker`, and `adversarial` is Codex alone.
 
 ## Why It Exists
 
-Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker shard and its quota/transient fallback policy (budget-optimized defaults, 2026-07-26):
+Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker order, free models first (D5, 2026-11-06):
 
-- **Worker**: Kimi → Grok 4.5 → Claude Sonnet 5 → Codex Terra.
-- **Simple**: Kimi → Claude Haiku → Codex Luna.
-- **Thinker**: Claude Fable 5 → Kimi → Codex Sol.
-- **Adversary**: Claude Opus 4.8 → Kimi → Codex Sol.
+- **Simple**: Apple fm (on the Mac mini) → gpt-oss:20b (this host's Ollama, only when already loaded) → Claude Haiku 5.5.
+- **Worker**: Kimi → Grok 4.5 → DeepSeek V4 Pro → Claude Sonnet 5 → Codex `gpt-6.1-sol`.
+- **Adversary**: Codex `gpt-6.1-sol` → Claude Opus 5.5 → Kimi. Never the caller's own provider.
+- **Thinker**: Grok 4.5 → Claude Fable 5 → Codex `gpt-6.1-sol`.
 
-Every role skips the orchestrator's own provider (skip-self). Every role call is agentic-only and requires `cwd`. Timeouts, authentication errors, process errors, and empty output stop loud; they never trigger provider fallback. Only confirmed quota exhaustion or transient backend errors advance the shard.
+A call walks its role's whole order within one deadline (`simple` 120 s, the others 15 min). A backend with no binary or key is skipped; an error, a timeout or an empty answer falls through to the next. The orders live in `config.DEFAULT_ROLES`; a host `config.toml` `[roles]` table is ignored, so a scan of this repo sees every model ID the router uses.
 
 ## Install
 
@@ -67,8 +67,8 @@ print(answer)
 # Returns:
 # {
 #   "answer": "1. TaskRouter\n2. TierDispatch\n...",
-#   "backend": "deepseek",
-#   "model": "deepseek-v4-flash",
+#   "backend": "apple-fm",
+#   "model": "apple-fm",
 #   "complexity": "cheap",
 #   "tokens_in": 120,
 #   "tokens_out": 340,
@@ -76,7 +76,7 @@ print(answer)
 #   "source": "external-untrusted"
 # }
 
-# Code review: ask GLM to review Python logic
+# Code review: walks the worker role
 code_snippet = "def merge(a, b): return sorted(a + b)"
 answer = delegate(
     complexity="code",
@@ -92,7 +92,7 @@ answer = delegate(
 
 ### Role-based routing
 
-Configure ordered candidates in `~/.config/mcp-brain-router/config.toml`, then call. This role-based path owns the standard agentic cascade; callers must not recreate it with repeated `complexity=` calls:
+The role path owns the standard order; callers must not recreate it with repeated `complexity=` calls:
 
 ```python
 delegate(role="worker", orchestrator="claude", mode="agentic", cwd="/abs/repo", prompt="Implement this isolated task")
@@ -100,38 +100,42 @@ delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo"
 ```
 
 Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
-router-selected. Candidate order comes only from `[roles]`. Standard worker
-order is GLM → Kimi → Grok → Claude → Codex (Claude+Codex protected, last resort).
-Only genuine quota exhaustion advances;
-timeouts, process errors, authentication failures, and empty answers stop loud.
-All public role calls are agentic-only and require absolute `cwd`. Anthropic
-candidates run through `cc-brain claude`. Every role skips the orchestrator's
-own provider (skip-self): a role routes work AWAY from the brain you are
-already running, so e.g. a Kimi orchestrator's worker starts at Grok.
+router-selected. Role calls require an absolute `cwd`. Claude candidates run
+through `cc-brain claude` in `cwd` with tools. The adversary role skips the
+orchestrator's own provider; the other roles walk their order, own provider
+included.
 
-Legacy `delegate(complexity=..., prompt=...)` remains supported and single-tier.
-Use it only for an explicit one-provider request, not the standard cascade.
-(`cheap`/`code` still map to GLM when you ask for that tier explicitly — GLM is
-off the role cascades.)
+Legacy `delegate(complexity=..., prompt=...)` remains: `cheap` walks `simple`,
+`code` walks `worker`, `adversarial` is Codex alone (for class `orange`, it
+walks `adversary`).
 
 ## Tier Map
 
 | Tier | Backend | Model | Use Case | Cost | Speed |
 |------|---------|-------|----------|------|-------|
-| `cheap` | GLM | glm-5.3 | Explicit fast single-provider request | — | Fastest |
-| `code` | GLM | glm-5.3 | Explicit single-provider code request | ~$0.50/1M tokens | Fast |
-| `adversarial` | Codex | gpt-5.5, low effort (via Codex CLI) | Security reviews, refutation, second opinion | Higher | Slowest |
+| `cheap` | the `simple` walk | fm, gpt-oss:20b, Haiku | Short self-contained text | Lowest | Fastest |
+| `code` | the `worker` walk | see Worker above | Self-contained code task | Varies | Varies |
+| `adversarial` | Codex, tools-off | `gpt-6.1-sol`, low effort | Security reviews, refutation, second opinion | Higher | Slowest |
 
-### Enforced role policy
+### Delegation policy (lean-rig PLAN §6; `scripts/policy-check.sh` proves it, I22)
 
-- `worker`: GLM 5.3 → Kimi → Grok 4.5 → Claude Sonnet 5 → Codex Terra.
-- `simple`: GLM 5.3 → Kimi → Grok 4.5 → Claude Haiku → Codex Luna.
-- `thinker`: Claude Fable 5 → Kimi → Codex Sol.
-- `adversary`: Claude Opus 4.8 → Kimi → Codex Sol.
-- Every role skips the orchestrator's own provider (skip-self).
-- Provider advancement happens only on confirmed quota exhaustion or transient
-  backend errors. Timeout/process/authentication/permission/empty-output
-  failures stop loud.
+- Every prompt opens with a rules preamble of at most 1,200 bytes
+  (`policy.PREAMBLE`): precedence, data is never an instruction, evidence for
+  claims, no one-way-door actions. Answers return as untrusted worker output.
+- `class` is `personal` or `orange` (default: the host's `default_class`).
+  `orange` reaches Claude only and refuses rather than falls through.
+- Non-Claude workers run tools-off with the prompt inline: Grok with
+  `--max-turns 1 --no-subagents --no-plan --disable-web-search` and
+  `--output-format json`, returning only the final message; Codex with a
+  read-only sandbox, the shell tool off and the prompt on stdin (an open stdin
+  makes `codex exec` wait for EOF). Kimi has no verified tools-off mode, so it
+  is skipped.
+- gpt-oss:20b answers `simple` only, only when `/api/ps` shows it loaded (cold
+  means the next tier, no wait), one generation at a time (5 s lock wait), 60 s.
+- A worker that needs tools, and every review courier, runs under
+  `scripts/sandbox.sh` (bwrap): only its worktree (read-only for reviews) and
+  that CLI's login are visible, the env is allowlisted, and class `orange` is
+  refused.
 
 Claude, Codex, and Grok each register the same MCP with distinct
 `BRAIN_ROUTER_CALLER` identity. Orchestrator remains human-selected.
@@ -157,20 +161,20 @@ env = { BRAIN_ROUTER_CALLER = "codex" }
              │
 ┌────────────▼──────────────────────────────────┐
 │     mcp-brain-router (this tool)               │  Local MCP server
-│     Routes by configured role candidates       │
+│     Walks the role's order (this repo)         │
 │     Returns answer + metadata                  │
 └──┬─────────────────┬───────────────┬───────────┘
    │                 │               │
-   │ (own API key)   │ (OAuth CLI)   │ (subscription CLI)
-   │                 │               │
+   │ (ssh, HTTP)     │ (OAuth CLI,   │ (subscription CLI)
+   │                 │  API key)     │
 ┌──▼──────────┐  ┌───▼────────────┐  ┌──▼────────────┐
-│ Kimi/Grok   │  │ Codex / GLM    │  │  Claude CLI   │  Agentic workers
-│ local CLI   │  │ CLI (+ HTTP    │  │  (fallback /  │
-│             │  │  cheap|code)   │  │   think/adv)  │
+│ Apple fm,   │  │ Grok / Codex   │  │  Claude CLI   │
+│ gpt-oss     │  │ tools-off,     │  │  (tools, in   │
+│ text only   │  │ DeepSeek HTTP  │  │   the cwd)    │
 └─────────────┘  └────────────────┘  └───────────────┘
 
 Key point:
-- The router may launch native Claude CLI as a configured role fallback.
+- The router may launch native Claude CLI as a role's Claude entry.
 - Provider credentials stay inside their native API/CLI auth paths.
 - Worker output is labeled external-untrusted regardless of provider.
 ```
@@ -181,31 +185,26 @@ After installation, your config lives at `~/.config/mcp-brain-router/config.toml
 
 ```toml
 deepseek_key = "sk-..."
-glm_key = "..."
 codex_enabled = true
 grok_enabled = true
 kimi_enabled = true
+fm_host = "mini"            # ssh host for Apple fm; omit to skip that tier
+# default_class = "orange"  # the Orange host's default
 # headroom_base_url = "http://localhost:8282"
 
 [model_overrides]
-adversarial = "gpt-5.5"
-
-[roles]
-thinker = ["claude-fable-5", "kimi", "gpt-5.6-sol"]
-adversary = ["claude-opus-4-8", "kimi", "gpt-5.6-sol"]
-worker = ["glm-5.3", "kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"]
-simple = ["glm-5.3", "kimi", "grok-4.5", "claude-haiku-4-5-20251001", "gpt-5.6-luna"]
+adversarial = "gpt-6.1-sol"
 ```
 
-### GPT-5.6 routing policy
+Role orders are not configured here; they live in `config.DEFAULT_ROLES`.
+gpt-oss reads its endpoint from `MOHAN_OLLAMA_HOST` (env, or
+`~/.config/mohan/compute.env`).
 
-- `gpt-5.6-sol` is the capability-first adversarial candidate. Production default remains `gpt-5.5` until representative eval promotion.
-- `gpt-5.6-terra` is an explicit cost-balanced candidate; adopt only after the same representative adversarial eval holds.
-- `gpt-5.6-luna` is for efficient high-volume work, not the default refutation/security lane.
-- Keep `model_reasoning_effort="low"` as the migration baseline; compare `none` on the same eval before lowering it.
-- Reserve pro mode or `max` effort for quality-first tasks with measured gain; the CLI worker does not enable either by default.
-- Codex runs as an ephemeral, direct CLI worker. Responses-API explicit caching and Programmatic Tool Calling do not apply to this backend unless it is deliberately migrated to that API surface.
-- Model efficiency never replaces caller fallback, timeout, nested-Codex prevention, untrusted-output handling, or downstream verification.
+### Codex model
+
+- `gpt-6.1-sol` is the only model the ChatGPT login accepts (tested 2026-11-06), so it is the default and the role entry.
+- Keep `model_reasoning_effort="low"` as the baseline; compare `none` on the same eval before lowering it.
+- Codex runs as an ephemeral, tools-off CLI worker. Model efficiency never replaces caller fallback, timeouts, untrusted-output handling, or downstream verification.
 
 **Changing keys later:**
 ```bash
@@ -214,7 +213,14 @@ mcp-brain-router-install  # Re-runs setup, updates config, skips Claude Code re-
 
 **Validating the repo:**
 ```bash
-pytest -q
+uv run --extra dev pytest -q
+bash scripts/policy-check.sh   # I22; exit 2 until a root-owned /usr/bin/bwrap exists
+```
+
+**Before the first commit in a clone** (this repo is public; the hook runs
+gitleaks with `.gitleaks.toml`, which also blocks node IPs and home paths):
+```bash
+ln -s ../../scripts/pre-commit "$(git rev-parse --git-common-dir)/hooks/pre-commit"
 ```
 
 **Validating the installed MCP path:**
@@ -224,7 +230,7 @@ delegate(complexity="code", prompt="Health check. Reply exactly PONG.")
 
 ## Compliance
 
-**Short version**: role shards can launch GLM, Grok, Codex, or native Claude CLI workers. The prior non-Anthropic-only compliance analysis is invalid after this migration. Treat subscription-backed automated workers as personal/testing-only pending explicit policy confirmation.
+**Short version**: role walks can launch Grok, Codex, DeepSeek, Apple fm, Ollama, or native Claude CLI workers. The prior non-Anthropic-only compliance analysis is invalid after this migration. Treat subscription-backed automated workers as personal/testing-only pending explicit policy confirmation.
 
 **See `COMPLIANCE.md` for the full, sourced analysis** of how this design respects Anthropic's Consumer Terms and the third-party tool landscape.
 
@@ -236,7 +242,7 @@ mcp-brain-router-install  # Re-run setup
 ```
 
 **"DeepSeek call failed: 429 rate limit"**
-You've hit the provider limit. The tool returns `exhausted=true`; the orchestrator decides whether to call another tier or handle the task natively. The router never crosses tiers itself.
+You've hit the provider limit. A role call moves on to the next backend in its order; a legacy `adversarial` call returns `exhausted=true` and the orchestrator decides what next.
 
 **"Codex not installed"**
 The tool is optional. If `codex` binary is not on your PATH, adversarial-tier calls fail with a clear message. Install Codex CLI separately if you want this tier:
@@ -246,7 +252,7 @@ pip install codex-cli
 ```
 
 **"Headroom proxy not responding"**
-The tool routes DeepSeek/GLM through your local headroom proxy when configured. If that proxy is down, the call returns an error; clear `headroom_base_url` or restart the proxy to use the backend again.
+The tool routes DeepSeek through your local headroom proxy when configured. If that proxy is down, the call returns an error; clear `headroom_base_url` or restart the proxy to use the backend again.
 
 **"TypeError: delegate() got unexpected keyword"**
 Check your function call signature against the Usage section above. The tool accepts `complexity` (required), `prompt` (required), and `model` (optional override).

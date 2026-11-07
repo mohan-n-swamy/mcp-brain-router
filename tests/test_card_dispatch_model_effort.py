@@ -17,7 +17,7 @@ def _load():
 
 class _R:
     content = "PONG"; exhausted = False; usage = {"input_tokens": 1, "output_tokens": 1}
-    backend = "codex"; model = "gpt-5.6-luna"; failure_kind = None
+    backend = "codex"; model = "gpt-6.1-sol"; failure_kind = None
 
 
 def _run(monkeypatch, card):
@@ -40,16 +40,16 @@ def _run(monkeypatch, card):
 
 
 def test_effort_variant_card_dispatches_base_model_plus_effort(monkeypatch):
-    seen, t = _run(monkeypatch, {"slug": "gpt-5-6-luna-xhigh", "model": "gpt-5-6-luna",
+    seen, t = _run(monkeypatch, {"slug": "gpt-6-1-sol-xhigh", "model": "gpt-6-1-sol",
                                  "effort": "xhigh", "provider": "openai"})
-    assert seen == {"model": "gpt-5.6-luna", "effort": "xhigh"}
+    assert seen == {"model": "gpt-6.1-sol", "effort": "xhigh"}
     assert t["ok"]
 
 
 def test_base_effort_is_cli_default(monkeypatch):
-    seen, _ = _run(monkeypatch, {"slug": "gpt-5-6-luna", "model": "gpt-5-6-luna",
+    seen, _ = _run(monkeypatch, {"slug": "gpt-6-1-sol", "model": "gpt-6-1-sol",
                                  "effort": "base", "provider": "openai"})
-    assert seen == {"model": "gpt-5.6-luna", "effort": None}
+    assert seen == {"model": "gpt-6.1-sol", "effort": None}
 
 
 def test_non_reasoning_maps_to_low_on_direct_backend(monkeypatch):

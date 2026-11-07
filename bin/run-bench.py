@@ -71,7 +71,7 @@ TRIALS = 3  # R30: median of 3. One run lets a 534s hang or a lucky 48s call dec
 AGENTIC_PROVIDERS = {"zhipu", "openai", "xai", "moonshot", "anthropic"}
 
 # A hyphen between two digit groups is a decimal point in the router's naming:
-# the AA slug `glm-5-3-flash` is the router's `glm-5.3-flash`. COPIED from
+# the AA slug `grok-4-5` is the router's `grok-4.5`. COPIED from
 # build-deck.py (which explains why this derivation is name-shape, not a
 # verified provider id) rather than imported -- bin/ is not an importable
 # package and duplicating three lines beats an importlib shim for a script.
@@ -361,7 +361,7 @@ def card_dispatch(card: dict) -> tuple[str, str]:
 
 async def dispatch_card(card: dict, prompt: str, cwd: str):
     """Send one prompt to the EXACT card. A card is (model, effort), not a model
-    id: gpt-5-6-luna-xhigh is the gpt-5.6-luna model at effort xhigh. The
+    id: gpt-6-1-sol-xhigh is the gpt-6.1-sol model at effort xhigh. The
     2026-09-05 seed passed the SLUG as the model name and every effort-variant
     card died in 4s with "model is not supported". Base effort is the CLI
     default (None)."""

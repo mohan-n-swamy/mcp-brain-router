@@ -59,15 +59,15 @@ def test_exactly_ten_points_is_eligible():
 
 
 def test_unlisted_provider_cannot_rank_or_raise_the_bar():
-    row = _b3([_card("glm-5.3", "zhipu", pass_rate=1.0), _card(*CODEX, pass_rate=0.88),
+    row = _b3([_card("zai-5.3", "zhipu", pass_rate=1.0), _card(*CODEX, pass_rate=0.88),
                _card(*CLAUDE, pass_rate=0.95)])
     assert [c.router_model for c in row.ranked] == ["gpt-5.6-terra", "claude-sonnet-5"]
-    assert "glm-5.3" in [c.router_model for c in row.unranked]
+    assert "zai-5.3" in [c.router_model for c in row.unranked]
 
 
 def test_thin_or_failed_measurement_cannot_rank():
     row = _b3([_card(*CODEX, pass_rate=0.99, trials=2), _card(*GROK, pass_rate=0.99, p0=False),
-               _card(*CLAUDE, pass_rate=0.95), _card("claude-haiku-4-5-20251001", "anthropic")])
+               _card(*CLAUDE, pass_rate=0.95), _card("claude-haiku-5-5", "anthropic")])
     assert [c.router_model for c in row.ranked] == ["claude-sonnet-5"]
 
 
@@ -75,7 +75,7 @@ def test_thin_or_failed_measurement_cannot_rank():
 
 def _cfg():
     return Config(roles={"worker": ["claude-sonnet-5", "grok-4.5", "gpt-5.6-terra"],
-                         "simple": ["claude-haiku-4-5-20251001", "grok-4.5"],
+                         "simple": ["claude-haiku-5-5", "grok-4.5"],
                          "adversary": ["gpt-6-astra", "claude-opus-5-5", "grok-4.5"],
                          "thinker": ["gpt-6-astra", "claude-opus-5-5", "grok-4.5"]},
                   routing_mode="deck", role_bands=dict(DEFAULT_ROLE_BANDS), codex_enabled=True,
@@ -109,7 +109,7 @@ def test_one_card_band_uses_the_roles_list(tmp_path, monkeypatch):
 
 
 def test_stale_week0_deck_is_inert(tmp_path, monkeypatch):
-    week0 = [dict(_card("glm-5.3", "zhipu"), total_cost_usd=0.10, p0_pass=True),
+    week0 = [dict(_card("zai-5.3", "zhipu"), total_cost_usd=0.10, p0_pass=True),
              dict(_card("kimi-k3", "moonshot"), total_cost_usd=0.13, p0_pass=True)]
     _deck(tmp_path, monkeypatch, week0)
     a = resolve_role(Role.WORKER, "claude", _cfg(), mode="agentic")

@@ -128,11 +128,14 @@ mcp-brain-router --help
 
 ## Working-tree DEFAULT_ROLES (docs truth this run)
 
+Superseded 2026-11-06 by D5 (lean-rig router-pins); the orders below are
+`config.DEFAULT_ROLES` now, and a host `[roles]` table is ignored:
+
 ```
-thinker:    claude-fable-5 → kimi → gpt-5.6-sol
-adversary:  claude-opus-4-8 → kimi → gpt-5.6-sol
-worker:     glm-5.2 → kimi → grok-4.5 → claude-sonnet-5 → gpt-5.6-terra
-simple:     kimi → claude-haiku-4-5-20251001 → gpt-5.6-luna
+simple:     apple-fm → gpt-oss:20b → claude-haiku-5-5
+worker:     kimi → grok-4.5 → deepseek-v4-pro → claude-sonnet-5 → gpt-6.1-sol
+adversary:  gpt-6.1-sol → claude-opus-5-5 → kimi
+thinker:    grok-4.5 → claude-fable-5 → gpt-6.1-sol
 ```
 
 Committed HEAD `e5524eb` differs (kimi-first thinker/adversary; worker ends terra before sonnet; simple luna-first). **Commit pending.**

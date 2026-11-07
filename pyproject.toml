@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-brain-router"
 version = "0.1.1"
-description = "MCP connector for multi-backend LLM routing (DeepSeek, GLM, Codex) with native Claude Code orchestration"
+description = "MCP connector that routes delegated work across role-ordered backends (Apple fm, gpt-oss, Grok, DeepSeek, Codex, Claude)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Mohan", email = "mail.n.mohan@gmail.com"}
 ]
-keywords = ["mcp", "llm", "routing", "deepseek", "glm", "codex", "claude"]
+keywords = ["mcp", "llm", "routing", "deepseek", "grok", "codex", "claude"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
