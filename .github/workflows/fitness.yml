@@ -1,0 +1,60 @@
+# fitness: PLAN.md §7 repo rows (I22) and §8's seam check, freeze check and gitleaks, on every PR and on main.
+# checks/fitness.sh lives in dotagents, which is private: with the RIG_READ_TOKEN secret (fine-grained, read-only:
+# contents of dotagents, its issues for the freeze check, and pull requests of the four rig repos for the
+# freeze-waiver history) CI checks it out beside this repo and fitness.sh
+# builds HOME as a temp dir holding each at its home path. Without it the fitness step skips with exit 2 (infra),
+# a warning: infra never freezes (§7), a red main does (§8). Pinned: actions by commit SHA, gitleaks by checksum.
+# No pull_request_target.
+# Source: dotagents specs/lean-rig/ci/mcp-brain-router.yml (the fitness PR); keep the two in step.
+name: fitness
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  fitness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      HAS_RIG_TOKEN: ${{ secrets.RIG_READ_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: mcp-brain-router
+          fetch-depth: 0
+          persist-credentials: false
+      - name: dotagents (holds checks/fitness.sh)
+        if: env.HAS_RIG_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: mohan-n-swamy/dotagents
+          path: dotagents
+          token: ${{ secrets.RIG_READ_TOKEN }}
+          persist-credentials: false
+      - name: gitleaks
+        env:
+          BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          case "$BEFORE" in ''|0000000000000000000000000000000000000000) range=$AFTER ;; *) range="$BEFORE..$AFTER" ;; esac
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-opts="$range" mcp-brain-router
+      - name: fitness.sh ci mcp-brain-router (I22, seam, freeze)
+        env:
+          RIG_SRC: ${{ github.workspace }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ secrets.RIG_READ_TOKEN }}
+        run: |
+          if [ ! -f dotagents/checks/fitness.sh ]; then
+            echo "::warning title=fitness::infra (exit 2): RIG_READ_TOKEN is unset, so dotagents (private) and fitness.sh are absent; nothing ran"; exit 0
+          fi
+          rc=0; bash dotagents/checks/fitness.sh ci mcp-brain-router || rc=$?
+          if [ "$rc" = 2 ]; then echo "::warning title=fitness::infra (exit 2): a row could not run; never a failure or a freeze trigger (PLAN.md §7)"; rc=0; fi
+          exit "$rc"
