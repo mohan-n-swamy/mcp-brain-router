@@ -41,8 +41,8 @@ MIN_TRIALS = 3
 
 @dataclass(frozen=True)
 class Card:
-    slug: str                        # AA slug, hyphenated (R11): "glm-5-3-flash"
-    router_model: str                # the name the router already uses: "glm-5.3-flash"
+    slug: str                        # AA slug, hyphenated (R11): "grok-4-5"
+    router_model: str                # the name the router already uses: "grok-4.5"
     provider: str                    # anthropic|zhipu|moonshot|xai|openai|deepseek
     model: str
     effort: Effort

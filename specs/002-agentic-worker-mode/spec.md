@@ -20,17 +20,19 @@ The router must gain an **agentic execution mode**: a worker task shells to the 
 
 ## Model roster per tier (Mohan 2026-07-12) — candidate lists, first-eligible-non-orchestrator wins
 
+2026-11-07: the GLM and Haiku 4.5 IDs below are retired, so they are written as names, not slugs (lean-rig I18). The original strings are in git history.
+
 GLM is the FIRST port of call for worker AND cheap. The other candidates are the fallbacks (used on GLM exhaustion / when GLM's provider is the orchestrator), picked by the existing adversary-differs + exhausted-providers rules in `resolve_role`.
 
 | Tier | Candidates (ordered) | Canonical model IDs |
 |---|---|---|
-| **worker** | GLM 5.2 → Claude Sonnet → Codex 5.6 Terra | `glm-5.2` · `claude-sonnet-5` · `gpt-5.6-terra` |
-| **cheap** | GLM 4.7 → Claude Haiku → Codex 5.6 Luna | `glm-4.7` · `claude-haiku-4-5` · `gpt-5.6-luna` |
+| **worker** | GLM 5.2 → Claude Sonnet → Codex 5.6 Terra | GLM 5.2 · `claude-sonnet-5` · `gpt-5.6-terra` |
+| **cheap** | GLM 4.7 → Claude Haiku → Codex 5.6 Luna | GLM 4.7 · Claude Haiku 4.5 · `gpt-5.6-luna` |
 | **adversary** | Claude Opus 4.8 OR Codex 5.6 Sol (always one; differs from orchestrator) | `claude-opus-4-8` · `gpt-5.6-sol` |
 
 **Model-ID provenance (truth pillar):**
-- Anthropic IDs VERIFIED against the built-in `claude-api` skill catalog (cached 2026-06-24): `claude-sonnet-5`, `claude-haiku-4-5`, `claude-opus-4-8` — exact strings, no date suffixes. These map to `--model` on the `claude` / `cc-brain claude` CLI.
-- GLM IDs VERIFIED LIVE 2026-07-12 via `MOHAN_CC_GLM_MODEL=<id> cc-glm -p` against z.ai: `glm-5.2`→GLM52-OK, `glm-4.7`→GLM47-OK (both exit 0). The roster originally said "GLM 4.5" but no `glm-4.5` exists anywhere in the stack AND was never a valid z.ai model; corrected to `glm-4.7` per Mohan 2026-07-12 (the real cheap/fast GLM, now live-confirmed).
+- Anthropic IDs VERIFIED against the built-in `claude-api` skill catalog (cached 2026-06-24): `claude-sonnet-5`, Claude Haiku 4.5, `claude-opus-4-8` — exact strings, no date suffixes. These map to `--model` on the `claude` / `cc-brain claude` CLI.
+- GLM IDs VERIFIED LIVE 2026-07-12 via `MOHAN_CC_GLM_MODEL=<id> cc-glm -p` against z.ai: GLM 5.2→GLM52-OK, GLM 4.7→GLM47-OK (both exit 0). The roster originally said "GLM 4.5" but no GLM 4.5 exists anywhere in the stack AND was never a valid z.ai model; corrected to GLM 4.7 per Mohan 2026-07-12 (the real cheap/fast GLM, now live-confirmed).
 - Codex IDs VERIFIED LIVE 2026-07-12 via `codex exec -m <model>` (codex-cli 0.144.1): `gpt-5.6-sol`→CODEX-SOL-OK, `gpt-5.6-terra`→TERRA-OK, `gpt-5.6-luna`→LUNA-OK. All three accepted + returned. Probe flags: `--skip-git-repo-check --ignore-user-config -c mcp_servers={} -c model_reasoning_effort="low"` (per feedback_codex_full_config_mcp_stall).
 
 These land in `[roles]` config candidate lists (the mechanism already exists in `resolve_role`) — worker/cheap/adversary each get their ordered model list; provider-diversity + orchestrator-carveout fall out for free.

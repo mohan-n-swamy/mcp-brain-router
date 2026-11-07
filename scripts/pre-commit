@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Pre-commit hook for this public repo (lean-rig PLAN §6): gitleaks on the
+# staged changes with .gitleaks.toml (default secret rules, plus node IPs and
+# absolute home paths). A hit blocks the commit; fix the line, do not bypass.
+#
+# Install once per clone, by hand (a hook is the clone owner's call):
+#   ln -s ../../scripts/pre-commit "$(git rev-parse --git-common-dir)/hooks/pre-commit"
+set -u
+root=$(git rev-parse --show-toplevel) || exit 1
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not found; install it (apt or brew) before committing here" >&2
+  exit 1
+fi
+cfg=$root/.gitleaks.toml
+# gitleaks 8.19+ names it `git --pre-commit --staged`; older builds `protect --staged`.
+if gitleaks --help 2>/dev/null | grep -q '^  git '; then
+  exec gitleaks git --pre-commit --staged --redact --no-banner -c "$cfg" "$root"
+fi
+exec gitleaks protect --staged --redact --no-banner -c "$cfg" -s "$root"

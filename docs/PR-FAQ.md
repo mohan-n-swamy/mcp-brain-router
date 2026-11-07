@@ -34,7 +34,7 @@ Depends on which provider wins. Volume roles lead with **Kimi** (subscription po
 - No VPS deploy — not on kamakshi containers (ssh-verified 2026-07-30).
 - No in-repo CI.
 - Public `mode` is **agentic-only**; HTTP chat paths remain for internal/tests.
-- GPT-5.6 Sol promotion still eval-gated (prod adversarial complexity default `gpt-5.5`).
+- Codex runs `gpt-6.1-sol`, the only model the ChatGPT login accepts (tested 2026-11-06, D5).
 
 ### 5. How do I run it?
 

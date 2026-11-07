@@ -16,7 +16,7 @@ Add a top-level `decide_backends` list to the router config. The order is the sw
 decide_backends = [
   {name = "jev-office",   url = "https://api.typesafe.ai/v1/systemone",   provider = "jev",  key_file = "~/secret/jev-key-1"},
   {name = "jev-personal", url = "https://api.typesafe.ai/v1/systemone",   provider = "jev",  key_file = "~/secret/jev-key-2"},
-  {name = "laya-mini",    url = "http://100.100.10.20:8090/v1/systemone", provider = "laya", key_file = "~/secret/laya-key", model = "typed-decisions"},
+  {name = "laya-mini",    url = "http://100.64.0.1:8090/v1/systemone", provider = "laya", key_file = "~/secret/laya-key", model = "typed-decisions"},
 ]
 ```
 

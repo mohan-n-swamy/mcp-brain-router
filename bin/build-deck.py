@@ -60,9 +60,9 @@ class Refused(Exception):
 
 
 # A hyphen between two digit groups is a decimal point in the router's naming:
-# AA's slug `glm-5-3-flash` is the router's `glm-5.3-flash`. Confirmed against
-# bench/baseline.json, whose measured rows carry `model: "glm-5.3-flash"`, and
-# consistent with router.py's `grok-4.5` and install.py's `glm-5.3`.
+# AA's slug `grok-4-5` is the router's `grok-4.5`. Confirmed against
+# bench/baseline.json, whose measured rows carried the same shape for a GLM
+# flash model (GLM left the rig 2026-10-25, D5), and consistent with router.py.
 #
 # This is a NAME-SHAPE derivation, not a verified provider id. C01 does not emit
 # router_model, so there is no authoritative slug -> router-id table anywhere in the

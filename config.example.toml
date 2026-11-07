@@ -8,11 +8,12 @@
 # API keys are stored securely (user-read-only, 0600 permissions).
 # Never check real keys into git — only this example template.
 
-# DeepSeek API key (legacy HTTP path / install smoke; not a default role candidate)
+# DeepSeek API key (deepseek-v4-pro in the worker role; unkeyed means skipped)
 deepseek_key = "sk-xxxxxxxxxxxxx"
 
-# GLM (Zhipu) API key — used by explicit complexity cheap|code (not default role shards)
-glm_key = "sk-xxxxxxxxxxxxx"
+# Data class a delegate call gets when the caller names none. "orange" (the
+# Orange host's default) reaches Claude only and refuses rather than falls through.
+# default_class = "personal"
 
 # Codex CLI availability (role cascades + complexity=adversarial)
 # Set to true only if 'codex' binary is installed and on PATH
@@ -31,22 +32,14 @@ kimi_enabled = false
 # Setting it enables the "apple-fm" candidate; put it first in simple only.
 # fm_host = "mini"
 
-# Headroom proxy base URL (optional) — only matters for HTTP chat DeepSeek/GLM paths
+# Headroom proxy base URL (optional) — only matters for the DeepSeek HTTP path
 # Leave commented to use direct API calls
 # headroom_base_url = "http://localhost:8282"
 
-# Model overrides per complexity tier (optional)
+# Model override for the adversarial tier (optional; default gpt-6.1-sol, the
+# only model the ChatGPT login accepts).
 [model_overrides]
-# cheap = "glm-5.3"
-# code = "glm-5.3"
-# adversarial = "gpt-5.5"        # current default
-# adversarial = "gpt-5.6-sol"    # capability-first candidate; promote after eval
+# adversarial = "gpt-6.1-sol"
 
-# Ordered candidates for role-based routing (budget-optimized 2026-07-26).
-# Every role skips the orchestrator's own provider (skip-self).
-# GLM is intentionally absent from role lists — use complexity=cheap|code instead.
-[roles]
-thinker = ["claude-fable-5", "kimi", "gpt-5.6-sol"]
-adversary = ["claude-opus-4-8", "kimi", "gpt-5.6-sol"]
-worker = ["kimi", "grok-4.5", "claude-sonnet-5", "gpt-5.6-terra"]
-simple = ["kimi", "claude-haiku-4-5-20251001", "gpt-5.6-luna"]
+# Role orders are not set here: they live in the repo (config.DEFAULT_ROLES),
+# where the retired-model scan sees them. A [roles] table is ignored.
