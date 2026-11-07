@@ -38,6 +38,15 @@ def _timeout(cap: float) -> float:
     return max(1.0, min(cap, deadline - time.monotonic()))
 
 
+async def _within(request, cap: float):
+    """Await one HTTP request under a wall-clock bound. httpx's timeout bounds
+    each read, so a body trickling in could outlive the call's deadline."""
+    try:
+        return await asyncio.wait_for(request, _timeout(cap))
+    except asyncio.TimeoutError:
+        raise httpx.ReadTimeout("wall-clock deadline passed") from None
+
+
 class BackendError(Exception):
     """Base exception for backend errors."""
 
@@ -683,7 +692,8 @@ async def call_deepseek(
 
     try:
         async with httpx.AsyncClient(timeout=_timeout(HTTP_TIMEOUT_SECONDS)) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await _within(client.post(url, json=payload, headers=headers),
+                                     HTTP_TIMEOUT_SECONDS)
 
             if response.status_code != 200:
                 raise _classify_http_error("DeepSeek", response.status_code, response.text)
@@ -750,7 +760,8 @@ async def call_deepseek_via_headroom(
 
     try:
         async with httpx.AsyncClient(timeout=_timeout(HTTP_TIMEOUT_SECONDS)) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await _within(client.post(url, json=payload, headers=headers),
+                                     HTTP_TIMEOUT_SECONDS)
 
             if response.status_code != 200:
                 raise _classify_http_error("DeepSeek-headroom", response.status_code, response.text)
@@ -1327,7 +1338,7 @@ async def call_ollama(prompt: str, host: str, model: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=_timeout(OLLAMA_PS_TIMEOUT_SECONDS),
                                      trust_env=False) as client:
-            response = await client.get(base + "/api/ps")
+            response = await _within(client.get(base + "/api/ps"), OLLAMA_PS_TIMEOUT_SECONDS)
             response.raise_for_status()
             loaded = response.json().get("models") or []
     except httpx.HTTPError:
@@ -1344,12 +1355,12 @@ async def call_ollama(prompt: str, host: str, model: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=_timeout(OLLAMA_TIMEOUT_SECONDS),
                                      trust_env=False) as client:
-            response = await client.post(base + "/api/generate", json={
+            response = await _within(client.post(base + "/api/generate", json={
                 "model": model, "prompt": prompt, "system": FM_SYSTEM, "stream": False,
                 "options": {"num_predict": 512, "num_ctx": 8192, "num_thread": 2},
                 # Default GPT-OSS reasoning consumed the entire bounded output in live tests.
                 **({"think": "low"} if model.startswith("gpt-oss:") else {}),
-            })
+            }), OLLAMA_TIMEOUT_SECONDS)
             response.raise_for_status()
             data = response.json()
     except httpx.TimeoutException:

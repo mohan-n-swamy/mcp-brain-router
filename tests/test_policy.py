@@ -356,6 +356,32 @@ async def test_gpt_oss_lock_second_caller_skips_after_5s():
     assert paths == ["/api/ps"]  # no generation while another holds the lock
 
 
+async def test_gpt_oss_trickled_body_stops_at_the_deadline():
+    """Chunks inside each read timeout must not carry a generation past the
+    call's deadline: the bound is wall-clock."""
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"done": true, "done_reason": "stop", "response": "'
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                yield b"x"
+            yield b'"}'
+
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": "gpt-oss:20b"}]})
+        return httpx.Response(200, stream=Trickle())
+    token = backends.DEADLINE.set(time.monotonic() + 1)
+    try:
+        started = time.monotonic()
+        with _ollama(handler), pytest.raises(BackendError) as err:
+            await backends.call_ollama("Classify: x", "http://127.0.0.1:11435", "gpt-oss:20b")
+    finally:
+        backends.DEADLINE.reset(token)
+    assert err.value.failure_kind == "timeout"
+    assert time.monotonic() - started < 2
+
+
 def test_gpt_oss_serves_simple_only():
     cfg = _cfg(roles={"worker": ["gpt-oss:20b", "claude-sonnet-5"]})
     assignment = router.resolve_role(router.Role.WORKER, "claude", cfg, mode="agentic")
