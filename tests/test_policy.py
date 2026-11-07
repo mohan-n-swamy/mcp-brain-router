@@ -488,14 +488,27 @@ def test_sandbox_worker_writes_only_its_worktree(tree):
     assert out.stdout.split() == ["ok"] and (tree / "wt" / "g").exists()
 
 
-@needs_bwrap
 def test_sandbox_refusals(tree):
-    home = tree / "home"
-    (home / ".config" / "mcp-brain-router").mkdir(parents=True)
-    (home / ".config" / "mcp-brain-router" / "config.toml").write_text('default_class = "orange"\n')
+    """Every refusal happens before bwrap runs, so /bin/true stands in for it:
+    a run that is not refused exits 0."""
+    def home(name, config=None):
+        h = tree / name
+        (h / ".config" / "mcp-brain-router").mkdir(parents=True)
+        if config is not None:
+            (h / ".config" / "mcp-brain-router" / "config.toml").write_text(config)
+        return {"HOME": str(h), "BRAIN_ROUTER_BWRAP": "/bin/true"}
+    personal, orange = home("personal"), home("orange", 'default_class = "orange"\n')
     wt = str(tree / "wt")
-    assert _sandbox("--class", "orange", wt, "--", "/bin/true").returncode == 3
-    assert _sandbox(wt, "--", "/bin/true", env={"HOME": str(home)}).returncode == 3
-    assert _sandbox("--class", "personal", str(Path.home()), "--", "/bin/true").returncode == 3
+    assert _sandbox("--class", "personal", wt, "--", "/bin/true", env=personal).returncode == 0
+    assert _sandbox("--class", "orange", wt, "--", "/bin/true", env=personal).returncode == 3
+    assert _sandbox(wt, "--", "/bin/true", env=orange).returncode == 3
+    # The Orange host refuses even a caller that names personal, in either quoting.
+    assert _sandbox("--class", "personal", wt, "--", "/bin/true", env=orange).returncode == 3
+    single = home("single", "default_class = 'orange'\n")
+    assert _sandbox("--class", "personal", wt, "--", "/bin/true", env=single).returncode == 3
+    broken = home("broken", 'default_class = "orange\n')
+    assert _sandbox("--class", "personal", wt, "--", "/bin/true", env=broken).returncode == 3
+    assert _sandbox("--class", "personal", personal["HOME"], "--", "/bin/true",
+                    env=personal).returncode == 3
     assert _sandbox("--class", "personal", wt, "--", "/bin/true",
                     env={"BRAIN_ROUTER_BWRAP": "/nonexistent"}).returncode == 2

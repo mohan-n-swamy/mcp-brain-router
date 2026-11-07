@@ -13,9 +13,9 @@
 # Usage: sandbox.sh [--review] [--class personal|orange] [--login DIR]...
 #                   [--ro PATH]... [--env NAME]... WORKTREE -- CMD [ARG]...
 #   --review      mount WORKTREE read-only (every review courier uses this)
-#   --class C     data class. orange is refused: no review or tool worker runs
-#                 on Orange work. Default: default_class in the router config
-#                 (orange on the Orange host), else personal.
+#   --class C     data class, default personal. orange is refused: no review
+#                 or tool worker runs on Orange work. The host's default_class
+#                 (router config; orange on the Orange host) refuses too.
 #   --login DIR   that CLI's login dir under $HOME, read-write (token refresh)
 #   --ro PATH     an extra read-only path: the CLI's install dir, a prompt file
 #   --env NAME    pass one more variable through; secrets are never default
@@ -56,17 +56,29 @@ done
 [[ $# -ge 3 && $2 == -- ]] || usage
 wt_arg=$1; shift 2
 
-# Class: the caller's, else the host default from the router config (one key
-# read; nothing else in that file is printed), else personal.
-if [[ -z $class ]]; then
-  cfg=$home/.config/mcp-brain-router/config.toml
-  if [[ -r $cfg ]]; then
-    class=$(sed -n 's/^[[:space:]]*default_class[[:space:]]*=[[:space:]]*"\([A-Za-z]*\)".*/\1/p' "$cfg" | head -n 1)
-  fi
-  class=${class:-personal}
+# Class: the host's default_class (router config, parsed as TOML; only that
+# key is printed) is checked whatever --class says, so the Orange host refuses
+# every run. A config that exists but does not parse refuses too.
+host_class() {
+  /usr/bin/python3 -I - "$1" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    value = tomllib.load(f).get("default_class", "personal")
+print(value.strip().lower() if isinstance(value, str) else "?")
+PY
+}
+cfg=$home/.config/mcp-brain-router/config.toml
+host=personal
+if [[ -e $cfg ]]; then
+  host=$(host_class "$cfg" 2>/dev/null) || die 3 "cannot read default_class from $cfg"
 fi
-case ${class,,} in
+case $host in
   personal) ;;
+  orange) die 3 "host class orange: no review or tool worker runs on the Orange host" ;;
+  *) die 3 "host default_class is not personal or orange" ;;
+esac
+case ${class,,} in
+  ''|personal) ;;
   orange) die 3 "class orange: no review or tool worker runs on Orange work" ;;
   *) die 64 "unknown class '$class' (personal or orange)" ;;
 esac
