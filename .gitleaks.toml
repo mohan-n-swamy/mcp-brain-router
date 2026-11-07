@@ -1,0 +1,25 @@
+# gitleaks config for this public repo (lean-rig PLAN §6): the default secret
+# rules, plus host details a public repo must not carry. scripts/pre-commit runs
+# it on staged changes. Use ~ or $HOME, never an absolute home path or a node IP.
+title = "mcp-brain-router"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tailnet-ip"
+description = "A Tailscale node address (CGNAT 100.64.0.0/10) names a host"
+regex = '''\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}\b'''
+[rules.allowlist]
+regexTarget = "line"
+# The range itself, which the endpoint checks name, and the one placeholder
+# address tests and docs use. Neither is a node.
+regexes = ['''100\.64\.0\.0/10''', '''100\.64\.0\.1\b''']
+
+[[rules]]
+id = "host-home-path"
+description = "An absolute home path names a host's user"
+regex = '''(?:/Users|/home)/[A-Za-z0-9._-]+/'''
+[rules.allowlist]
+# Placeholder users in test prompts, not a real home.
+regexes = ['''/(?:Users|home)/me/''']
