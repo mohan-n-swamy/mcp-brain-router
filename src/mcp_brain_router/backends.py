@@ -980,6 +980,22 @@ def call_grok(
                 env=_grok_lean_env(),
             )
 
+        if result.returncode != 0 and not _cli_quota_error("Grok", result.stdout, result.stderr):
+            # A turn cut by --max-turns (narration, then a tool call) exits 1
+            # with stopReason=max_turn_requests and empty text (live, grok
+            # 1.0.77, 2026-11-06). A same-provider retry would only repeat the
+            # cut, so it is no_final_message, which the walk does not retry.
+            try:
+                payload = json.loads(result.stdout)
+                stop, detail = payload.get("stopReason"), payload.get("message")
+            except (ValueError, TypeError, AttributeError):
+                stop = detail = None
+            if stop and _normalize_stop_reason(stop) != "endturn":
+                raise BackendError(
+                    f"grok ended without a final message (stopReason={stop!r})"
+                    + (f": {detail}" if isinstance(detail, str) and detail else ""),
+                    backend="grok", failure_kind="no_final_message",
+                    elapsed_ms=round((time.perf_counter() - started) * 1000))
         _raise_cli_failure(
             provider="Grok",
             backend="grok",

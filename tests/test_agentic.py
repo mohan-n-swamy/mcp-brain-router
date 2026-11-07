@@ -236,7 +236,9 @@ class TestSC6Argv:
             with pytest.raises(backends.BackendError) as exc:
                 backends.call_grok("p", "grok-4.5")
         text = str(exc.value)
-        assert exc.value.failure_kind == "process_error"
+        # A turn cut by --max-turns has no final message; the walk moves on
+        # without a same-provider retry (lean-rig §6).
+        assert exc.value.failure_kind == "no_final_message"
         assert "max_turns_reached" in text
         assert "hit cap" in text
 
