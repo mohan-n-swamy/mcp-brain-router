@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -280,18 +281,56 @@ permission_mode = "always-approve"
 """
 
 
+def _grok_auth_valid(path: str) -> bool:
+    """True when a Grok auth file holds a login: a provider entry with a refresh token or key.
+
+    `{}` is what grok writes when a refresh fails, so it is never valid. No value is read out."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and any(
+        isinstance(v, dict) and bool(v.get("refresh_token") or v.get("key")) for v in data.values()
+    )
+
+
+def _share_grok_auth(src_auth: str, dest_auth: str) -> None:
+    """Make the lean home's auth.json a symlink to ~/.grok/auth.json, keeping the newest valid login.
+
+    Grok's login is a 6 h access token plus a refresh token. While the lean home held a copy, the home
+    that refreshed first left the other with a dead refresh token; that one wrote {} on its next
+    refresh, and the old copy step (newer src wins) pushed the {} into the lean home as well: on
+    2026-11-08 both homes signed out at 12:27. A symlink gives both homes one file. If grok replaces
+    the link with a regular file when it refreshes, the next call copies that newer valid login back
+    and links again. A file without a login never replaces one that has it."""
+    if os.path.islink(dest_auth) and os.path.realpath(dest_auth) == os.path.realpath(src_auth):
+        return
+    tag = f"router-{os.getpid()}-{threading.get_ident()}"
+    src_ok, dest_ok = _grok_auth_valid(src_auth), _grok_auth_valid(dest_auth)
+    if dest_ok and not os.path.islink(dest_auth) and (
+        not src_ok or os.path.getmtime(dest_auth) > os.path.getmtime(src_auth)
+    ):
+        os.makedirs(os.path.dirname(src_auth), mode=0o700, exist_ok=True)
+        tmp = f"{src_auth}.{tag}"
+        shutil.copy2(dest_auth, tmp)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, src_auth)
+        src_ok = True
+    if not src_ok:
+        return  # no login on either side: nothing to share
+    tmp_link = f"{dest_auth}.{tag}"
+    if os.path.lexists(tmp_link):
+        os.remove(tmp_link)
+    os.symlink(src_auth, tmp_link)
+    os.replace(tmp_link, dest_auth)
+
+
 def _ensure_grok_lean_home() -> str:
-    """Create/refresh a stripped GROK_HOME with only auth.json copied over."""
+    """Create/refresh a stripped GROK_HOME that shares ~/.grok/auth.json through a symlink."""
     dest = _GROK_LEAN_HOME
     os.makedirs(dest, mode=0o700, exist_ok=True)
-    src_auth = os.path.expanduser("~/.grok/auth.json")
-    dest_auth = os.path.join(dest, "auth.json")
-    if os.path.exists(src_auth) and (
-        not os.path.exists(dest_auth)
-        or os.path.getmtime(src_auth) > os.path.getmtime(dest_auth)
-    ):
-        shutil.copy2(src_auth, dest_auth)
-        os.chmod(dest_auth, 0o600)
+    _share_grok_auth(os.path.expanduser("~/.grok/auth.json"), os.path.join(dest, "auth.json"))
     cfg_path = os.path.join(dest, "config.toml")
     existing = ""
     if os.path.exists(cfg_path):
