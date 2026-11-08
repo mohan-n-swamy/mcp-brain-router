@@ -828,7 +828,12 @@ class TestCavemanSystemDirective:
 
     def test_constant_exists_and_terse_intent(self):
         assert backends.CAVEMAN_SYSTEM
-        assert "caveman" in backends.CAVEMAN_SYSTEM.lower()
+        assert "terse" in backends.CAVEMAN_SYSTEM.lower()
+
+    def test_directive_names_no_skill(self):
+        # Grok read "caveman" as a skill to load and its one tools-off turn was cut
+        # (no_final_message, 2026-11-08); the directive must not name a skill.
+        assert "caveman" not in backends.CAVEMAN_SYSTEM.lower()
 
     def test_codex_prompt_prepends_caveman(self):
         with patch("mcp_brain_router.backends.subprocess.run") as mrun:

@@ -514,8 +514,14 @@ def _normalize_stop_reason(value: object) -> str:
 # the reply is noise, so the directive must COMMAND tool use, not silence it.
 # G-guard: tests/test_smoke.py TestAgenticSystemDirective (asserts the agentic
 # workers carry AGENTIC_SYSTEM and this string never leaks into them).
+# The directive names no skill. Until 2026-11-08 it opened "Reply caveman ultra:", and Grok (grok-4.5,
+# tools-off, --max-turns 1) read the word as a skill to load: it announced "Reading the caveman skill"
+# and the turn was cut (stopReason max_turn_requests -> no_final_message). Measured on annapurna with
+# the router's exact argv: the old opening failed 3 of 6 and 3 of 8 runs, 7 of 8 with every built-in
+# tool removed; "Reply terse:" passed 8 of 8. The walk then fell through to Claude, so the worker role
+# had no non-Claude backend (acceptance row A7). G-guard: tests/test_smoke.py TestCavemanSystemDirective.
 CAVEMAN_SYSTEM = (
-    "Reply caveman ultra: drop articles, filler, pleasantries, hedging. "
+    "Reply terse: drop articles, filler, pleasantries, hedging. "
     "Fragments OK. Keep ALL technical substance exact — code, numbers, error "
     "strings, identifiers unchanged. Answer only what was asked; no preamble, "
     "no restating the question, no meta-commentary. Terse."
