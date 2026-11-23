@@ -866,7 +866,9 @@ def create_server():
             Legacy tiers: 'cheap' walks simple, 'code' walks worker,
             'adversarial' is still Codex sol alone (legacy; use role="adversary").
             Grok refuses a prompt over 90,000 characters (its CLI cuts longer ones);
-            the walk then goes to Claude with the whole prompt.
+            the walk then goes to Claude with the whole prompt. A Claude caller asking
+            for an adversary has no second provider for such a prompt: the call fails
+            with prompt_too_long. Split the text into parts under the cap and ask per part.
 
             Non-Claude workers run tools-off: put everything they need in the
             prompt. Claude workers run `cc-brain claude` in `cwd` with tools.
