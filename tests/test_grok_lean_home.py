@@ -94,3 +94,21 @@ def test_existing_link_is_left_alone(homes):
 
 def test_validity_reads_no_value():
     assert backends._grok_auth_valid("/nonexistent/auth.json") is False
+
+
+def test_grok_refuses_a_prompt_its_cli_would_cut():
+    """Over 90,000 characters the Grok CLI drops the middle of the prompt, so the call must fail before it starts."""
+    import pytest
+    from mcp_brain_router import backends
+
+    with pytest.raises(backends.BackendError) as exc:
+        backends.call_grok("x" * (backends.GROK_PROMPT_LIMIT + 1), "grok-4.5")
+    assert exc.value.failure_kind == "prompt_too_long" and exc.value.backend == "grok"
+
+
+def test_roles_are_grok_and_claude_only():
+    from mcp_brain_router.config import DEFAULT_ROLES
+
+    local = {"apple-fm", "gpt-oss:20b"}
+    for role, models in DEFAULT_ROLES.items():
+        assert all(m in local or m.startswith(("grok-", "claude-")) for m in models), (role, models)

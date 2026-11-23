@@ -64,16 +64,18 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    # D5 (Mohan, 2026-11-06), free first. The orders live here, in the repo,
-    # where the retired-ID scan (lean-rig I18) sees them; a host config.toml
-    # [roles] table is ignored (Config.load). A missing binary or key is a free
-    # skip, so Kimi (not installed) and DeepSeek (unkeyed) cost nothing.
-    # gpt-oss runs only when warm and only for `simple` (backends.call_ollama).
-    "simple": ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5"],
-    "worker": ["kimi", "grok-4.5", "deepseek-v4-pro", "claude-sonnet-5", "gpt-6.1-sol"],
-    "adversary": ["gpt-6.1-sol", "claude-opus-5-5", "kimi"],
-    # Not in D5; only its Codex entry moves to the one model the ChatGPT login takes.
-    "thinker": ["grok-4.5", "claude-fable-5", "gpt-6.1-sol"],
+    # Grok and Claude only (Mohan, 2026-11-23): Kimi, DeepSeek, GLM and Codex are out of
+    # every role. Codex ran out of quota mid-run that day, Kimi and DeepSeek were unkeyed,
+    # and each dead slot cost a failed attempt before a live one answered. Grok goes first
+    # because it has the room; Claude is the second provider, so an adversary still crosses
+    # providers (a candidate matching the caller's own provider is skipped).
+    # The orders live here, in the repo, where the retired-ID scan (lean-rig I18) sees
+    # them; a host config.toml [roles] table is ignored (Config.load).
+    # `simple` keeps its two local free tiers; gpt-oss runs only when warm (backends.call_ollama).
+    "simple": ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5", "grok-4.5"],
+    "worker": ["grok-4.5", "claude-sonnet-5"],
+    "adversary": ["grok-4.5", "claude-opus-5-5"],
+    "thinker": ["grok-4.5", "claude-fable-5"],
 }
 
 # The Codex models a host [model_overrides] adversarial entry may name: the

@@ -964,6 +964,11 @@ def call_codex(
 GROK_TOOLS_OFF = ["--max-turns", "1", "--no-subagents", "--no-plan", "--disable-web-search"]
 
 
+# Probed 2026-11-23 on grok 1.0.x: a prompt file of 98,491 characters arrived whole, one of
+# 108,344 arrived with its middle cut. 90,000 leaves room for the preamble.
+GROK_PROMPT_LIMIT = 90_000
+
+
 def grok_final_message(stdout: str) -> tuple[str, Dict[str, Any]]:
     """The final message of one tools-off `--output-format json` run, and the payload.
 
@@ -1018,10 +1023,18 @@ def call_grok(
     _validate_model_name(model)
 
     started = time.perf_counter()
+    text = f"{CAVEMAN_SYSTEM}\n\n{prompt}"
+    if len(text) > GROK_PROMPT_LIMIT:
+        # The Grok CLI cuts the middle out of a longer prompt file and tells the model to go
+        # and read it; tools-off it then stops or answers from the cut text. Refuse, so the
+        # walk moves to the next provider with the whole prompt.
+        raise BackendError(
+            f"prompt is {len(text)} characters; Grok takes at most {GROK_PROMPT_LIMIT}",
+            backend="grok", failure_kind="prompt_too_long", elapsed_ms=0)
     limit = _timeout(CODEX_TIMEOUT_SECONDS)
     try:
         with tempfile.TemporaryDirectory(prefix="brain-router-grok-") as workdir, \
-                _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
+                _grok_prompt_file(text) as pf:
             result = subprocess.run(
                 [_GROK_BIN, "--prompt-file", pf, "-m", model, *GROK_TOOLS_OFF,
                  "--output-format", "json"]

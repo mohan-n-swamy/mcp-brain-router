@@ -80,12 +80,13 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
                                                 data_class=data_class)
 
 
-# ── Role orders (D5) ────────────────────────────────────────────────────────
+# ── Role orders (Grok and Claude only, Mohan 2026-11-23; was D5) ─────────────
 
 @pytest.mark.parametrize("role,order", [
-    ("simple", ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5"]),
-    ("worker", ["kimi", "grok-4.5", "deepseek-v4-pro", "claude-sonnet-5", "gpt-6.1-sol"]),
-    ("adversary", ["gpt-6.1-sol", "claude-opus-5-5", "kimi"]),
+    ("simple", ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5", "grok-4.5"]),
+    ("worker", ["grok-4.5", "claude-sonnet-5"]),
+    ("adversary", ["grok-4.5", "claude-opus-5-5"]),
+    ("thinker", ["grok-4.5", "claude-fable-5"]),
 ])
 def test_d5_role_order(role, order):
     assert DEFAULT_ROLES[role] == order
@@ -224,7 +225,7 @@ async def test_adversarial_tier_sends_the_preamble():
 
 # ── The walk, deadlines, preamble at every backend ──────────────────────────
 
-async def test_walk_passes_three_failed_backends():
+async def test_walk_passes_a_failed_grok_to_claude():
     calls = Calls()
 
     def grok(prompt, model, effort=None):
@@ -243,8 +244,8 @@ async def test_walk_passes_three_failed_backends():
           patch.object(backends, "call_deepseek", side_effect=deepseek),
           patch.object(backends, "call_anthropic_agentic", side_effect=claude)):
         out = await _walk(_cfg(), "worker")
-    # kimi refuses (no tools-off mode), grok has no final message, deepseek is empty.
-    assert out["tried"] == ["kimi", "grok", "deepseek", "anthropic-cli"]
+    # grok has no final message; Claude is the only other provider in the role.
+    assert out["tried"] == ["grok", "anthropic-cli"]
     assert (out["backend"], out["model"], out["answer"]) == ("anthropic-cli", "claude-sonnet-5", "built")
     assert out["retried"] == []  # a cut Grok turn is not retried on Grok
     deadlines = {d for _, d in calls.seen.values()}
