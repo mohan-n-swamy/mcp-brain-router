@@ -855,16 +855,18 @@ def create_server():
             """
             Delegate by orchestration role (or a legacy complexity tier).
 
-            Role orders (D5, free first); each call walks its role's whole order
+            Role orders (Grok and Claude only, 2026-11-23); each call walks its role's whole order
             within one deadline (simple 120 s, worker 15 min). A backend with no
             binary or key is skipped; an error, timeout or empty answer falls
             through to the next:
-            - simple: Apple fm → gpt-oss:20b (warm only) → Claude Haiku
-            - worker: Kimi → Grok → DeepSeek V4 Pro → Claude Sonnet → Codex sol
-            - adversary: Codex sol → Claude Opus → Kimi (never your own provider)
-            - thinker: Grok → Claude Fable → Codex sol
+            - simple: Apple fm → gpt-oss:20b (warm only) → Claude Haiku → Grok
+            - worker: Grok → Claude Sonnet
+            - adversary: Grok → Claude Opus (never your own provider)
+            - thinker: Grok → Claude Fable
             Legacy tiers: 'cheap' walks simple, 'code' walks worker,
-            'adversarial' is Codex sol alone.
+            'adversarial' is still Codex sol alone (legacy; use role="adversary").
+            Grok refuses a prompt over 90,000 characters (its CLI cuts longer ones);
+            the walk then goes to Claude with the whole prompt.
 
             Non-Claude workers run tools-off: put everything they need in the
             prompt. Claude workers run `cc-brain claude` in `cwd` with tools.
