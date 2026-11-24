@@ -169,3 +169,18 @@ async def test_last_entry_reserved(monkeypatch):
     assert out["model"] == "claude-haiku-5-5", out
     assert budgets["fm"] <= ping.LOCAL_ENTRY_CAP_S + 0.5
     assert budgets["haiku"] >= ping.RESERVE_S - 1
+
+
+def test_slow_role_call_cap_outlasts_the_cli_cap():
+    """A 30-minute role raises the per-call cap; a deadline still bounds it."""
+    assert backends._timeout(backends.CODEX_TIMEOUT_SECONDS) == backends.CODEX_TIMEOUT_SECONDS
+    tok = backends.CALL_CAP.set(900)
+    try:
+        assert backends._timeout(backends.CODEX_TIMEOUT_SECONDS) == 900
+        d = backends.DEADLINE.set(time.monotonic() + 60)
+        try:
+            assert backends._timeout(backends.CODEX_TIMEOUT_SECONDS) <= 60
+        finally:
+            backends.DEADLINE.reset(d)
+    finally:
+        backends.CALL_CAP.reset(tok)

@@ -526,6 +526,8 @@ async def _delegate_role_impl(
         total_s = deadline_seconds(role_enum.value)
         deadline = time.monotonic() + total_s
         reserve_s = max(ping.RESERVE_S, total_s // 10)
+        # A 30-minute role lets one call run 15 minutes; the others keep the CLI cap.
+        backends.CALL_CAP.set(total_s / 2 if total_s >= 1800 else None)
 
         def has_next(model: str) -> bool:
             try:

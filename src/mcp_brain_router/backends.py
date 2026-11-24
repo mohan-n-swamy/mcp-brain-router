@@ -31,8 +31,18 @@ DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
 )
 
 
+# Per-call cap for the slow roles (thinker, adversary, writer, qa): a top thinking
+# level on a long prompt outruns the 360 s CLI cap (2026-11-24: Neon XHigh and
+# Carbon High both timed out at 360 s on a 34 KB review). server sets it per walk.
+CALL_CAP: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "brain_router_call_cap", default=None
+)
+
+
 def _timeout(cap: float) -> float:
-    """`cap` seconds, or the time left before the call's deadline if less."""
+    """`cap` seconds (the walk's CALL_CAP if larger), or the time left before the
+    call's deadline if less."""
+    cap = max(cap, CALL_CAP.get() or 0)
     deadline = DEADLINE.get()
     if deadline is None:
         return cap
