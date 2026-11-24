@@ -64,7 +64,7 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    # D15 (Mohan, 2026-11-24) supersedes D5: "so from now on we have antigravity,
+    # D16 (Mohan, 2026-11-24) supersedes D5: "so from now on we have antigravity,
     # grok and claude on the rig". Codex (gpt-6.1-sol), Kimi and DeepSeek are out
     # of every role; their call_* functions stay, reachable only by explicit
     # model name. The orders live here, in the repo, where the retired-ID scan

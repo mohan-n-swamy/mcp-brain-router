@@ -96,7 +96,7 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
     ("thinker", ["grok-4.5", "gemini-4-neon-xhigh", "claude-fable-5"]),
 ])
 def test_d15_role_order(role, order):
-    """D15 (Mohan, 2026-11-24) supersedes D5: Antigravity, Grok, Claude only."""
+    """D16 (Mohan, 2026-11-24) supersedes D5: Antigravity, Grok, Claude only."""
     assert DEFAULT_ROLES[role] == order
 
 
@@ -232,7 +232,7 @@ async def test_adversarial_tier_sends_the_preamble():
     with (patch.object(server, "_load_config", return_value=_cfg()),
           patch.object(server, "_read_caller", return_value="claude"),
           patch.object(server, "route", side_effect=fake_route)):
-        await server._delegate_impl("adversarial", "review this", cwd="/tmp")
+        await server._delegate_impl("adversarial", "review this", model="gpt-6.1-sol", cwd="/tmp")
     assert seen["prompt"] == policy.with_preamble("review this")
 
 
@@ -333,7 +333,7 @@ async def test_gpt_oss_cold_skips_without_waiting():
 
 
 async def test_cold_gpt_oss_means_gemini_then_haiku():
-    """D15: gemini-3.8-flash-low sits between gpt-oss and Haiku."""
+    """D16: gemini-3.8-flash-low sits between gpt-oss and Haiku."""
     fm_down = BackendError("mini down", backend="apple-fm", failure_kind="unreachable", elapsed_ms=5)
     with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),
           patch.object(backends, "call_antigravity",

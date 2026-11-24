@@ -1108,7 +1108,7 @@ def call_grok(
 # Antigravity (`agy`, subprocess, tools-off, final message only)
 # ============================================================================
 
-# D15 (Mohan, 2026-11-24): Antigravity is the third rig provider. Only Gemini
+# D16 (Mohan, 2026-11-24): Antigravity is the third rig provider. Only Gemini
 # models run here: `agy models` also lists claude-* and gpt-oss ids, and a
 # Claude caller's adversary must never be Claude served through agy (A28).
 _AGY_MODEL_RE = re.compile(r"^gemini-[A-Za-z0-9._-]+$")
@@ -1129,10 +1129,27 @@ _AGY_DENY_HOOK = json.dumps({
 })
 
 
+# Lean one-shots (measured 2026-11-24, one-word prompt, gemini-3.8-flash-low):
+# with the rig plugin installed, a plain folder costs 25,630 input tokens; with
+# this manifest (agy skips excluded plugins in every location) 9,830. Needs a
+# workdir outside any git repo. Nothing shared is toggled.
+_AGY_LEAN_PLUGINS = json.dumps({"exclude": ["rig", "ponytail"]})
+
+
+def _write_agy_hook(workdir: str) -> None:
+    """Write the deny-all tool hook into `workdir` (the only barrier between a
+    delegated prompt and the real disk, so one function owns it)."""
+    os.makedirs(os.path.join(workdir, ".agents"))
+    with open(os.path.join(workdir, ".agents", "hooks.json"), "w", encoding="utf-8") as fh:
+        fh.write(_AGY_DENY_HOOK)
+    with open(os.path.join(workdir, ".agents", "plugins.json"), "w", encoding="utf-8") as fh:
+        fh.write(_AGY_LEAN_PLUGINS)
+
+
 def _agy_env() -> Dict[str, str]:
     """Env for agy. HOME must stay the real one: the login lives in the macOS
-    keychain, so a separate HOME (a lean home like grok's) signs agy out
-    (tested 2026-11-24). Only agy's own bin dir is prepended to PATH."""
+    keychain and ~/.gemini, so a separate HOME signs agy out (tested
+    2026-11-24). Only agy's own bin dir is prepended to PATH."""
     env = _base_cli_env()
     agy_bin = os.path.dirname(_AGY_BIN) if os.path.sep in _AGY_BIN else ""
     if agy_bin:
@@ -1170,9 +1187,7 @@ def call_antigravity(
     limit = _timeout(CODEX_TIMEOUT_SECONDS)
     try:
         with tempfile.TemporaryDirectory(prefix="brain-router-agy-") as workdir:
-            os.makedirs(os.path.join(workdir, ".agents"))
-            with open(os.path.join(workdir, ".agents", "hooks.json"), "w", encoding="utf-8") as fh:
-                fh.write(_AGY_DENY_HOOK)
+            _write_agy_hook(workdir)
             result = subprocess.run(
                 [_AGY_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model,
                  "--output-format", "json", "--print-timeout", f"{int(limit)}s"],
@@ -1187,7 +1202,8 @@ def call_antigravity(
             )
 
         elapsed_ms = round((time.perf_counter() - started) * 1000)
-        if result.returncode != 0 and "print_timeout" in (result.stderr or ""):
+        # agy names the timeout in stderr (AGY_ERROR) and in stdout (finished_reason).
+        if result.returncode != 0 and "print_timeout" in f"{result.stderr}\n{result.stdout}":
             raise subprocess.TimeoutExpired(_AGY_BIN, limit)
         _raise_cli_failure(
             provider="Antigravity",

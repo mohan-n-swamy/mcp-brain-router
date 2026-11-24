@@ -1,4 +1,5 @@
-"""Legacy tiers: cheap and code walk a role list (GLM left the rig, D5)."""
+"""Legacy tiers walk a role list: cheap=simple, code=worker, adversarial=adversary
+(D16 took Codex out of every role; only an explicit model name reaches it)."""
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,7 +9,8 @@ from mcp_brain_router.config import Config
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tier,role", [("cheap", "simple"), ("code", "worker")])
+@pytest.mark.parametrize("tier,role", [("cheap", "simple"), ("code", "worker"),
+                                       ("adversarial", "adversary")])
 async def test_tier_walks_role_list(tier, role):
     role_call = AsyncMock(return_value={"answer": "ok", "backend": "anthropic-cli", "role": role})
     with (
@@ -26,7 +28,7 @@ async def test_tier_walks_role_list(tier, role):
 
 
 @pytest.mark.asyncio
-async def test_adversarial_tier_keeps_codex_route():
+async def test_adversarial_tier_with_explicit_model_reaches_codex():
     with (
         patch.object(server, "_load_config", return_value=Config(codex_enabled=True)),
         patch.object(server, "_read_caller", return_value="claude"),
@@ -34,7 +36,7 @@ async def test_adversarial_tier_keeps_codex_route():
         patch.object(server, "_delegate_role_impl", new_callable=AsyncMock) as role_call,
         patch.object(server, "_log_delegation"),
     ):
-        await server._delegate_impl("adversarial", "p", cwd="/tmp")
+        await server._delegate_impl("adversarial", "p", model="gpt-6.1-sol", cwd="/tmp")
     route_call.assert_awaited_once()
     role_call.assert_not_awaited()
 

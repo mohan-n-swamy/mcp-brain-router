@@ -1,4 +1,4 @@
-"""D15 (Mohan, 2026-11-24): Antigravity (`agy`) is a rig provider. Gemini ids only."""
+"""D16 (Mohan, 2026-11-24): Antigravity (`agy`) is a rig provider. Gemini ids only."""
 from __future__ import annotations
 
 import json
@@ -74,6 +74,7 @@ def test_workdir_holds_a_deny_all_tool_hook():
         path = os.path.join(kw["cwd"], ".agents", "hooks.json")
         seen["hooks"] = json.loads(open(path).read())
         seen["cwd"] = kw["cwd"]
+        seen["plugins_text"] = open(os.path.join(kw["cwd"], ".agents", "plugins.json")).read()
         return _proc(json.dumps(OK))
 
     with patch("mcp_brain_router.backends.subprocess.run", side_effect=fake):
@@ -81,6 +82,7 @@ def test_workdir_holds_a_deny_all_tool_hook():
     group = seen["hooks"]["brain-router-tools-off"]["PreToolUse"][0]
     assert group["matcher"] == "*"
     assert '"decision":"deny"' in group["hooks"][0]["command"]
+    assert json.loads(seen["plugins_text"]) == {"exclude": ["rig", "ponytail"]}
     assert not os.path.exists(seen["cwd"])  # temp dir is removed
 
 
@@ -101,6 +103,13 @@ def test_print_timeout_is_transient():
         with pytest.raises(BackendTransientError) as e:
             call_antigravity("hi", "gemini-3.8-flash-low")
     assert e.value.failure_kind == "timeout"
+
+
+def test_print_timeout_named_only_in_stdout_is_transient():
+    out = json.dumps({"status": "ERROR", "response": "", "finished_reason": "print_timeout"})
+    with patch("mcp_brain_router.backends.subprocess.run", return_value=_proc(out, 3, "")):
+        with pytest.raises(BackendTransientError):
+            call_antigravity("hi", "gemini-3.8-flash-low")
 
 
 def test_subprocess_timeout_is_transient():
@@ -138,13 +147,17 @@ def test_empty_and_invalid_output_raise():
 # ---- binary resolution from a bare PATH --------------------------------------
 
 def test_agy_resolves_from_the_fallback_dirs_on_a_bare_path(tmp_path, monkeypatch):
-    fake = tmp_path / "agy"
+    fake_dir = tmp_path / ".local" / "bin"
+    fake_dir.mkdir(parents=True)
+    fake = fake_dir / "agy"
     fake.write_text("#!/bin/sh\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    assert backends._resolve_bin("agy", (str(tmp_path),)) == str(fake)
-    assert "/opt/homebrew/bin" in backends._AGY_FALLBACK_DIRS
+    monkeypatch.setenv("HOME", str(tmp_path))  # "~" must expand to the fake home
     assert "~/.local/bin" in backends._AGY_FALLBACK_DIRS
+    assert backends._resolve_bin("agy", ("/nonexistent-dir", "~/.local/bin")) == str(fake)
+    assert backends._resolve_bin("agy", (str(fake_dir),)) == str(fake)
+    assert backends._resolve_bin("agy", ("/nonexistent-dir",)) == "agy"
 
 
 def test_missing_agy_is_a_free_skip(monkeypatch):
@@ -155,11 +168,11 @@ def test_missing_agy_is_a_free_skip(monkeypatch):
     router._validate_credentials("antigravity", Config())  # no raise
 
 
-def test_agy_env_prepends_its_bin_and_keeps_real_home(monkeypatch):
+def test_agy_env_prepends_its_bin(monkeypatch):
     monkeypatch.setattr(backends, "_AGY_BIN", "/opt/homebrew/bin/agy")
-    env = backends._agy_env()
-    assert env["PATH"].split(os.pathsep)[0] == "/opt/homebrew/bin"
-    assert env.get("HOME") == os.environ.get("HOME")  # a lean HOME signs agy out
+    assert backends._agy_env()["PATH"].split(os.pathsep)[0] == "/opt/homebrew/bin"
+
+
 
 
 # ---- wiring ---------------------------------------------------------------
@@ -230,10 +243,56 @@ def test_real_agy_answers():
     assert r["usage"]["input_tokens"] > 0
 
 
-def test_real_agy_cannot_run_tools(tmp_path):
-    """A prompt that needs a file write: the deny hook must stop it."""
+def _agy_tool_steps(workdir, target, hooked):
+    """Run agy in stream-json, forced to need a shell tool; return {tool step: (state, error)}."""
+    if hooked:
+        backends._write_agy_hook(workdir)
+    prompt = (f"Run the shell command `echo hi > {target}` with your shell tool, then say "
+              "what happened. You cannot answer without running it.")
+    out = subprocess.run(
+        [backends._AGY_BIN, "-p", prompt, "--model", "gemini-3.8-flash-low",
+         "--output-format", "stream-json", "--print-timeout", "90s"],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=workdir,
+        env=backends._agy_env(), timeout=120).stdout
+    steps = {}
+    for line in out.splitlines():
+        ev = json.loads(line)
+        su = ev.get("step_update") or {}
+        if su.get("step_type") == "tool":
+            steps[su["step_index"]] = (su["state"], (su.get("tool_info") or {}).get("error"))
+    return steps
+
+
+def test_real_agy_deny_hook_fires_and_refuses_the_tool(tmp_path):
+    """Proof, not absence: agy's own stream shows the tool call was attempted and
+    refused by the pre-tool hook. The control run (no hook) shows the same prompt
+    does run a tool, so an inert hook cannot pass this."""
     _agy_or_skip()
+    work = tmp_path / "hooked"
+    work.mkdir()
     target = tmp_path / "must-not-exist.txt"
-    call_antigravity(f"Use your tools to create the file {target} containing hi. "
-                     "Then say what happened.", "gemini-3.8-flash-low")
+    steps = _agy_tool_steps(str(work), target, hooked=True)
+    assert steps, "the prompt never reached a tool call, so the hook was not tested"
+    for state, err in steps.values():
+        assert state == "ERROR" and "denied by pre-tool hook" in (err or {}).get("message", ""), steps
     assert not target.exists()
+
+
+def test_real_agy_control_runs_the_tool_without_the_hook(tmp_path):
+    _agy_or_skip()
+    work = tmp_path / "bare"
+    work.mkdir()
+    target = tmp_path / "control.txt"
+    steps = _agy_tool_steps(str(work), target, hooked=False)
+    assert any(state == "DONE" for state, _ in steps.values()), steps
+    assert target.exists()
+
+
+def test_real_agy_one_shot_is_lean_with_the_rig_plugin_installed():
+    _agy_or_skip()
+    out = subprocess.run([backends._AGY_BIN, "plugin", "list"], stdin=subprocess.DEVNULL,
+                         capture_output=True, text=True, timeout=60).stdout
+    if "- rig" not in out:
+        pytest.skip("rig plugin not installed")
+    r = call_antigravity("Reply with the single word OK.", "gemini-3.8-flash-low")
+    assert 0 < r["usage"]["input_tokens"] < 15000, r["usage"]

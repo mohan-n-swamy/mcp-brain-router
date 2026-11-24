@@ -4,18 +4,20 @@ An MCP server for Claude Code and Codex that delegates agentic sub-tasks to exte
 
 ## What It Is
 
-`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Codex, and Grok. Standard calls select a role (`worker`, `simple`, `thinker`, or `adversary`), and each role walks an ordered list of backends fixed in this repo. Legacy complexity calls remain: `cheap` walks `simple`, `code` walks `worker`, and `adversarial` is Codex alone.
+`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Antigravity, and Grok (a Codex host may still call it). Standard calls select a role (`worker`, `simple`, `thinker`, or `adversary`), and each role walks an ordered list of backends fixed in this repo. Legacy complexity calls remain: `cheap` walks `simple`, `code` walks `worker`, and `adversarial` walks `adversary` (Codex only when the call names a Codex model).
 
 ## Why It Exists
 
-Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker order, free models first (D15, Mohan 2026-11-24, superseding D5: Antigravity, Grok and Claude are the rig; Codex, Kimi and DeepSeek are out of every role and stay reachable only by explicit model name):
+Keep orchestration separate from worker selection. The human chooses Claude, Antigravity, or Grok as orchestrator (a Codex host may still call, but Codex is never a worker); the router owns the worker order, free models first (D16, Mohan 2026-11-24, superseding D5: Antigravity, Grok and Claude are the rig; Codex, Kimi and DeepSeek are out of every role and stay reachable only by explicit model name):
 
 - **Simple**: Apple fm (on the Mac mini) → gpt-oss:20b (this host's Ollama, only when already loaded) → `gemini-3.8-flash-low` → Claude Haiku 5.5.
 - **Worker**: Grok 4.5 → `gemini-4-neon-medium` → Claude Sonnet 5.
 - **Adversary**: `gemini-4-neon-high` → Grok 4.5 → Claude Opus 5.5. Never the caller's own provider.
 - **Thinker**: Grok 4.5 → `gemini-4-neon-xhigh` → Claude Fable 5.
 
-Antigravity is the `agy` CLI, one tools-off turn per call: the router writes a deny-all tool hook into an empty working folder (agy runs shell and file tools unprompted otherwise). Only `gemini-*` ids run there. The id's suffix is the effort, so `effort` is not applied. There is no enable flag: no `agy` binary means a free skip.
+Antigravity is the `agy` CLI, one tools-off turn per call: the router writes a deny-all tool hook into an empty working folder (agy runs shell and file tools unprompted otherwise). Only `gemini-*` ids run there. The id's suffix is the effort, so `effort` is not applied. There is no enable flag: no `agy` binary means a free skip. A test drives the real `agy` in stream-json and checks that its own stream shows the tool call refused by the hook (a no-hook control run shows the same prompt does run a tool); the plain `json` format the router uses carries no tool evidence, so the router cannot see a refusal at call time.
+
+Token cost, measured 2026-11-24 on `gemini-3.8-flash-low`, one "Reply OK" prompt: with the rig plugin in `~/.gemini/config` every one-shot sends about 25,640 input tokens (three calls in a row: 25,642, 25,635, 25,634; `cache_read_tokens` 0 each time, so agy caches nothing between separate calls; it caches inside one call, where a tool turn read 23,661 cached tokens). Without the plugin it is about 9,300-10,000. The router therefore writes `.agents/plugins.json` with `{"exclude": ["rig", "ponytail"]}` next to the deny hook in its temp working folder (agy skips excluded plugins in every location). Three router calls then cost 10,064, 10,064 and 10,062 input tokens (the first plain-folder figure above is 25,640). The login stays and no shared file is touched. The temp folder must stay outside any git repo, because agy's walk stops at the repo root. A real-agy test asserts under 15,000 when the rig plugin is installed. Tried and not used: a lean HOME (works at about 9,400 but symlinks the whole `~/.gemini` and `~/Library`; superseded), `--agent` (agy lists no custom agents; four layouts tried), `--project default-cli-project` (no change), `--settings` plugin keys, config-dir environment variables and `--disable-slash-commands` (no effect), and `agy plugin disable rig` around a call (it rewrites a file shared by every running session).
 
 A call walks its role's whole order within one deadline (`simple` 120 s, the others 15 min). A backend with no binary or key is skipped; an error, a timeout or an empty answer falls through to the next. The orders live in `config.DEFAULT_ROLES`; a host `config.toml` `[roles]` table is ignored, so a scan of this repo sees every model ID the router uses.
 

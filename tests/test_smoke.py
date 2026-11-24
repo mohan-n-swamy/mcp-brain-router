@@ -577,7 +577,7 @@ class TestTerminalMetadata:
             patch.object(server, "route", new_callable=AsyncMock, return_value=quota_result),
             patch.object(server, "_log_delegation") as log_call,
         ):
-            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
+            response = await server._delegate_impl("adversarial", "p", model="gpt-6.1-sol", cwd="/tmp")
 
         assert response["exhausted"] is True
         assert response["failure_kind"] == "quota_exhausted"
@@ -598,7 +598,7 @@ class TestTerminalMetadata:
             patch.object(server, "route", new_callable=AsyncMock, side_effect=timeout),
             patch.object(server, "_log_delegation") as log_call,
         ):
-            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
+            response = await server._delegate_impl("adversarial", "p", model="gpt-6.1-sol", cwd="/tmp")
 
         assert response["exhausted"] is False
         assert response["backend"] == "codex"
@@ -638,7 +638,7 @@ class TestTerminalMetadata:
             patch.object(server, "route", new_callable=AsyncMock, return_value=result) as route_call,
             patch.object(server, "_log_delegation"),
         ):
-            response = await server._delegate_impl("adversarial", "p", cwd="/tmp")
+            response = await server._delegate_impl("adversarial", "p", model="gpt-6.1-sol", cwd="/tmp")
 
         assert response["answer"] == "PONG"
         assert response["caller"] == "claude"

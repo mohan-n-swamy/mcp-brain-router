@@ -641,7 +641,7 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",
-        # D15: the adversary's first entry; the id's suffix is the effort.
+        # D16: the adversary's first entry; the id's suffix is the effort.
         "antigravity": "gemini-4-neon-high",
         # Kimi Code CLI agentic worker (OAuth login, no API key). It is a
         # coding provider selected by role routing, not a public complexity
