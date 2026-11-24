@@ -90,14 +90,22 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
 # ── Role orders (D5) ────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("role,order", [
-    ("simple", ["apple-fm", "gpt-oss:20b", "gemini-3.8-flash-low", "claude-haiku-5-5"]),
-    ("worker", ["grok-4.5", "gemini-4-neon-medium", "claude-sonnet-5"]),
-    ("adversary", ["gemini-4-neon-high", "grok-4.5", "claude-opus-5-5"]),
-    ("thinker", ["grok-4.5", "gemini-4-neon-xhigh", "claude-fable-5"]),
+    ("simple", ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-low", "claude-haiku-5-5"]),
+    ("worker", ["gemini-4-neon-medium", "claude-sonnet-5", "grok-4.5"]),
+    ("adversary", ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"]),
+    ("thinker", ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"]),
 ])
-def test_d15_role_order(role, order):
-    """D16 (Mohan, 2026-11-24) supersedes D5: Antigravity, Grok, Claude only."""
+def test_d17_role_order(role, order):
+    """D17 (Mohan, 2026-11-24) supersedes D16's orders: highest to lowest."""
     assert DEFAULT_ROLES[role] == order
+
+
+def test_no_retiring_model_and_no_top_tier_in_volume_roles():
+    """Gemini 3.8 Flash, Argon and GPT-OSS-120b leave 2026-11-30 (N1); N3: A2."""
+    assert not [m for v in DEFAULT_ROLES.values() for m in v
+                if m.startswith(("gemini-3.8-flash", "gemini-4-argon", "gpt-oss-120b"))]
+    assert not [m for r in ("worker", "simple") for m in DEFAULT_ROLES[r]
+                if "fable" in m or "opus" in m or "xhigh" in m]
 
 
 def test_no_retired_provider_in_any_role():
@@ -238,12 +246,8 @@ async def test_adversarial_tier_sends_the_preamble():
 
 # ── The walk, deadlines, preamble at every backend ──────────────────────────
 
-async def test_walk_passes_three_failed_backends():
+async def test_walk_passes_failed_backends():
     calls = Calls()
-
-    def grok(prompt, model, effort=None):
-        calls.note("grok", prompt)
-        raise BackendError("cut", backend="grok", failure_kind="no_final_message", elapsed_ms=5000)
 
     def agy(prompt, model, effort=None):
         calls.note("antigravity", prompt)
@@ -251,20 +255,67 @@ async def test_walk_passes_three_failed_backends():
 
     def claude(prompt, model, cwd=None):
         calls.note("claude", prompt)
+        raise BackendError("died", backend="anthropic-cli", failure_kind="process_error",
+                           elapsed_ms=200_000)
+
+    def grok(prompt, model, effort=None):
+        calls.note("grok", prompt)
         return {"content": "built", "usage": None}
 
     with (patch.object(backends, "call_grok", side_effect=grok),
           patch.object(backends, "call_antigravity", side_effect=agy),
           patch.object(backends, "call_anthropic_agentic", side_effect=claude)):
         out = await _walk(_cfg(), "worker")
-    # grok has no final message, antigravity is empty, Claude answers.
-    assert out["tried"] == ["grok", "antigravity", "anthropic-cli"]
-    assert (out["backend"], out["model"], out["answer"]) == ("anthropic-cli", "claude-sonnet-5", "built")
-    assert out["retried"] == []  # a cut Grok turn is not retried on Grok
-    deadlines = {d for _, d in calls.seen.values()}
-    assert len(deadlines) == 1 and None not in deadlines  # one deadline for the call
-    for prompt, _ in calls.seen.values():
-        assert prompt.startswith(policy.PREAMBLE)
+    # antigravity is empty, Claude errors, Grok (the backup) answers.
+    assert out["tried"] == ["antigravity", "anthropic-cli", "grok"]
+    assert (out["backend"], out["model"], out["answer"]) == ("grok", "grok-4.5", "built")
+
+
+# D17: Fable then Opus both sit in thinker and adversary. A failed model skips
+# itself; only quota exhaustion skips the provider's other entries.
+
+def _two_claude_walk(first_error):
+    seen = []
+
+    def claude(prompt, model, cwd=None):
+        seen.append(model)
+        if model == "claude-fable-5":
+            raise first_error
+        return {"content": "from " + model, "usage": None}
+
+    def agy(prompt, model, effort=None):
+        seen.append(model)
+        raise BackendError("down", backend="antigravity", failure_kind="process_error",
+                           elapsed_ms=200_000)
+
+    return seen, claude, agy
+
+
+async def test_failed_fable_falls_to_neon_then_opus():
+    seen, claude, agy = _two_claude_walk(BackendError(
+        "died", backend="anthropic-cli", failure_kind="process_error", elapsed_ms=200_000))
+    with (patch.object(backends, "call_anthropic_agentic", side_effect=claude),
+          patch.object(backends, "call_antigravity", side_effect=agy)):
+        out = await _walk(_cfg(), "thinker", orchestrator="grok")
+    assert seen == ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5"]
+    assert out["model"] == "claude-opus-5-5"
+    assert out["tried"] == ["anthropic-cli", "antigravity", "anthropic-cli"]
+
+
+async def test_exhausted_claude_quota_skips_both_claude_entries():
+    from mcp_brain_router.backends import BackendQuotaError
+    seen, claude, agy = _two_claude_walk(BackendQuotaError("anthropic", 429, "out"))
+
+    def grok(prompt, model, effort=None):
+        seen.append(model)
+        return {"content": "grok", "usage": None}
+
+    with (patch.object(backends, "call_anthropic_agentic", side_effect=claude),
+          patch.object(backends, "call_antigravity", side_effect=agy),
+          patch.object(backends, "call_grok", side_effect=grok)):
+        out = await _walk(_cfg(), "thinker", orchestrator="grok")
+    assert seen == ["claude-fable-5", "gemini-4-neon-xhigh", "grok-4.5"]
+    assert out["model"] == "grok-4.5"
 
 
 async def test_missing_key_or_binary_is_a_free_skip():
@@ -288,18 +339,24 @@ def test_deadlines():
 
 
 async def test_walk_stops_at_the_deadline():
-    def slow_grok(prompt, model, effort=None):
+    def slow_agy(prompt, model, effort=None):
         time.sleep(0.7)
-        raise BackendError("slow", backend="grok", failure_kind="process_error",
+        raise BackendError("slow", backend="antigravity", failure_kind="process_error",
                            elapsed_ms=200_000)  # not a fast flake: no same-provider retry
 
-    agy = MagicMock(return_value={"content": "late", "usage": {}})
+    def slow_claude(prompt, model, cwd=None):
+        time.sleep(0.7)
+        raise BackendError("slow", backend="anthropic-cli", failure_kind="process_error",
+                           elapsed_ms=200_000)
+
+    grok = MagicMock(return_value={"content": "late", "usage": {}})
     with (patch.object(server, "deadline_seconds", lambda role: 1.5),
-          patch.object(backends, "call_grok", side_effect=slow_grok),
-          patch.object(backends, "call_antigravity", agy)):
+          patch.object(backends, "call_antigravity", side_effect=slow_agy),
+          patch.object(backends, "call_anthropic_agentic", side_effect=slow_claude),
+          patch.object(backends, "call_grok", grok)):
         out = await _walk(_cfg(), "worker")
     assert out["failure_kind"] == "deadline_exceeded"
-    agy.assert_not_called()
+    grok.assert_not_called()
 
 
 # ── gpt-oss: cold skip, one generation at a time ────────────────────────────
@@ -333,14 +390,14 @@ async def test_gpt_oss_cold_skips_without_waiting():
 
 
 async def test_cold_gpt_oss_means_gemini_then_haiku():
-    """D16: gemini-3.8-flash-low sits between gpt-oss and Haiku."""
+    """D17: gemini-4-hydrogen-low sits between gpt-oss and Haiku."""
     fm_down = BackendError("mini down", backend="apple-fm", failure_kind="unreachable", elapsed_ms=5)
     with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),
           patch.object(backends, "call_antigravity",
                        return_value={"content": "label_b", "usage": None})):
         gem = await _walk(_cfg(), "simple")
     assert gem["tried"] == ["apple-fm", "ollama", "antigravity"]
-    assert gem["model"] == "gemini-3.8-flash-low"
+    assert gem["model"] == "gemini-4-hydrogen-low"
     agy_down = BackendError("down", backend="antigravity", failure_kind="process_error",
                             elapsed_ms=200_000)
     with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),

@@ -26,14 +26,14 @@ def _proc(stdout="", returncode=0, stderr=""):
 
 def _run(proc):
     with patch("mcp_brain_router.backends.subprocess.run", return_value=proc) as m:
-        out = call_antigravity("hi", "gemini-3.8-flash-low")
+        out = call_antigravity("hi", "gemini-4-hydrogen-low")
     return out, m.call_args
 
 
 # ---- model ids (N1, A28) ---------------------------------------------------
 
 @pytest.mark.parametrize("model", ["claude-opus-5-5-high", "claude-sonnet-5-5-low",
-                                   "gpt-oss-120b-medium", "gpt-6.1-sol", "", "gemini", "x gemini-4",
+                                   "gpt-oss-20b", "gpt-6.1-sol", "", "gemini", "x gemini-4",
                                    "gemini-4 --effort low", "gemini-4;rm"])
 def test_only_gemini_ids_run(model):
     with patch("mcp_brain_router.backends.subprocess.run") as m, pytest.raises(BackendError) as e:
@@ -49,7 +49,7 @@ def test_argv_stdin_timeout_and_no_bypass():
     argv = call.args[0]
     assert "--dangerously-skip-permissions" not in argv
     assert "--effort" not in argv  # the id suffix decides; a clashing flag is an agy error
-    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-low"
+    assert argv[argv.index("--model") + 1] == "gemini-4-hydrogen-low"
     assert argv[argv.index("--output-format") + 1] == "json"
     assert argv[argv.index("--print-timeout") + 1].endswith("s")
     assert call.kwargs["stdin"] is subprocess.DEVNULL
@@ -78,7 +78,7 @@ def test_workdir_holds_a_deny_all_tool_hook():
         return _proc(json.dumps(OK))
 
     with patch("mcp_brain_router.backends.subprocess.run", side_effect=fake):
-        call_antigravity("hi", "gemini-3.8-flash-low")
+        call_antigravity("hi", "gemini-4-hydrogen-low")
     group = seen["hooks"]["brain-router-tools-off"]["PreToolUse"][0]
     assert group["matcher"] == "*"
     assert '"decision":"deny"' in group["hooks"][0]["command"]
@@ -91,7 +91,7 @@ def test_workdir_holds_a_deny_all_tool_hook():
 def test_missing_binary_is_a_configuration_error():
     with patch("mcp_brain_router.backends.subprocess.run", side_effect=FileNotFoundError):
         with pytest.raises(BackendError) as e:
-            call_antigravity("hi", "gemini-3.8-flash-low")
+            call_antigravity("hi", "gemini-4-hydrogen-low")
     assert e.value.failure_kind == "configuration_error"
 
 
@@ -101,7 +101,7 @@ def test_print_timeout_is_transient():
     with patch("mcp_brain_router.backends.subprocess.run",
                return_value=_proc(json.dumps(bad), 3, err)):
         with pytest.raises(BackendTransientError) as e:
-            call_antigravity("hi", "gemini-3.8-flash-low")
+            call_antigravity("hi", "gemini-4-hydrogen-low")
     assert e.value.failure_kind == "timeout"
 
 
@@ -109,21 +109,21 @@ def test_print_timeout_named_only_in_stdout_is_transient():
     out = json.dumps({"status": "ERROR", "response": "", "finished_reason": "print_timeout"})
     with patch("mcp_brain_router.backends.subprocess.run", return_value=_proc(out, 3, "")):
         with pytest.raises(BackendTransientError):
-            call_antigravity("hi", "gemini-3.8-flash-low")
+            call_antigravity("hi", "gemini-4-hydrogen-low")
 
 
 def test_print_timeout_with_exit_zero_is_transient():
     out = json.dumps({"status": "ERROR", "response": "", "finished_reason": "print_timeout"})
     with patch("mcp_brain_router.backends.subprocess.run", return_value=_proc(out, 0, "")):
         with pytest.raises(BackendTransientError):
-            call_antigravity("hi", "gemini-3.8-flash-low")
+            call_antigravity("hi", "gemini-4-hydrogen-low")
 
 
 def test_subprocess_timeout_is_transient():
     with patch("mcp_brain_router.backends.subprocess.run",
                side_effect=subprocess.TimeoutExpired("agy", 1)):
         with pytest.raises(BackendTransientError):
-            call_antigravity("hi", "gemini-3.8-flash-low")
+            call_antigravity("hi", "gemini-4-hydrogen-low")
 
 
 @pytest.mark.parametrize("text", ["Out of credits", "RESOURCE_EXHAUSTED: quota"])
@@ -132,7 +132,7 @@ def test_quota_text_is_quota(text):
     with patch("mcp_brain_router.backends.subprocess.run",
                return_value=_proc(json.dumps(bad), 1, text)):
         with pytest.raises(BackendQuotaError):
-            call_antigravity("hi", "gemini-3.8-flash-low")
+            call_antigravity("hi", "gemini-4-hydrogen-low")
 
 
 def test_error_status_with_exit_zero_raises():
@@ -185,7 +185,7 @@ def test_agy_env_prepends_its_bin(monkeypatch):
 # ---- wiring ---------------------------------------------------------------
 
 def test_gemini_ids_map_to_antigravity():
-    for m in ("gemini-4-neon-high", "gemini-3.8-flash-low", "gemini-4-neon-xhigh"):
+    for m in ("gemini-4-neon-high", "gemini-4-hydrogen-low", "gemini-4-neon-xhigh"):
         assert provider_for_model(m) is Provider.ANTIGRAVITY
     assert Provider.ANTIGRAVITY.value == "antigravity"
     assert provider_for_model("claude-opus-5-5") is Provider.ANTHROPIC
@@ -204,19 +204,37 @@ def _cfg():
 def test_adversary_skips_the_callers_own_provider(monkeypatch):
     monkeypatch.setattr(backends, "_AGY_BIN", "/bin/sh")
     claude = resolve_role(Role.ADVERSARY, "claude", _cfg(), mode="agentic")
-    assert (claude.model, claude.provider) == ("gemini-4-neon-high", Provider.ANTIGRAVITY)
-    for caller in ("antigravity", "gemini-4-neon-high"):
+    assert (claude.model, claude.provider) == ("gemini-4-neon-xhigh", Provider.ANTIGRAVITY)
+    for caller in ("antigravity", "gemini-4-neon-xhigh"):
         a = resolve_role(Role.ADVERSARY, caller, _cfg(), mode="agentic")
         assert a.provider is not Provider.ANTIGRAVITY
-        assert a.model == "grok-4.5"
+        assert a.model == "claude-fable-5"
     g = resolve_role(Role.ADVERSARY, "grok", _cfg(), mode="agentic")
-    assert g.provider is Provider.ANTIGRAVITY
+    assert (g.model, g.provider) == ("claude-fable-5", Provider.ANTHROPIC)
 
 
-def test_worker_second_entry_is_gemini():
-    a = resolve_role(Role.WORKER, "claude", _cfg(), exhausted_providers=[Provider.XAI],
-                     mode="agentic")
+def test_adversary_start_per_caller(monkeypatch):
+    monkeypatch.setattr(backends, "_AGY_BIN", "/bin/sh")
+    for caller, model in (("claude", "gemini-4-neon-xhigh"), ("grok", "claude-fable-5"),
+                          ("antigravity", "claude-fable-5")):
+        a = resolve_role(Role.ADVERSARY, caller, _cfg(), mode="agentic")
+        assert a.model == model, (caller, a.model)
+    # A Claude caller never gets either Claude entry, even with Neon gone.
+    c = resolve_role(Role.ADVERSARY, "claude", _cfg(), mode="agentic",
+                     exhausted_providers=[Provider.ANTIGRAVITY])
+    assert c.model == "grok-4.5"
+    # A Grok caller whose Fable failed gets Neon, then Opus.
+    g = resolve_role(Role.ADVERSARY, "grok", _cfg(), mode="agentic",
+                     skip_models=["claude-fable-5", "gemini-4-neon-xhigh"])
+    assert g.model == "claude-opus-5-5"
+
+
+def test_worker_first_entry_is_gemini_and_grok_is_the_backup():
+    a = resolve_role(Role.WORKER, "claude", _cfg(), mode="agentic")
     assert (a.model, a.backend) == ("gemini-4-neon-medium", "antigravity")
+    b = resolve_role(Role.WORKER, "claude", _cfg(),
+                     exhausted_providers=[Provider.ANTIGRAVITY, Provider.ANTHROPIC], mode="agentic")
+    assert b.model == "grok-4.5"
 
 
 def test_antigravity_is_a_known_caller():
@@ -245,7 +263,7 @@ def _agy_or_skip():
 
 def test_real_agy_answers():
     _agy_or_skip()
-    r = call_antigravity("Reply with the single word OK.", "gemini-3.8-flash-low")
+    r = call_antigravity("Reply with the single word OK.", "gemini-4-hydrogen-low")
     assert "OK" in r["content"]
     assert r["usage"]["input_tokens"] > 0
 
@@ -257,7 +275,7 @@ def _agy_tool_steps(workdir, target, hooked):
     prompt = (f"Run the shell command `echo hi > {target}` with your shell tool, then say "
               "what happened. You cannot answer without running it.")
     out = subprocess.run(
-        [backends._AGY_BIN, "-p", prompt, "--model", "gemini-3.8-flash-low",
+        [backends._AGY_BIN, "-p", prompt, "--model", "gemini-4-hydrogen-low",
          "--output-format", "stream-json", "--print-timeout", "90s"],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=workdir,
         env=backends._agy_env(), timeout=120).stdout
@@ -301,5 +319,5 @@ def test_real_agy_one_shot_is_lean_with_the_rig_plugin_installed():
                          capture_output=True, text=True, timeout=60).stdout
     if "- rig" not in out:
         pytest.skip("rig plugin not installed")
-    r = call_antigravity("Reply with the single word OK.", "gemini-3.8-flash-low")
+    r = call_antigravity("Reply with the single word OK.", "gemini-4-hydrogen-low")
     assert 0 < r["usage"]["input_tokens"] < 15000, r["usage"]

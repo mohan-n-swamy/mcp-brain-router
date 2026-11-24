@@ -67,7 +67,7 @@ def test_failed_trial_keeps_error_text(monkeypatch):
 
     monkeypatch.setattr(router, "route", boom)
     monkeypatch.setattr(rb, "build_prompt", lambda f, cwd: "p")
-    t = asyncio.run(rb.run_card_trial({"slug": "gpt-oss-120b", "model": "gpt-oss-120b",
+    t = asyncio.run(rb.run_card_trial({"slug": "gpt-oss-20b", "model": "gpt-oss-20b",
                                        "effort": "base", "provider": "openai"}, {"id": "x"}, "/tmp"))
     assert t["ok"] is False
     assert "not supported" in t["error"]

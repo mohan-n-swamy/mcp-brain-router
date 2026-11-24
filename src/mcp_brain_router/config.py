@@ -64,6 +64,10 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
+    # D17 (Mohan, 2026-11-24) supersedes D16's orders: thinker and adversary run
+    # highest to lowest (Fable, Gemini 4 Neon XHigh, Opus, Grok); worker is Neon
+    # Medium, Sonnet, Grok (backup); simple ends Gemini 4 Hydrogen Low, Haiku.
+    # Gemini 3.8 Flash retires 2026-11-30, so it is in no order.
     # D16 (Mohan, 2026-11-24) supersedes D5: "so from now on we have antigravity,
     # grok and claude on the rig". Codex (gpt-6.1-sol), Kimi and DeepSeek are out
     # of every role; their call_* functions stay, reachable only by explicit
@@ -72,10 +76,10 @@ DEFAULT_ROLES: Dict[str, List[str]] = {
     # (Config.load). A missing binary is a free skip. gpt-oss runs only when
     # warm and only for `simple` (backends.call_ollama). The adversary never
     # resolves to the caller's own provider (router.resolve_role).
-    "simple": ["apple-fm", "gpt-oss:20b", "gemini-3.8-flash-low", "claude-haiku-5-5"],
-    "worker": ["grok-4.5", "gemini-4-neon-medium", "claude-sonnet-5"],
-    "adversary": ["gemini-4-neon-high", "grok-4.5", "claude-opus-5-5"],
-    "thinker": ["grok-4.5", "gemini-4-neon-xhigh", "claude-fable-5"],
+    "simple": ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-low", "claude-haiku-5-5"],
+    "worker": ["gemini-4-neon-medium", "claude-sonnet-5", "grok-4.5"],
+    "adversary": ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"],
+    "thinker": ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"],
 }
 
 # The Codex models a host [model_overrides] adversarial entry may name: the

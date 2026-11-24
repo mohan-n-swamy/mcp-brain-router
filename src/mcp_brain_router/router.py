@@ -152,8 +152,12 @@ def resolve_role(
     exhausted_providers: Iterable[Provider] = (),
     mode: str = "chat",
     claude_only: bool = False,
+    skip_models: Iterable[str] = (),
 ) -> Assignment:
     """Resolve one configured role without calling any backend.
+
+    skip_models: model ids that already failed this walk. A failed model skips
+    only itself; exhausted_providers (quota) skips every model of a provider.
 
     claude_only (data class `orange`): every non-Anthropic candidate is out, in
     the deck path and the legacy walk alike, so the walk ends in a refusal
@@ -170,6 +174,7 @@ def resolve_role(
 
     orchestrator_owner = orchestrator_provider(orchestrator)
     exhausted = set(exhausted_providers)
+    skipped = set(skip_models)
     skip_self = role is Role.ADVERSARY
 
     # C04 (specs/001-agent-capability-routing): the deck path. It changes WHICH
@@ -227,7 +232,7 @@ def resolve_role(
                     logger.warning("deck %s: card %r has no router provider; skipped",
                                    band, card.router_model)
                     continue
-                if provider in exhausted or (skip_self and provider is orchestrator_owner):
+                if provider in exhausted or card.router_model in skipped or (skip_self and provider is orchestrator_owner):
                     continue
                 if not _eligible(role, provider, claude_only):
                     continue
@@ -240,7 +245,7 @@ def resolve_role(
 
     for model in candidates:
         provider = provider_for_model(model)
-        if provider in exhausted:
+        if provider in exhausted or model in skipped:
             continue
         # Skip-self applies to ADVERSARY only (Mohan, 2026-09-07): a reviewer
         # must come from a different brain than the orchestrator. Every other
@@ -641,8 +646,8 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",
-        # D16: the adversary's first entry; the id's suffix is the effort.
-        "antigravity": "gemini-4-neon-high",
+        # D17: the adversary's Antigravity entry; the id's suffix is the effort.
+        "antigravity": "gemini-4-neon-xhigh",
         # Kimi Code CLI agentic worker (OAuth login, no API key). It is a
         # coding provider selected by role routing, not a public complexity
         # tier. No -m flag is passed — the CLI runs its configured default

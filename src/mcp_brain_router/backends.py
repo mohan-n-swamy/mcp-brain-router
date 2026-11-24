@@ -1129,7 +1129,7 @@ _AGY_DENY_HOOK = json.dumps({
 })
 
 
-# Lean one-shots (measured 2026-11-24, one-word prompt, gemini-3.8-flash-low):
+# Lean one-shots (measured 2026-11-24, one-word prompt, a Gemini 3.8 Flash model since retired):
 # with the rig plugin installed, a plain folder costs 25,630 input tokens; with
 # this manifest (agy skips excluded plugins in every location) 9,830. Needs a
 # workdir outside any git repo. Nothing shared is toggled.
