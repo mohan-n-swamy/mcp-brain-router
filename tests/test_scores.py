@@ -37,3 +37,13 @@ def test_bad_flag_and_value_are_rejected(tmp_path):
     with pytest.raises(ValueError, match="number"):
         scores.load(_file(tmp_path, GOOD.replace("\t52\t", "\tfifty\t")))
     assert len(scores.load(_file(tmp_path, GOOD))) == 1
+
+
+# rigor: small
+def test_empty_level_is_allowed_and_non_finite_value_is_rejected(tmp_path):
+    empty_level = "claude-opus-5-5\t\tvals_terminal_bench_4_0\t65.15\thttps://example.test/a\t2026-11-25\tquote\n"
+    rows = scores.load(_file(tmp_path, empty_level))
+    assert len(rows) == 1 and rows[0].level == "" and rows[0].value == 65.15
+    for bad in ("nan", "NaN", "inf", "-inf", "Infinity"):
+        with pytest.raises(ValueError, match="finite"):
+            scores.load(_file(tmp_path, GOOD.replace("\t52\t", f"\t{bad}\t")))

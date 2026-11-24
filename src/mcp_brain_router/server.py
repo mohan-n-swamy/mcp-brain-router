@@ -435,15 +435,18 @@ async def _delegate_impl(
         return complete(response)
 
 
-def _quota_ordered(config: Config, role: str) -> tuple[str | None, Config]:
+def _quota_ordered(config: Config, role: str, claude_only: bool = False) -> tuple[str | None, Config]:
     """(note, config) with `role`'s candidates in quota order; unchanged when quota says nothing."""
+    if claude_only:
+        return None, config
     name = ROLE_ALIASES.get(role, role)
     try:
-        ids = list((config.roles or {}).get(role) or [])
-        slots = list(ROLES[name].slots)
-        if sorted(ids) != sorted(s.id for s in slots):
+        ids = list((config.roles or {}).get(role) or (config.roles or {}).get(name) or [])
+        by_id = {s.id: s for s in ROLES[name].slots}
+        if sorted(ids) != sorted(s.id for s in ROLES[name].slots):
             return None, config  # a table that is not the repo's: leave it alone
-        new, note = quota.reorder(slots, quota.read(), role, time.time())
+        slots = [by_id[i] for i in ids]
+        new, note = quota.reorder(slots, quota.read(), name, time.time())
         if not note:
             return None, config
         roles = dict(config.roles) | {role: [s.id for s in new]}
@@ -511,8 +514,8 @@ async def _delegate_role_impl(
 
         # Quota order (legacy walk only; the deck path keeps its own gate). Read once per call;
         # the walk below, has_next and every resolve_role see the reordered table.
-        if getattr(config, "routing_mode", "legacy") != "deck":
-            quota_note, config = _quota_ordered(config, role_enum.value)
+        if not claude_only and getattr(config, "routing_mode", "legacy") != "deck":
+            quota_note, config = _quota_ordered(config, role_enum.value, claude_only=claude_only)
 
         # Public role delegation is agentic-only. Chat/text mode caused workers
         # to return prose while the orchestrator redid every file/tool action.

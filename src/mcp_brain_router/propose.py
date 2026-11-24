@@ -15,6 +15,8 @@ ROLES; that is the output, not an error. Exit code is 0 whenever the command run
 """
 from __future__ import annotations
 
+# rigor: small
+from itertools import zip_longest
 import json
 import sys
 
@@ -31,48 +33,59 @@ def label(model, level):
     return f"{model}@{level}" if level else model
 
 
+# rigor: small
 def propose(rows=None) -> dict:
     rows = load() if rows is None else rows
     aa = {(r.model, r.level): r.value for r in rows if r.measure == AA}
     tb = {r.model: r.value for r in rows if r.measure == TB}
-    top = ROLES["thinker"].slots[0].model
+    top = ROLES["thinker"].slots[0].model if "thinker" in ROLES and ROLES["thinker"].slots else None
 
-    def score(role, s):
+    def score(measure, s):
         """The sort key of a slot, or None when it has no score for the role's measure."""
-        a = aa.get((s.model, s.level))
-        if MEASURE[role] == AA:
+        if measure is None:
+            return None
+        a = aa.get((s.model, s.level or ""))
+        if measure == AA:
             return None if a is None else (a,)
-        return None if s.model not in tb else (tb[s.model], a if a is not None else float("-inf"))
+        if measure == TB:
+            return None if s.model not in tb else (tb[s.model], a if a is not None else float("-inf"))
+        return None
 
     out_roles = []
     for role, rd in ROLES.items():
+        measure = MEASURE.get(role)
+        table = [label(s.model, s.level) for s in rd.slots]
         slots, notes = list(rd.slots), []
-        if role in VOLUME:
+        if measure is None:
+            notes.append(f"no measure mapping for role {role}")
+        if role in VOLUME and top is not None:
             skipped = [s for s in slots if s.model == top]
             slots = [s for s in slots if s.model != top]
             notes += [f"skipped {label(s.model, s.level)}: top model of thinker" for s in skipped]
-        keys = [score(role, s) for s in slots]
+        keys = [score(measure, s) for s in slots]
         scored = sorted((i for i, k in enumerate(keys) if k is not None), key=lambda i: keys[i], reverse=True)
         ranked, it = list(slots), iter(scored)
         for i, k in enumerate(keys):  # unscored slots keep their place; scored ones fill the rest by rank
             if k is None:
-                notes.append(f"no score: {label(slots[i].model, slots[i].level)} kept at position {i + 1}")
+                if measure is not None:
+                    notes.append(f"no score: {label(slots[i].model, slots[i].level)} kept at position {i + 1}")
             else:
                 ranked[i] = slots[next(it)]
-        table = [label(s.model, s.level) for s in slots]
         new = [label(s.model, s.level) for s in ranked]
-        diffs = [f"position {i + 1}: {a} -> {b}" for i, (a, b) in enumerate(zip(table, new)) if a != b]
-        last = keys[-1] if keys else None
+        diffs = [f"position {i + 1}: {a} -> {b}"
+                 for i, (a, b) in enumerate(zip_longest(table, new, fillvalue="(removed)")) if a != b]
+        scored_keys = [k for k in keys if k is not None]
+        last = min(scored_keys) if scored_keys else None
         not_in = []
         if last is not None:
-            in_role = {s.model for s in rd.slots} if MEASURE[role] == TB else {(s.model, s.level) for s in rd.slots}
-            if MEASURE[role] == TB:
+            in_role = {s.model for s in rd.slots} if measure == TB else {(s.model, s.level or "") for s in rd.slots}
+            if measure == TB:
                 cand = {(m, ""): (v, float("-inf")) for m, v in tb.items() if m not in in_role}
             else:
                 cand = {k: (v,) for k, v in aa.items() if k not in in_role}
             not_in = [f"{label(m, l)} ({v[0]})" for (m, l), v in sorted(cand.items(), key=lambda kv: -kv[1][0])
                       if v[0] > last[0] and not (role in VOLUME and m == top)]
-        out_roles.append({"role": role, "measure": MEASURE[role], "table": table, "ranked": new,
+        out_roles.append({"role": role, "measure": measure, "table": table, "ranked": new,
                           "differs": bool(diffs), "differences": diffs, "notes": notes, "not_in_this_role": not_in})
     have = {r.model for r in rows}
     missing = sorted({s.model for rd in ROLES.values() for s in rd.slots} - have)
@@ -83,7 +96,7 @@ def propose(rows=None) -> dict:
 def render(p: dict) -> str:
     out = []
     for r in p["roles"]:
-        out += [f"{r['role']} (by {r['measure']})", "  table : " + " > ".join(r["table"]),
+        out += [f"{r['role']} (by {r['measure'] or 'none'})", "  table : " + " > ".join(r["table"]),
                 "  ranked: " + " > ".join(r["ranked"]),
                 "  differs: " + ("; ".join(r["differences"]) if r["differs"] else "no")]
         out += [f"  note: {n}" for n in r["notes"]]

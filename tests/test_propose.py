@@ -3,8 +3,9 @@ import json
 import subprocess
 import sys
 
+# rigor: small
 from mcp_brain_router import propose
-from mcp_brain_router.config import ROLES
+from mcp_brain_router.config import ROLES, RoleDef, Slot
 from mcp_brain_router.scores import Score
 
 
@@ -42,3 +43,38 @@ def test_rule_can_disagree_and_volume_roles_skip_the_top_thinker_model():
 def test_propose_has_no_write_call():
     src = open(propose.__file__).read()
     assert "write_text" not in src and "open(" not in src.replace("open(propose", "")
+
+
+# rigor: small
+def test_table_uses_real_slots_and_threshold_uses_lowest_scored_slot(monkeypatch):
+    fake_roles = {
+        "thinker": ROLES["thinker"],
+        "processor": RoleDef("processor", "", "", (Slot("claude-sonnet-5-5", "high"),
+                                                   Slot("claude-fable-5-2", "max")), False, 60),
+        "writer": RoleDef("writer", "", "", (Slot("claude-opus-5-5", "high"),
+                                             Slot("claude-sonnet-5-5", "high"),
+                                             Slot("apple-fm")), False, 60),
+    }
+    monkeypatch.setattr(propose, "ROLES", fake_roles)
+    rows = [_row("claude-opus-5-5", "high", 40), _row("claude-sonnet-5-5", "high", 60),
+            _row("grok-4.7", "high", 50)]
+    p = propose.propose(rows)
+    pr = next(r for r in p["roles"] if r["role"] == "processor")
+    assert pr["table"] == ["claude-sonnet-5-5@high", "claude-fable-5-2@max"]
+    assert pr["ranked"] == ["claude-sonnet-5-5@high"]
+    assert pr["differs"] is True
+    wr = next(r for r in p["roles"] if r["role"] == "writer")
+    assert wr["not_in_this_role"] == ["grok-4.7@high (50)"]
+
+
+def test_unmapped_role_does_not_raise(monkeypatch):
+    fake_roles = dict(ROLES) | {
+        "custom": RoleDef("custom", "", "", (Slot("claude-sonnet-5-5", "high"),), False, 60),
+    }
+    monkeypatch.setattr(propose, "ROLES", fake_roles)
+    p = propose.propose([_row("claude-sonnet-5-5", "high", 50)])
+    cr = next(r for r in p["roles"] if r["role"] == "custom")
+    assert cr["measure"] is None
+    assert cr["table"] == ["claude-sonnet-5-5@high"] and cr["ranked"] == ["claude-sonnet-5-5@high"]
+    assert not cr["differs"] and cr["not_in_this_role"] == []
+    assert "custom" in propose.render(p)

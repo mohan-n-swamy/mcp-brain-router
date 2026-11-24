@@ -5,6 +5,8 @@ Fixture quota dicts feed reorder(); the walk tests fake the backends at the CLI 
 """
 from __future__ import annotations
 
+# rigor: small
+from datetime import datetime, timezone
 import json
 import os
 import time
@@ -13,7 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from mcp_brain_router import backends, quota, server
-from mcp_brain_router.config import DEFAULT_ROLES, ROLES, Config
+from mcp_brain_router.config import DEFAULT_ROLES, ROLES, Config, Slot
 
 NOW = 1_000_000.0
 DAY = 86400
@@ -194,3 +196,94 @@ async def test_adversary_still_skips_caller():
     c = Calls()
     out = await c.walk("thinker", {"anthropic": Q(weekly=95)}, data_class="orange")
     assert out["provider"] == "anthropic" and all(m.startswith("claude") for m in c.models)
+
+
+# rigor: small
+def test_unknown_pace_and_nan_are_never_promoted(tmp_path):
+    slots = [Slot("claude-sonnet-5-5", "xhigh"), Slot("grok-4.7", "high")]
+    ahead = Q(weekly=40, left_days=6)  # 40% used at 14% elapsed -> ahead of pace
+    for bad_grok in (
+        Q(weekly=89.0),  # missing reset -> unknown pace
+        {"weekly": 89.0, "five_hour": None, "weekly_reset_at": NOW},  # reset <= now
+        Q(weekly=89.0, left_days=8),  # reset > now + WEEK_S
+        Q(weekly=float("nan"), left_days=6),  # non-finite weekly
+    ):
+        assert quota.reorder(slots, {"anthropic": ahead, "grok": bad_grok}, "coder", NOW) == (slots, None)
+    # JSON NaN / Infinity in cache files are ignored by read()
+    f = tmp_path / ".anthropic-quota.cache"
+    f.write_text('{"buckets": [{"key": "wk", "pct": NaN, "resets_at": 1086400},'
+                 ' {"key": "5h", "pct": Infinity, "resets_at": 1086400}]}')
+    os.utime(f, (NOW - 10, NOW - 10))
+    assert quota.read(tmp_path, now=NOW) == {}
+
+
+def test_local_slots_keep_their_exact_index():
+    pair = [Slot("claude-sonnet-5-5", "xhigh"), Slot("apple-fm")]
+    assert quota.reorder(pair, {"anthropic": Q(five=92)}, "thinker", NOW) == (pair, None)
+
+    triple = [Slot("claude-sonnet-5-5", "xhigh"), Slot("apple-fm"), Slot("grok-4.7", "high")]
+    pace_q = {"anthropic": Q(weekly=80, left_days=4), "grok": Q(weekly=10, left_days=6)}
+    new, why = quota.reorder(triple, pace_q, "coder", NOW)
+    assert [s.model for s in new] == ["grok-4.7", "apple-fm", "claude-sonnet-5-5"]
+    assert "anthropic yields first place" in why
+
+    hot_triple = [Slot("claude-sonnet-5-5", "xhigh"), Slot("gpt-oss:20b"), Slot("grok-4.7", "high")]
+    new, why = quota.reorder(hot_triple, {"anthropic": Q(weekly=95)}, "thinker", NOW)
+    assert [s.model for s in new] == ["grok-4.7", "gpt-oss:20b", "claude-sonnet-5-5"]
+    assert why.startswith("anthropic moved last:")
+
+    simple, why = models("simple", {"antigravity": Q(weekly=95)})
+    assert simple == ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5", "gemini-4-hydrogen"]
+    assert why.startswith("antigravity moved last:")
+
+
+def test_naive_iso_is_utc_and_bad_reset_drops_bucket(tmp_path):
+    naive = "2026-11-25T02:08:01"
+    expected = datetime(2026, 11, 25, 2, 8, 1, tzinfo=timezone.utc).timestamp()
+    now = expected - 3600
+    (tmp_path / ".antigravity-quota.cache").write_text(json.dumps([
+        {"w": "wk", "used": 20, "reset": naive},
+        {"w": "5h", "used": 95, "reset": "not-a-date"},
+    ]))
+    (tmp_path / ".grok-quota.cache").write_text(json.dumps({"weekly": {"config": {
+        "creditUsagePercent": 58.0, "currentPeriod": {"end": "garbage"}}}}))
+    (tmp_path / ".anthropic-quota.cache").write_text(json.dumps({"buckets": [
+        {"key": "wk", "pct": 95, "resets_at": "bad"}]}))
+    for p in tmp_path.iterdir():
+        os.utime(p, (now - 5, now - 5))
+    got = quota.read(tmp_path, now=now)
+    assert set(got) == {"antigravity"}
+    assert got["antigravity"]["weekly"] == 20
+    assert got["antigravity"]["weekly_reset_at"] == expected
+    assert got["antigravity"]["five_hour"] is None
+
+
+@pytest.mark.asyncio
+async def test_quota_ordered_respects_orange_aliases_and_custom_order():
+    t = time.time()
+    # (c) claude_only (class orange) does nothing and attaches no quota_note
+    cfg = _cfg()
+    with patch.object(quota, "read", lambda: {"anthropic": Q(weekly=95, now=t)}):
+        assert server._quota_ordered(cfg, "thinker", claude_only=True) == (None, cfg)
+    out = await Calls().walk("thinker", {"anthropic": Q(weekly=95, now=t)}, data_class="orange")
+    assert out["provider"] == "anthropic" and "quota_note" not in out
+
+    # (a) volume-role alias resolves to canonical role name before calling reorder
+    alias_cfg = _cfg()
+    alias_cfg.roles["bulk"] = list(DEFAULT_ROLES["processor"])
+    pace_q = {"antigravity": Q(weekly=80, left_days=4, now=t), "anthropic": Q(weekly=5, left_days=6, now=t)}
+    with patch.dict(server.ROLE_ALIASES, {"bulk": "processor"}), patch.object(quota, "read", lambda: pace_q):
+        note, reordered = server._quota_ordered(alias_cfg, "bulk")
+    assert note and "antigravity yields first place" in note
+    assert reordered.roles["bulk"][0] == "claude-sonnet-5-5"
+
+    # (b) custom config.roles order is kept as the starting order
+    custom = ["grok-4.7", "gemini-4-carbon-high", "claude-opus-5-5", "gemini-4-neon-xhigh", "claude-fable-5-2"]
+    custom_cfg = _cfg()
+    custom_cfg.roles["thinker"] = list(custom)
+    with patch.object(quota, "read", lambda: {"anthropic": Q(weekly=95, now=t)}):
+        note, reordered = server._quota_ordered(custom_cfg, "thinker")
+    assert note and note.startswith("anthropic moved last:")
+    assert reordered.roles["thinker"] == [
+        "grok-4.7", "gemini-4-carbon-high", "gemini-4-neon-xhigh", "claude-opus-5-5", "claude-fable-5-2"
+    ]
