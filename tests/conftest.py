@@ -30,3 +30,11 @@ def _ping_cache_in_tmp(tmp_path, monkeypatch):
     from mcp_brain_router import ping
 
     monkeypatch.setattr(ping, "CACHE", tmp_path / "ping.json")
+
+
+@pytest.fixture(autouse=True)
+def _quota_files_in_tmp(tmp_path, monkeypatch):
+    """Never let this machine's real quota caches steer a test's role order."""
+    from mcp_brain_router import quota
+
+    monkeypatch.setattr(quota, "STATE_DIR", tmp_path / "no-quota-state")
