@@ -229,12 +229,11 @@ def test_adversary_start_per_caller(monkeypatch):
     assert g.model == "claude-opus-5-5"
 
 
-def test_worker_first_entry_is_gemini_and_grok_is_the_backup():
-    a = resolve_role(Role.WORKER, "claude", _cfg(), mode="agentic")
-    assert (a.model, a.backend) == ("gemini-4-neon-medium", "antigravity")
-    b = resolve_role(Role.WORKER, "claude", _cfg(),
-                     exhausted_providers=[Provider.ANTIGRAVITY, Provider.ANTHROPIC], mode="agentic")
-    assert b.model == "grok-4.7"
+def test_coder_first_entry_is_sonnet_then_neon():
+    a = resolve_role(Role.CODER, "claude", _cfg(), mode="agentic")
+    assert (a.model, a.backend) == ("claude-sonnet-5-5", "anthropic-cli")
+    b = resolve_role(Role.CODER, "claude", _cfg(), skip_models=["claude-sonnet-5-5"], mode="agentic")
+    assert (b.model, b.backend) == ("gemini-4-neon-high", "antigravity")
 
 
 def test_antigravity_is_a_known_caller():

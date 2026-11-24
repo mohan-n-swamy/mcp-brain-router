@@ -31,8 +31,18 @@ DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
 )
 
 
+# Per-call cap for the slow roles (thinker, adversary, writer, qa): a top thinking
+# level on a long prompt outruns the 360 s CLI cap (2026-11-24: Neon XHigh and
+# Carbon High both timed out at 360 s on a 34 KB review). server sets it per walk.
+CALL_CAP: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "brain_router_call_cap", default=None
+)
+
+
 def _timeout(cap: float) -> float:
-    """`cap` seconds, or the time left before the call's deadline if less."""
+    """`cap` seconds (the walk's CALL_CAP if larger), or the time left before the
+    call's deadline if less."""
+    cap = max(cap, CALL_CAP.get() or 0)
     deadline = DEADLINE.get()
     if deadline is None:
         return cap
@@ -1338,7 +1348,8 @@ def _cc_family_output(stdout: str) -> tuple[str, Optional[Dict[str, int]]]:
     return content.strip(), usage
 
 
-def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
+                           effort: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Anthropic (Opus/Sonnet/Haiku) worker: `cc-brain claude -p` in
     the REAL cwd. This is the agentic-CLI fallback for: the codex-orchestrator
     adversary case (codex can't be its own adversary) AND the GLM+codex-both-
@@ -1367,6 +1378,11 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         "--permission-mode",
         "bypassPermissions",
     ]
+    if effort:
+        if effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise BackendError(f"claude has no effort level {effort!r}", backend="anthropic-cli",
+                               failure_kind="validation_error")
+        argv += ["--effort", effort]
     limit = _timeout(AGENTIC_TIMEOUT_SECONDS)
     try:
         result = subprocess.run(

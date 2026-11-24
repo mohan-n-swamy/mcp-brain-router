@@ -4,22 +4,17 @@ An MCP server for Claude Code and Codex that delegates agentic sub-tasks to exte
 
 ## What It Is
 
-`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Antigravity, and Grok (a Codex host may still call it). Standard calls select a role (`worker`, `simple`, `thinker`, or `adversary`), and each role walks an ordered list of backends fixed in this repo. Legacy complexity calls remain: `cheap` walks `simple`, `code` walks `worker`, and `adversarial` walks `adversary` (Codex only when the call names a Codex model).
+`mcp-brain-router` is a local Model Context Protocol server shared by Claude Code, Antigravity, and Grok (a Codex host may still call it). Standard calls state the job as a role (the table below), and each role walks an ordered list of backends fixed in this repo; a call with no role is refused and the refusal lists the roles. Legacy complexity calls remain: `cheap` walks `simple`, `code` walks `worker` (an alias of `coder`), and `adversarial` walks `adversary` (Codex only when the call names a Codex model).
 
 ## Why It Exists
 
-Keep orchestration separate from worker selection. The human chooses Claude, Antigravity, or Grok as orchestrator (a Codex host may still call, but Codex is never a worker); the router owns the worker order, thinker and adversary run highest to lowest, worker and simple cheapest first (D17, Mohan 2026-11-24, superseding D16's orders; D16 still holds that Antigravity, Grok and Claude are the rig and Codex, Kimi and DeepSeek are out of every role, reachable only by explicit model name). When a model fails, the walk goes to the next entry in order, even when that entry is the same provider (Fable, then Opus); quota exhaustion skips every entry of that provider:
+Keep orchestration separate from worker selection. The human chooses Claude, Antigravity, or Grok as orchestrator (a Codex host may still call, but Codex is never a worker); the router owns the worker order, each role best first (2026-11-25, superseding D17's orders; Mohan decides at merge whether they stand; D16 still holds that Antigravity, Grok and Claude are the rig and Codex, Kimi and DeepSeek are out of every role, reachable only by explicit model name). When a model fails, only that model is skipped: the walk goes on to the next entry in order, even when that entry is the same provider. After a quota or timeout failure the next model of that provider is pinged first (one word, 30 s cap, 45 s for Carbon; the result is cached 300 s per model in `~/.local/state/brain-router-ping.json`). The role table below is the single definition.
 
-- **Simple**: Apple fm (on the Mac mini) → gpt-oss:20b (this host's Ollama, only when already loaded) → `gemini-4-hydrogen-low` → Claude Haiku 5.5.
-- **Worker**: `gemini-4-neon-medium` → Claude Sonnet 5.5 → Grok 4.7 (backup).
-- **Adversary**: Claude Fable 5.2 → `gemini-4-neon-xhigh` → Claude Opus 5.5 → Grok 4.7. Never the caller's own provider.
-- **Thinker**: Claude Fable 5.2 → `gemini-4-neon-xhigh` → Claude Opus 5.5 → Grok 4.7.
-
-Antigravity is the `agy` CLI, one tools-off turn per call: the router writes a deny-all tool hook into an empty working folder (agy runs shell and file tools unprompted otherwise). Only `gemini-*` ids run there. The id's suffix is the effort, so `effort` is not applied. There is no enable flag: no `agy` binary means a free skip. A test drives the real `agy` in stream-json and checks that its own stream shows the tool call refused by the hook (a no-hook control run shows the same prompt does run a tool); the plain `json` format the router uses carries no tool evidence, so the router cannot see a refusal at call time.
+Antigravity is the `agy` CLI, one tools-off turn per call: the router writes a deny-all tool hook into an empty working folder (agy runs shell and file tools unprompted otherwise). Only `gemini-*` ids run there. The id's suffix is the effort (`gemini-4-neon-xhigh`), so `effort` is not applied. Claude workers get the slot level through `--effort`; Grok through `--reasoning-effort`. There is no enable flag: no `agy` binary means a free skip. A test drives the real `agy` in stream-json and checks that its own stream shows the tool call refused by the hook (a no-hook control run shows the same prompt does run a tool); the plain `json` format the router uses carries no tool evidence, so the router cannot see a refusal at call time.
 
 Token cost, measured 2026-11-24 on `gemini-3.8-flash-low` (that model retires 2026-11-30; no router order uses it), one "Reply OK" prompt: with the rig plugin in `~/.gemini/config` every one-shot sends about 25,640 input tokens (three calls in a row: 25,642, 25,635, 25,634; `cache_read_tokens` 0 each time, so agy caches nothing between separate calls; it caches inside one call, where a tool turn read 23,661 cached tokens). Without the plugin it is about 9,300-10,000. The router therefore writes `.agents/plugins.json` with `{"exclude": ["rig", "ponytail"]}` next to the deny hook in its temp working folder (agy skips excluded plugins in every location). Three router calls then cost 10,064, 10,064 and 10,062 input tokens (the first plain-folder figure above is 25,640). The login stays and no shared file is touched. The temp folder must stay outside any git repo, because agy's walk stops at the repo root. A real-agy test asserts under 15,000 when the rig plugin is installed. Tried and not used: a lean HOME (works at about 9,400 but symlinks the whole `~/.gemini` and `~/Library`; superseded), `--agent` (agy lists no custom agents; four layouts tried), `--project default-cli-project` (no change), `--settings` plugin keys, config-dir environment variables and `--disable-slash-commands` (no effect), and `agy plugin disable rig` around a call (it rewrites a file shared by every running session).
 
-A call walks its role's whole order within one deadline (`simple` 120 s, the others 15 min). A backend with no binary or key is skipped; an error, a timeout or an empty answer falls through to the next. The orders live in `config.DEFAULT_ROLES`; a host `config.toml` `[roles]` table is ignored, so a scan of this repo sees every model ID the router uses.
+A call walks its role's whole order within one deadline (`simple` 120 s, `thinker`, `adversary`, `writer` and `qa` 30 min, the others 15 min; each entry but the last leaves 45 s for the entries after it, and apple-fm and gpt-oss get at most 15 s). A backend with no binary or key is skipped; an error, a timeout or an empty answer falls through to the next. The orders live in `config.ROLES`; a host `config.toml` `[roles]` table is ignored, so a scan of this repo sees every model ID the router uses.
 
 ## Install
 
@@ -103,7 +98,21 @@ delegate(role="worker", orchestrator="claude", mode="agentic", cwd="/abs/repo", 
 delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo", prompt="Refute this design")
 ```
 
-Roles: `thinker`, `adversary`, `worker`, `simple`. `orchestrator` is never
+Roles (generated from `config.ROLES`; edit the table, then re-render this block):
+
+<!-- roles:start -->
+- thinker: Plan, decide, design. Pick when the answer is a decision, a plan or a design. Order: claude-fable-5-2@max > gemini-4-neon@xhigh > claude-opus-5-5@max > gemini-4-carbon@high > grok-4.7@xhigh.
+- adversary: Review from a different provider than the author. Pick when you need a second opinion on work another model wrote. Order: claude-fable-5-2@max > gemini-4-neon@xhigh > claude-opus-5-5@max > gemini-4-carbon@high > grok-4.7@xhigh.
+- coder: Scoped multi-file code changes. Pick when the task changes code in a bounded set of files. Order: claude-sonnet-5-5@xhigh > gemini-4-neon@high > claude-opus-5-5@xhigh.
+- processor: Transform and synthesise documents at volume. Pick when many or long documents go in, one result comes out. Order: gemini-4-hydrogen@high > gemini-4-neon@medium > claude-sonnet-5-5@xhigh > grok-4.7@high.
+- writer: Prose that reasons and argues. Pick when the output is an argument or an essay a person will read. Order: claude-fable-5-2@xhigh > claude-opus-5-5@xhigh > gemini-4-carbon@high.
+- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > claude-sonnet-5-5@high.
+- qa: Run the checks and the app against the spec; report pass or fail with evidence; change nothing. Pick when work is built and needs an independent check. Order: gemini-4-carbon@high > claude-opus-5-5@xhigh > gemini-4-neon@high.
+- simple: Cheap reads, extraction, classification. Pick when the task is short, self-contained and needs no judgment. Order: apple-fm > gpt-oss:20b > gemini-4-hydrogen@medium > claude-haiku-5-5@medium.
+- worker: alias of processor.
+<!-- roles:end -->
+
+`orchestrator` is never
 router-selected. Role calls require an absolute `cwd`. Claude candidates run
 through `cc-brain claude` in `cwd` with tools. The adversary role skips the
 orchestrator's own provider; the other roles walk their order, own provider
@@ -118,7 +127,7 @@ walks `adversary`).
 | Tier | Backend | Model | Use Case | Cost | Speed |
 |------|---------|-------|----------|------|-------|
 | `cheap` | the `simple` walk | fm, gpt-oss:20b, Haiku | Short self-contained text | Lowest | Fastest |
-| `code` | the `worker` walk | see Worker above | Self-contained code task | Varies | Varies |
+| `code` | the `worker` walk | the `processor` order | Self-contained code task | Varies | Varies |
 | `adversarial` | Codex, tools-off | `gpt-6.1-sol`, low effort | Security reviews, refutation, second opinion | Higher | Slowest |
 
 ### Delegation policy (lean-rig PLAN §6; `scripts/policy-check.sh` proves it, I22)

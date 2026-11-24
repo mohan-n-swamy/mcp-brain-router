@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Optional
 
 from . import backends
 from .backends import BackendQuotaError, BackendTransientError
-from .config import Config
+from .config import ROLE_ALIASES, Config
 
 
 class Complexity(str, Enum):
@@ -40,7 +40,12 @@ class Role(str, Enum):
     ORCHESTRATOR = "orchestrator"
     THINKER = "thinker"
     ADVERSARY = "adversary"
-    WORKER = "worker"
+    WORKER = "worker"  # alias of PROCESSOR (config.ROLE_ALIASES)
+    CODER = "coder"
+    PROCESSOR = "processor"
+    WRITER = "writer"
+    EXPLORER = "explorer"
+    QA = "qa"
     SIMPLE = "simple"
 
 
@@ -239,7 +244,8 @@ def resolve_role(
                 return _assignment_for(role, card.router_model, provider, mode,
                                        reason=f"deck {band}: eligible-cheapest (within the band's best, cost order)")
 
-    candidates = (config.roles or {}).get(role.value, [])
+    roles = config.roles or {}
+    candidates = roles.get(role.value) or roles.get(ROLE_ALIASES.get(role.value, ""), [])
     if not candidates:
         raise ValueError(f"no configured candidates for role: {role.value}")
 
@@ -593,9 +599,8 @@ async def _route_agentic(
     falls back to the server's launch dir, so callers must pass it."""
     if backend_name != "anthropic-cli":  # pragma: no cover - closed set
         raise ValueError(f"No agentic harness for backend: {backend_name}")
-    result = await asyncio.to_thread(
-        backends.call_anthropic_agentic, prompt, model, cwd
-    )
+    args = (prompt, model, cwd) + ((effort,) if effort else ())
+    result = await asyncio.to_thread(backends.call_anthropic_agentic, *args)
     return RouteResult(
         content=result["content"],
         model=model,

@@ -90,13 +90,18 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
 # ── Role orders (D5) ────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("role,order", [
-    ("simple", ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-low", "claude-haiku-5-5"]),
-    ("worker", ["gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"]),
-    ("adversary", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"]),
-    ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"]),
+    ("simple", ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-medium", "claude-haiku-5-5"]),
+    ("worker", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"]),
+    ("coder", ["claude-sonnet-5-5", "gemini-4-neon-high", "claude-opus-5-5"]),
+    ("adversary", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
+    ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
+    ("processor", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"]),
+    ("writer", ["claude-fable-5-2", "claude-opus-5-5", "gemini-4-carbon-high"]),
+    ("explorer", ["claude-haiku-5-5", "claude-sonnet-5-5"]),
+    ("qa", ["gemini-4-carbon-high", "claude-opus-5-5", "gemini-4-neon-high"]),
 ])
 def test_d17_role_order(role, order):
-    """D17 (Mohan, 2026-11-24) supersedes D16's orders: highest to lowest."""
+    """The eight-role table (Mohan, 2026-11-25) supersedes D17's four orders; best first."""
     assert DEFAULT_ROLES[role] == order
 
 
@@ -104,7 +109,7 @@ def test_no_retiring_model_and_no_top_tier_in_volume_roles():
     """Gemini 3.8 Flash, Argon and GPT-OSS-120b leave 2026-11-30 (N1); N3: A2."""
     assert not [m for v in DEFAULT_ROLES.values() for m in v
                 if m.startswith(("gemini-3.8-flash", "gemini-4-argon", "gpt-oss-120b"))]
-    assert not [m for r in ("worker", "simple") for m in DEFAULT_ROLES[r]
+    assert not [m for r in ("processor", "simple") for m in DEFAULT_ROLES[r]
                 if "fable" in m or "opus" in m or "xhigh" in m]
 
 
@@ -253,7 +258,7 @@ async def test_walk_passes_failed_backends():
         calls.note("antigravity", prompt)
         return {"content": "   ", "usage": {}}  # empty answer: walk on
 
-    def claude(prompt, model, cwd=None):
+    def claude(prompt, model, cwd=None, effort=None):
         calls.note("claude", prompt)
         raise BackendError("died", backend="anthropic-cli", failure_kind="process_error",
                            elapsed_ms=200_000)
@@ -265,19 +270,19 @@ async def test_walk_passes_failed_backends():
     with (patch.object(backends, "call_grok", side_effect=grok),
           patch.object(backends, "call_antigravity", side_effect=agy),
           patch.object(backends, "call_anthropic_agentic", side_effect=claude)):
-        out = await _walk(_cfg(), "worker")
-    # antigravity is empty, Claude errors, Grok (the backup) answers.
-    assert out["tried"] == ["antigravity", "anthropic-cli", "grok"]
+        out = await _walk(_cfg(), "processor")
+    # both Gemini entries are empty, Claude errors, Grok (the backup) answers.
+    assert out["tried"] == ["antigravity", "antigravity", "anthropic-cli", "grok"]
     assert (out["backend"], out["model"], out["answer"]) == ("grok", "grok-4.7", "built")
 
 
 # D17: Fable then Opus both sit in thinker and adversary. A failed model skips
-# itself; only quota exhaustion skips the provider's other entries.
+# itself, and so does a quota stop (the sibling is pinged first).
 
 def _two_claude_walk(first_error):
     seen = []
 
-    def claude(prompt, model, cwd=None):
+    def claude(prompt, model, cwd=None, effort=None):
         seen.append(model)
         if model == "claude-fable-5-2":
             raise first_error
@@ -302,7 +307,7 @@ async def test_failed_fable_falls_to_neon_then_opus():
     assert out["tried"] == ["anthropic-cli", "antigravity", "anthropic-cli"]
 
 
-async def test_exhausted_claude_quota_skips_both_claude_entries():
+async def test_claude_quota_marks_fable_only_and_opus_is_pinged():
     from mcp_brain_router.backends import BackendQuotaError
     seen, claude, agy = _two_claude_walk(BackendQuotaError("anthropic", 429, "out"))
 
@@ -314,8 +319,9 @@ async def test_exhausted_claude_quota_skips_both_claude_entries():
           patch.object(backends, "call_antigravity", side_effect=agy),
           patch.object(backends, "call_grok", side_effect=grok)):
         out = await _walk(_cfg(), "thinker", orchestrator="grok")
-    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "grok-4.7"]
-    assert out["model"] == "grok-4.7"
+    # A quota stop marks Fable only: Opus is pinged (it answers), then runs.
+    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "claude-opus-5-5"]
+    assert out["model"] == "claude-opus-5-5"
 
 
 async def test_missing_key_or_binary_is_a_free_skip():
@@ -344,7 +350,7 @@ async def test_walk_stops_at_the_deadline():
         raise BackendError("slow", backend="antigravity", failure_kind="process_error",
                            elapsed_ms=200_000)  # not a fast flake: no same-provider retry
 
-    def slow_claude(prompt, model, cwd=None):
+    def slow_claude(prompt, model, cwd=None, effort=None):
         time.sleep(0.7)
         raise BackendError("slow", backend="anthropic-cli", failure_kind="process_error",
                            elapsed_ms=200_000)
@@ -390,14 +396,14 @@ async def test_gpt_oss_cold_skips_without_waiting():
 
 
 async def test_cold_gpt_oss_means_gemini_then_haiku():
-    """D17: gemini-4-hydrogen-low sits between gpt-oss and Haiku."""
+    """D17: gemini-4-hydrogen-medium sits between gpt-oss and Haiku."""
     fm_down = BackendError("mini down", backend="apple-fm", failure_kind="unreachable", elapsed_ms=5)
     with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),
           patch.object(backends, "call_antigravity",
                        return_value={"content": "label_b", "usage": None})):
         gem = await _walk(_cfg(), "simple")
     assert gem["tried"] == ["apple-fm", "ollama", "antigravity"]
-    assert gem["model"] == "gemini-4-hydrogen-low"
+    assert gem["model"] == "gemini-4-hydrogen-medium"
     agy_down = BackendError("down", backend="antigravity", failure_kind="process_error",
                             elapsed_ms=200_000)
     with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),
