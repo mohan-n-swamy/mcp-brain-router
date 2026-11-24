@@ -180,6 +180,11 @@ _CC_BRAIN_BIN = _resolve_bin("cc-brain")
 # shim like codex), so its subprocess needs only grok's own bin dir on PATH.
 # The router runs it tools-off in an empty temp dir (call_grok).
 _GROK_BIN = _resolve_bin("grok")
+# Antigravity CLI (`agy`, Google login, no API key). Homebrew puts it in
+# /opt/homebrew/bin (kedarnath), the installer in ~/.local/bin (annapurna);
+# neither is on the empty-PATH MCP-process PATH, so both are fallbacks.
+_AGY_FALLBACK_DIRS = ("/opt/homebrew/bin", "~/.local/bin")
+_AGY_BIN = _resolve_bin("agy", _AGY_FALLBACK_DIRS)
 
 
 def _codex_exec_base(effort: Optional[str] = None) -> list:
@@ -200,7 +205,9 @@ CODEX_EXEC_BASE = _codex_exec_base()
 # request to one of these is ACCEPTED by the signature and NOT applied, and the
 # router reports effort_applied=False -- a flag that did nothing must never look
 # like a verified claim (C05 STOP).
-EFFORT_UNSUPPORTED = frozenset({"kimi", "ollama"})
+# antigravity: the effort is the model id's suffix (gemini-4-neon-high); agy
+# rejects an --effort that disagrees with it (tested 2026-11-24), so none is passed.
+EFFORT_UNSUPPORTED = frozenset({"kimi", "ollama", "antigravity"})
 
 
 def _find_mise_node() -> str:
@@ -447,6 +454,10 @@ _CLI_QUOTA_MARKERS = (
     "too many requests",
     "status 429",
     "error 429",
+    # agy's UI string and Google's status name for a quota refusal; neither
+    # has been seen live (no quota hit yet).
+    "out of credits",
+    "resource_exhausted",
 )
 
 
@@ -1088,6 +1099,146 @@ def call_grok(
         raise BackendError(
             "Grok binary not found on PATH",
             backend="grok",
+            failure_kind="configuration_error",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+# ============================================================================
+# Antigravity (`agy`, subprocess, tools-off, final message only)
+# ============================================================================
+
+# D15 (Mohan, 2026-11-24): Antigravity is the third rig provider. Only Gemini
+# models run here: `agy models` also lists claude-* and gpt-oss ids, and a
+# Claude caller's adversary must never be Claude served through agy (A28).
+_AGY_MODEL_RE = re.compile(r"^gemini-[A-Za-z0-9._-]+$")
+
+# agy has no tools-off flag: in print mode it runs shell commands and writes
+# files unprompted, also outside the working folder, with --sandbox and
+# --mode accept-edits alike (tested 2026-11-24). --mode plan stops the tools
+# but returns a plan, not an answer. A PreToolUse hook that denies every tool,
+# written into the empty working folder, does stop them (tested): the worker
+# gets tools-off, one text answer, like call_grok's.
+_AGY_DENY_HOOK = json.dumps({
+    "brain-router-tools-off": {"PreToolUse": [{"matcher": "*", "hooks": [{
+        "type": "command",
+        "command": ("cat >/dev/null; printf '%s' "
+                    "'{\"decision\":\"deny\",\"reason\":\"tools are off for this worker\"}'"),
+        "timeout": 5,
+    }]}]}
+})
+
+
+def _agy_env() -> Dict[str, str]:
+    """Env for agy. HOME must stay the real one: the login lives in the macOS
+    keychain, so a separate HOME (a lean home like grok's) signs agy out
+    (tested 2026-11-24). Only agy's own bin dir is prepended to PATH."""
+    env = _base_cli_env()
+    agy_bin = os.path.dirname(_AGY_BIN) if os.path.sep in _AGY_BIN else ""
+    if agy_bin:
+        current = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([agy_bin, current]) if current else agy_bin
+    return env
+
+
+def call_antigravity(
+    prompt: str,
+    model: str,
+    effort: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Call Antigravity tools-off and return only its final message.
+
+    `agy -p <prompt> --model <gemini-id> --output-format json --print-timeout
+    <n>s`, stdin from /dev/null, in an empty temp dir holding a deny-all tool
+    hook. `effort` is accepted and ignored: the model id's suffix decides it.
+
+    Returns:
+        {"content": final message, "usage": {...} when the CLI reports it}
+
+    Raises:
+        BackendError on a non-gemini model id, non-zero exit or empty answer;
+        BackendQuotaError on a quota message; BackendTransientError on timeout.
+    """
+    if not _AGY_MODEL_RE.match(model or ""):
+        raise BackendError(
+            "antigravity runs gemini-* model ids only",
+            backend="antigravity",
+            failure_kind="validation_error",
+        )
+
+    started = time.perf_counter()
+    limit = _timeout(CODEX_TIMEOUT_SECONDS)
+    try:
+        with tempfile.TemporaryDirectory(prefix="brain-router-agy-") as workdir:
+            os.makedirs(os.path.join(workdir, ".agents"))
+            with open(os.path.join(workdir, ".agents", "hooks.json"), "w", encoding="utf-8") as fh:
+                fh.write(_AGY_DENY_HOOK)
+            result = subprocess.run(
+                [_AGY_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model,
+                 "--output-format", "json", "--print-timeout", f"{int(limit)}s"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                # agy's own --print-timeout fires first and says so; this is the backstop.
+                timeout=limit + 15,
+                check=False,
+                cwd=workdir,
+                env=_agy_env(),
+            )
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        if result.returncode != 0 and "print_timeout" in (result.stderr or ""):
+            raise subprocess.TimeoutExpired(_AGY_BIN, limit)
+        _raise_cli_failure(
+            provider="Antigravity",
+            backend="antigravity",
+            default_msg="Antigravity subprocess failed",
+            result=result,
+            started=started,
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise BackendError("antigravity returned invalid JSON", backend="antigravity",
+                               failure_kind="invalid_output", elapsed_ms=elapsed_ms) from exc
+        if not isinstance(payload, dict):
+            raise BackendError("antigravity returned invalid JSON", backend="antigravity",
+                               failure_kind="invalid_output", elapsed_ms=elapsed_ms)
+        if payload.get("status") != "SUCCESS":
+            # exit 0 with an ERROR status is possible; treat it like a failed exit.
+            quota = _cli_quota_error("Antigravity", str(payload.get("error") or ""), None)
+            if quota:
+                raise quota
+            raise BackendError(
+                f"antigravity status={payload.get('status')!r}: "
+                f"{_cli_snippet(str(payload.get('error') or ''))}",
+                backend="antigravity", failure_kind="process_error", elapsed_ms=elapsed_ms)
+        content = str(payload.get("response") or "").strip()
+        if not content:
+            raise BackendError("antigravity returned an empty final message",
+                               backend="antigravity", failure_kind="empty_output",
+                               elapsed_ms=elapsed_ms)
+        raw = payload.get("usage") or {}
+        usage = None
+        if raw:
+            usage = {
+                "input_tokens": int(raw.get("input_tokens") or 0),
+                "output_tokens": int(raw.get("output_tokens") or 0),
+                "source": "cli-json",
+            }
+        return {"content": content, "usage": usage}
+
+    except subprocess.TimeoutExpired:
+        raise BackendTransientError(
+            "antigravity",
+            f"Antigravity subprocess timed out after {limit:.0f}s",
+            failure_kind="timeout",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+    except FileNotFoundError:
+        raise BackendError(
+            "Antigravity binary not found on PATH",
+            backend="antigravity",
             failure_kind="configuration_error",
             elapsed_ms=round((time.perf_counter() - started) * 1000),
         )

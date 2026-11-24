@@ -8,12 +8,14 @@ An MCP server for Claude Code and Codex that delegates agentic sub-tasks to exte
 
 ## Why It Exists
 
-Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker order, free models first (D5, 2026-11-06):
+Keep orchestration separate from worker selection. The human chooses Claude, Codex, or Grok as orchestrator; the router owns the worker order, free models first (D15, Mohan 2026-11-24, superseding D5: Antigravity, Grok and Claude are the rig; Codex, Kimi and DeepSeek are out of every role and stay reachable only by explicit model name):
 
-- **Simple**: Apple fm (on the Mac mini) → gpt-oss:20b (this host's Ollama, only when already loaded) → Claude Haiku 5.5.
-- **Worker**: Kimi → Grok 4.5 → DeepSeek V4 Pro → Claude Sonnet 5 → Codex `gpt-6.1-sol`.
-- **Adversary**: Codex `gpt-6.1-sol` → Claude Opus 5.5 → Kimi. Never the caller's own provider.
-- **Thinker**: Grok 4.5 → Claude Fable 5 → Codex `gpt-6.1-sol`.
+- **Simple**: Apple fm (on the Mac mini) → gpt-oss:20b (this host's Ollama, only when already loaded) → `gemini-3.8-flash-low` → Claude Haiku 5.5.
+- **Worker**: Grok 4.5 → `gemini-4-neon-medium` → Claude Sonnet 5.
+- **Adversary**: `gemini-4-neon-high` → Grok 4.5 → Claude Opus 5.5. Never the caller's own provider.
+- **Thinker**: Grok 4.5 → `gemini-4-neon-xhigh` → Claude Fable 5.
+
+Antigravity is the `agy` CLI, one tools-off turn per call: the router writes a deny-all tool hook into an empty working folder (agy runs shell and file tools unprompted otherwise). Only `gemini-*` ids run there. The id's suffix is the effort, so `effort` is not applied. There is no enable flag: no `agy` binary means a free skip.
 
 A call walks its role's whole order within one deadline (`simple` 120 s, the others 15 min). A backend with no binary or key is skipped; an error, a timeout or an empty answer falls through to the next. The orders live in `config.DEFAULT_ROLES`; a host `config.toml` `[roles]` table is ignored, so a scan of this repo sees every model ID the router uses.
 

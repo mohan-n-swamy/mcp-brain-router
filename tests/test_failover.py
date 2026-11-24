@@ -189,9 +189,9 @@ def test_every_cli_spawn_closes_stdin():
     stdin explicitly: < /dev/null' — the child inherited the MCP stdio pipe."""
     src = inspect.getsource(backends)
     calls = src.count("result = subprocess.run(")
-    # codex, grok, the Claude worker and apple-fm: the non-Claude agentic
-    # workers left with tools-off (lean-rig §6).
-    assert calls == 4, calls
+    # codex, grok, antigravity, the Claude worker and apple-fm: the non-Claude
+    # agentic workers left with tools-off (lean-rig §6).
+    assert calls == 5, calls
     # The invariant is the docstring's: a child must NOT inherit the MCP stdio
     # pipe. Two mechanisms satisfy it -- stdin=DEVNULL, or input=, which opens a
     # stdin pipe and closes it. The original assertion demanded DEVNULL
@@ -205,6 +205,7 @@ def test_every_cli_spawn_closes_stdin():
     cases = (
         (backends.call_codex, ("p", "gpt-6.1-sol")),
         (backends.call_grok, ("p", "grok-4.5")),
+        (backends.call_antigravity, ("p", "gemini-3.8-flash-low")),
         (backends.call_anthropic_agentic, ("p", "claude-sonnet-5", "/tmp")),
         (backends.call_fm, ("p", "mini")),
     )
