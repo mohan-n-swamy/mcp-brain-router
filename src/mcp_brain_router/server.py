@@ -613,6 +613,17 @@ async def _delegate_role_impl(
                 )
 
             name = assignment.backend or assignment.provider.value
+            if (role_enum is Role.SIMPLE and assignment.provider is Provider.ANTIGRAVITY
+                    and backends._FM_TOOL_SHAPED.search(prompt)):
+                # agy runs tools-off: a reader prompt naming a path or URL walks on
+                # to Haiku, which can open it (the same test fm and gpt-oss apply).
+                tried.append(name)
+                failed.add(assignment.provider)
+                kinds.append("needs_tools")
+                failures.append(f"{name}:needs_tools")
+                last_failure_kind = "needs_tools"
+                last_failure_reason = "prompt names a path or URL; Antigravity runs tools-off"
+                continue
             token = backends.DEADLINE.set(deadline)
             try:
                 result = await route_assignment(
