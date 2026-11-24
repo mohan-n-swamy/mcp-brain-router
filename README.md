@@ -11,9 +11,9 @@ An MCP server for Claude Code and Codex that delegates agentic sub-tasks to exte
 Keep orchestration separate from worker selection. The human chooses Claude, Antigravity, or Grok as orchestrator (a Codex host may still call, but Codex is never a worker); the router owns the worker order, thinker and adversary run highest to lowest, worker and simple cheapest first (D17, Mohan 2026-11-24, superseding D16's orders; D16 still holds that Antigravity, Grok and Claude are the rig and Codex, Kimi and DeepSeek are out of every role, reachable only by explicit model name). When a model fails, the walk goes to the next entry in order, even when that entry is the same provider (Fable, then Opus); quota exhaustion skips every entry of that provider:
 
 - **Simple**: Apple fm (on the Mac mini) → gpt-oss:20b (this host's Ollama, only when already loaded) → `gemini-4-hydrogen-low` → Claude Haiku 5.5.
-- **Worker**: `gemini-4-neon-medium` → Claude Sonnet 5 → Grok 4.5 (backup).
-- **Adversary**: Claude Fable 5 → `gemini-4-neon-xhigh` → Claude Opus 5.5 → Grok 4.5. Never the caller's own provider.
-- **Thinker**: Claude Fable 5 → `gemini-4-neon-xhigh` → Claude Opus 5.5 → Grok 4.5.
+- **Worker**: `gemini-4-neon-medium` → Claude Sonnet 5.5 → Grok 4.7 (backup).
+- **Adversary**: Claude Fable 5.2 → `gemini-4-neon-xhigh` → Claude Opus 5.5 → Grok 4.7. Never the caller's own provider.
+- **Thinker**: Claude Fable 5.2 → `gemini-4-neon-xhigh` → Claude Opus 5.5 → Grok 4.7.
 
 Antigravity is the `agy` CLI, one tools-off turn per call: the router writes a deny-all tool hook into an empty working folder (agy runs shell and file tools unprompted otherwise). Only `gemini-*` ids run there. The id's suffix is the effort, so `effort` is not applied. There is no enable flag: no `agy` binary means a free skip. A test drives the real `agy` in stream-json and checks that its own stream shows the tool call refused by the hook (a no-hook control run shows the same prompt does run a tool); the plain `json` format the router uses carries no tool evidence, so the router cannot see a refusal at call time.
 

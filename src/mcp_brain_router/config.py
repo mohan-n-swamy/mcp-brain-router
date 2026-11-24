@@ -64,6 +64,8 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
+    # Same-family swaps of 2026-11-24 under D17's rule (Mohan: "yes"), same slots:
+    # grok-4.5 -> grok-4.7, claude-fable-5 -> claude-fable-5-2, claude-sonnet-5 -> claude-sonnet-5-5.
     # D17 (Mohan, 2026-11-24) supersedes D16's orders: thinker and adversary run
     # highest to lowest (Fable, Gemini 4 Neon XHigh, Opus, Grok); worker is Neon
     # Medium, Sonnet, Grok (backup); simple ends Gemini 4 Hydrogen Low, Haiku.
@@ -77,9 +79,9 @@ DEFAULT_ROLES: Dict[str, List[str]] = {
     # warm and only for `simple` (backends.call_ollama). The adversary never
     # resolves to the caller's own provider (router.resolve_role).
     "simple": ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-low", "claude-haiku-5-5"],
-    "worker": ["gemini-4-neon-medium", "claude-sonnet-5", "grok-4.5"],
-    "adversary": ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"],
-    "thinker": ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"],
+    "worker": ["gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"],
+    "adversary": ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"],
+    "thinker": ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"],
 }
 
 # The Codex models a host [model_overrides] adversarial entry may name: the

@@ -208,24 +208,24 @@ def test_adversary_skips_the_callers_own_provider(monkeypatch):
     for caller in ("antigravity", "gemini-4-neon-xhigh"):
         a = resolve_role(Role.ADVERSARY, caller, _cfg(), mode="agentic")
         assert a.provider is not Provider.ANTIGRAVITY
-        assert a.model == "claude-fable-5"
+        assert a.model == "claude-fable-5-2"
     g = resolve_role(Role.ADVERSARY, "grok", _cfg(), mode="agentic")
-    assert (g.model, g.provider) == ("claude-fable-5", Provider.ANTHROPIC)
+    assert (g.model, g.provider) == ("claude-fable-5-2", Provider.ANTHROPIC)
 
 
 def test_adversary_start_per_caller(monkeypatch):
     monkeypatch.setattr(backends, "_AGY_BIN", "/bin/sh")
-    for caller, model in (("claude", "gemini-4-neon-xhigh"), ("grok", "claude-fable-5"),
-                          ("antigravity", "claude-fable-5")):
+    for caller, model in (("claude", "gemini-4-neon-xhigh"), ("grok", "claude-fable-5-2"),
+                          ("antigravity", "claude-fable-5-2")):
         a = resolve_role(Role.ADVERSARY, caller, _cfg(), mode="agentic")
         assert a.model == model, (caller, a.model)
     # A Claude caller never gets either Claude entry, even with Neon gone.
     c = resolve_role(Role.ADVERSARY, "claude", _cfg(), mode="agentic",
                      exhausted_providers=[Provider.ANTIGRAVITY])
-    assert c.model == "grok-4.5"
+    assert c.model == "grok-4.7"
     # A Grok caller whose Fable failed gets Neon, then Opus.
     g = resolve_role(Role.ADVERSARY, "grok", _cfg(), mode="agentic",
-                     skip_models=["claude-fable-5", "gemini-4-neon-xhigh"])
+                     skip_models=["claude-fable-5-2", "gemini-4-neon-xhigh"])
     assert g.model == "claude-opus-5-5"
 
 
@@ -234,7 +234,7 @@ def test_worker_first_entry_is_gemini_and_grok_is_the_backup():
     assert (a.model, a.backend) == ("gemini-4-neon-medium", "antigravity")
     b = resolve_role(Role.WORKER, "claude", _cfg(),
                      exhausted_providers=[Provider.ANTIGRAVITY, Provider.ANTHROPIC], mode="agentic")
-    assert b.model == "grok-4.5"
+    assert b.model == "grok-4.7"
 
 
 def test_antigravity_is_a_known_caller():
