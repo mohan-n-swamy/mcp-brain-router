@@ -91,9 +91,9 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
 
 @pytest.mark.parametrize("role,order", [
     ("simple", ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-low", "claude-haiku-5-5"]),
-    ("worker", ["gemini-4-neon-medium", "claude-sonnet-5", "grok-4.5"]),
-    ("adversary", ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"]),
-    ("thinker", ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.5"]),
+    ("worker", ["gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"]),
+    ("adversary", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"]),
+    ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"]),
 ])
 def test_d17_role_order(role, order):
     """D17 (Mohan, 2026-11-24) supersedes D16's orders: highest to lowest."""
@@ -170,7 +170,7 @@ async def test_orange_reaches_claude_only():
     finally:
         for p in patches:
             p.stop()
-    assert (out["backend"], out["model"], out["class"]) == ("anthropic-cli", "claude-sonnet-5", "orange")
+    assert (out["backend"], out["model"], out["class"]) == ("anthropic-cli", "claude-sonnet-5-5", "orange")
     assert out["tried"] == ["anthropic-cli"]
 
 
@@ -268,7 +268,7 @@ async def test_walk_passes_failed_backends():
         out = await _walk(_cfg(), "worker")
     # antigravity is empty, Claude errors, Grok (the backup) answers.
     assert out["tried"] == ["antigravity", "anthropic-cli", "grok"]
-    assert (out["backend"], out["model"], out["answer"]) == ("grok", "grok-4.5", "built")
+    assert (out["backend"], out["model"], out["answer"]) == ("grok", "grok-4.7", "built")
 
 
 # D17: Fable then Opus both sit in thinker and adversary. A failed model skips
@@ -279,7 +279,7 @@ def _two_claude_walk(first_error):
 
     def claude(prompt, model, cwd=None):
         seen.append(model)
-        if model == "claude-fable-5":
+        if model == "claude-fable-5-2":
             raise first_error
         return {"content": "from " + model, "usage": None}
 
@@ -297,7 +297,7 @@ async def test_failed_fable_falls_to_neon_then_opus():
     with (patch.object(backends, "call_anthropic_agentic", side_effect=claude),
           patch.object(backends, "call_antigravity", side_effect=agy)):
         out = await _walk(_cfg(), "thinker", orchestrator="grok")
-    assert seen == ["claude-fable-5", "gemini-4-neon-xhigh", "claude-opus-5-5"]
+    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5"]
     assert out["model"] == "claude-opus-5-5"
     assert out["tried"] == ["anthropic-cli", "antigravity", "anthropic-cli"]
 
@@ -314,8 +314,8 @@ async def test_exhausted_claude_quota_skips_both_claude_entries():
           patch.object(backends, "call_antigravity", side_effect=agy),
           patch.object(backends, "call_grok", side_effect=grok)):
         out = await _walk(_cfg(), "thinker", orchestrator="grok")
-    assert seen == ["claude-fable-5", "gemini-4-neon-xhigh", "grok-4.5"]
-    assert out["model"] == "grok-4.5"
+    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "grok-4.7"]
+    assert out["model"] == "grok-4.7"
 
 
 async def test_missing_key_or_binary_is_a_free_skip():

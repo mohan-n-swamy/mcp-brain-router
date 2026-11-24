@@ -645,7 +645,7 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         "deepseek": "deepseek-flash",
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
-        "grok": "grok-4.5",
+        "grok": "grok-4.7",
         # D17: the adversary's Antigravity entry; the id's suffix is the effort.
         "antigravity": "gemini-4-neon-xhigh",
         # Kimi Code CLI agentic worker (OAuth login, no API key). It is a

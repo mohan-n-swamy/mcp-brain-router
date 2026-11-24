@@ -520,7 +520,7 @@ class TestPureTierRouting:
         )
 
         assert provider_for_model("grok-4.5") is Provider.XAI
-        assert _get_backend_default_model("grok", self._cfg()) == "grok-4.5"
+        assert _get_backend_default_model("grok", self._cfg()) == "grok-4.7"
         with pytest.raises(ValueError):
             Complexity("grok")
 
