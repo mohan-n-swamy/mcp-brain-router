@@ -1338,7 +1338,8 @@ def _cc_family_output(stdout: str) -> tuple[str, Optional[Dict[str, int]]]:
     return content.strip(), usage
 
 
-def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
+                           effort: Optional[str] = None) -> Dict[str, Any]:
     """Agentic Anthropic (Opus/Sonnet/Haiku) worker: `cc-brain claude -p` in
     the REAL cwd. This is the agentic-CLI fallback for: the codex-orchestrator
     adversary case (codex can't be its own adversary) AND the GLM+codex-both-
@@ -1367,6 +1368,11 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None) -
         "--permission-mode",
         "bypassPermissions",
     ]
+    if effort:
+        if effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise BackendError(f"claude has no effort level {effort!r}", backend="anthropic-cli",
+                               failure_kind="validation_error")
+        argv += ["--effort", effort]
     limit = _timeout(AGENTIC_TIMEOUT_SECONDS)
     try:
         result = subprocess.run(

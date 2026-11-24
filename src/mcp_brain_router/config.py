@@ -50,39 +50,107 @@ def compute_settings() -> Dict[str, str]:
         values = {}
     return values | {key: os.environ[key] for key in keys if key in os.environ}
 
-# Code default for per-role execution mode (spec 002). The worker role is
-# agentic by default (shells to a CLI harness that writes files). HTTP-only
-# delegates were removed from the active path: every role is now a CLI worker.
-# A config.toml [role_modes] section is merged ON TOP of this — only non-default
-# roles need to be listed there. Worker is permanently agentic-for-workers so no
-# orchestrator ever re-asks "should the worker do the work".
-DEFAULT_ROLE_MODES: Dict[str, str] = {
-    "worker": "agentic",
-    "adversary": "agentic",
-    "thinker": "agentic",
-    "simple": "agentic",
-}
+@dataclass(frozen=True)
+class Slot:
+    """One entry of a role's order: a model and the thinking level it runs at."""
+    model: str
+    level: Optional[str] = None
 
-DEFAULT_ROLES: Dict[str, List[str]] = {
-    # Same-family swaps of 2026-11-24 under D17's rule (Mohan: "yes"), same slots:
-    # grok-4.5 -> grok-4.7, claude-fable-5 -> claude-fable-5-2, claude-sonnet-5 -> claude-sonnet-5-5.
-    # D17 (Mohan, 2026-11-24) supersedes D16's orders: thinker and adversary run
-    # highest to lowest (Fable, Gemini 4 Neon XHigh, Opus, Grok); worker is Neon
-    # Medium, Sonnet, Grok (backup); simple ends Gemini 4 Hydrogen Low, Haiku.
-    # Gemini 3.8 Flash retires 2026-11-30, so it is in no order.
-    # D16 (Mohan, 2026-11-24) supersedes D5: "so from now on we have antigravity,
-    # grok and claude on the rig". Codex (gpt-6.1-sol), Kimi and DeepSeek are out
-    # of every role; their call_* functions stay, reachable only by explicit
-    # model name. The orders live here, in the repo, where the retired-ID scan
-    # (lean-rig I18) sees them; a host config.toml [roles] table is ignored
-    # (Config.load). A missing binary is a free skip. gpt-oss runs only when
-    # warm and only for `simple` (backends.call_ollama). The adversary never
-    # resolves to the caller's own provider (router.resolve_role).
-    "simple": ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-low", "claude-haiku-5-5"],
-    "worker": ["gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"],
-    "adversary": ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"],
-    "thinker": ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "grok-4.7"],
-}
+    @property
+    def provider(self) -> str:
+        m = self.model.lower()
+        for prefix, name in (("gemini", "antigravity"), ("claude", "anthropic"), ("grok", "grok"),
+                             ("apple", "apple"), ("gpt-oss", "ollama")):
+            if m.startswith(prefix):
+                return name
+        raise ValueError(f"unknown model id: {self.model!r}")
+
+    @property
+    def id(self) -> str:
+        """The id the router resolves. Antigravity takes the level as the id's
+        suffix (agy rejects a separate --effort); every other provider keeps the
+        bare id and gets the level through its own effort parameter."""
+        return f"{self.model}-{self.level}" if self.provider == "antigravity" and self.level else self.model
+
+
+@dataclass(frozen=True)
+class RoleDef:
+    name: str
+    job: str
+    pick_when: str
+    slots: tuple
+    needs_tools: bool
+    deadline_s: int
+
+
+def _role(name, job, pick_when, slots, deadline_s=15 * 60, needs_tools=False) -> RoleDef:
+    return RoleDef(name, job, pick_when, tuple(Slot(*s) if isinstance(s, tuple) else Slot(s) for s in slots),
+                   needs_tools, deadline_s)
+
+
+_TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5-5", "max"),
+        ("gemini-4-carbon", "high"), ("grok-4.7", "xhigh"))
+
+# THE definition of the roles, in one place: every order, job text, deadline and
+# every string a caller reads (tool description, refusal, README block) comes from
+# here. Orders run best first; each is a one-line edit. Mohan decides at merge
+# whether the orders stand (D17 rule). Earlier decisions that still hold: D16 put
+# Codex, Kimi and DeepSeek out of every role (their call_* functions stay, reachable
+# only by explicit model name); a host config.toml [roles] table is ignored
+# (Config.load) so the retired-ID scan (lean-rig I18) sees every order; a missing
+# binary is a free skip; gpt-oss runs only when warm and only for `simple`; the
+# adversary never resolves to the caller's own provider (router.resolve_role).
+# Gemini 3.8 Flash retires 2026-11-30, so it is in no order. `worker` is an alias
+# of `coder`. Deadlines: simple 120 s, the rest 15 min, except the slow top-level
+# roles at 30 min.
+ROLES: Dict[str, RoleDef] = {r.name: r for r in (
+    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _TOP, 30 * 60),
+    _role("adversary", "Review from a different provider than the author",
+          "you need a second opinion on work another model wrote", _TOP, 30 * 60),
+    _role("coder", "Scoped multi-file code changes", "the task changes code in a bounded set of files",
+          (("claude-sonnet-5-5", "xhigh"), ("gemini-4-neon", "high"), ("claude-opus-5-5", "xhigh")),
+          needs_tools=True),
+    _role("processor", "Transform and synthesise documents at volume", "many or long documents go in, one result comes out",
+          (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("claude-sonnet-5-5", "xhigh"),
+           ("grok-4.7", "high"))),
+    _role("writer", "Prose that reasons and argues", "the output is an argument or an essay a person will read",
+          (("claude-fable-5-2", "xhigh"), ("claude-opus-5-5", "xhigh"), ("gemini-4-carbon", "high")), 30 * 60),
+    _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
+          "you need to find where something is before you change it",
+          (("claude-haiku-5-5", "medium"), ("claude-sonnet-5-5", "high")), needs_tools=True),
+    _role("qa", "Run the checks and the app against the spec; report pass or fail with evidence; change nothing",
+          "work is built and needs an independent check",
+          (("gemini-4-carbon", "high"), ("claude-opus-5-5", "xhigh"), ("gemini-4-neon", "high")), 30 * 60,
+          needs_tools=True),
+    _role("simple", "Cheap reads, extraction, classification", "the task is short, self-contained and needs no judgment",
+          ("apple-fm", "gpt-oss:20b", ("gemini-4-hydrogen", "medium"), ("claude-haiku-5-5", "medium")), 120),
+)}
+ROLE_ALIASES = {"worker": "coder"}
+
+# Derived views for code that reads orders as id lists. Never edit these.
+DEFAULT_ROLES: Dict[str, List[str]] = {name: [s.id for s in r.slots] for name, r in ROLES.items()}
+DEFAULT_ROLES.update({alias: list(DEFAULT_ROLES[target]) for alias, target in ROLE_ALIASES.items()})
+
+# Per-role execution mode (spec 002): every role is an agentic CLI worker. A
+# config.toml [role_modes] section is merged ON TOP only for non-default roles.
+DEFAULT_ROLE_MODES: Dict[str, str] = {name: "agentic" for name in DEFAULT_ROLES}
+
+
+def slot_level(role: str, model_id: str) -> Optional[str]:
+    """The thinking level the table gives `model_id` in `role` (None if absent)."""
+    r = ROLES.get(ROLE_ALIASES.get(role, role))
+    return next((s.level for s in r.slots if s.id == model_id), None) if r else None
+
+
+def render_roles() -> str:
+    """The one renderer: tool description, refusal text and README block."""
+    lines = []
+    for r in ROLES.values():
+        order = " > ".join(f"{s.model}@{s.level}" if s.level else s.model for s in r.slots)
+        lines.append(f"- {r.name}: {r.job}. Pick when {r.pick_when}. Order: {order}.")
+    lines.append("- worker: alias of coder.")
+    return "\n".join(lines)
+
 
 # The Codex models a host [model_overrides] adversarial entry may name: the
 # ChatGPT login refuses the rest (D5, tested 2026-11-06).

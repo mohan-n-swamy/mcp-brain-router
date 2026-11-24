@@ -22,3 +22,11 @@ def _delegation_log_in_tmp(tmp_path, monkeypatch):
     from mcp_brain_router import server
 
     monkeypatch.setattr(server, "_DELEGATION_LOG", tmp_path / "delegations.jsonl")
+
+
+@pytest.fixture(autouse=True)
+def _ping_cache_in_tmp(tmp_path, monkeypatch):
+    """Never read or write the LIVE ping cache: a stale 'down' would skip real models."""
+    from mcp_brain_router import ping
+
+    monkeypatch.setattr(ping, "CACHE", tmp_path / "ping.json")

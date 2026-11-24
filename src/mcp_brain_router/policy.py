@@ -6,6 +6,8 @@ scripts/policy-check.sh proves these hold; tests/test_policy.py is its body.
 
 from typing import Optional
 
+from .config import ROLE_ALIASES, ROLES
+
 # Opens each delegate prompt: precedence, data-not-instructions, tenets 1 and 3
 # (the lean-rig tenets draft). The parent keeps every other rule. At most 1,200
 # bytes, and free of paths, file names and URLs, so the text-only tiers' tool
@@ -36,12 +38,13 @@ def with_preamble(prompt: str) -> str:
 
 
 # One deadline per delegate call, across the whole role walk (seconds).
-ROLE_DEADLINE_SECONDS = {"simple": 120, "worker": 15 * 60}
+# Defined per role in config.ROLES; `worker` is the coder's alias.
 DEFAULT_DEADLINE_SECONDS = 15 * 60
 
 
 def deadline_seconds(role: str) -> int:
-    return ROLE_DEADLINE_SECONDS.get(role, DEFAULT_DEADLINE_SECONDS)
+    r = ROLES.get(ROLE_ALIASES.get(role, role))
+    return r.deadline_s if r else DEFAULT_DEADLINE_SECONDS
 
 
 # Data classes. `orange` (Orange work; the Orange host's default) reaches Claude
