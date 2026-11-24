@@ -352,6 +352,22 @@ async def test_cold_gpt_oss_means_gemini_then_haiku():
     assert out["model"] == "claude-haiku-5-5"
 
 
+async def test_simple_prompt_naming_a_path_skips_gemini_for_haiku():
+    """agy runs tools-off: a reader prompt that names a file must reach Haiku, which can open it."""
+    called = []
+    with (_ollama(_ps([])),
+          patch.object(backends, "call_antigravity",
+                       side_effect=lambda *a, **k: called.append(a) or {"content": "guess", "usage": None}),
+          patch.object(backends, "call_anthropic_agentic",
+                       return_value={"content": "read it", "usage": None}),
+          patch.object(server, "_load_config", return_value=_cfg())):
+        out = await server._delegate_role_impl(
+            "simple", "Summarize ./notes/report.md in two lines", "claude", cwd="/tmp")
+    assert not called, "Gemini was asked to read a file it cannot open"
+    assert out["model"] == "claude-haiku-5-5" and out["answer"] == "read it"
+    assert "antigravity:needs_tools" in out["failures"]
+
+
 async def test_gpt_oss_warm_answers():
     with _ollama(_ps(["gpt-oss:20b"])):
         out = await backends.call_ollama("Classify: late report", "http://127.0.0.1:11435",
