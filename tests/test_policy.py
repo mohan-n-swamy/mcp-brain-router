@@ -52,6 +52,13 @@ def _gpt_oss_lock_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(backends, "OLLAMA_LOCK", str(tmp_path / "gpt-oss.lock"))
 
 
+@pytest.fixture(autouse=True)
+def _agy_present(monkeypatch):
+    """agy availability is the binary itself; hosts without one (arunachala)
+    must not change what these walk tests mean."""
+    monkeypatch.setattr(backends, "_AGY_BIN", "/bin/sh")
+
+
 def _cfg(**kw) -> Config:
     base = dict(deepseek_key="ds", codex_enabled=True, grok_enabled=True, kimi_enabled=True,
                 fm_host="fm-host", ollama_host="http://127.0.0.1:11435",
@@ -83,12 +90,19 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
 # ── Role orders (D5) ────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("role,order", [
-    ("simple", ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5"]),
-    ("worker", ["kimi", "grok-4.5", "deepseek-v4-pro", "claude-sonnet-5", "gpt-6.1-sol"]),
-    ("adversary", ["gpt-6.1-sol", "claude-opus-5-5", "kimi"]),
+    ("simple", ["apple-fm", "gpt-oss:20b", "gemini-3.8-flash-low", "claude-haiku-5-5"]),
+    ("worker", ["grok-4.5", "gemini-4-neon-medium", "claude-sonnet-5"]),
+    ("adversary", ["gemini-4-neon-high", "grok-4.5", "claude-opus-5-5"]),
+    ("thinker", ["grok-4.5", "gemini-4-neon-xhigh", "claude-fable-5"]),
 ])
-def test_d5_role_order(role, order):
+def test_d15_role_order(role, order):
+    """D16 (Mohan, 2026-11-24) supersedes D5: Antigravity, Grok, Claude only."""
     assert DEFAULT_ROLES[role] == order
+
+
+def test_no_retired_provider_in_any_role():
+    retired = ("gpt-6", "kimi", "deepseek")
+    assert not [m for v in DEFAULT_ROLES.values() for m in v if m.startswith(retired)]
 
 
 def test_host_roles_table_cannot_reorder(tmp_path, monkeypatch):
@@ -218,7 +232,7 @@ async def test_adversarial_tier_sends_the_preamble():
     with (patch.object(server, "_load_config", return_value=_cfg()),
           patch.object(server, "_read_caller", return_value="claude"),
           patch.object(server, "route", side_effect=fake_route)):
-        await server._delegate_impl("adversarial", "review this", cwd="/tmp")
+        await server._delegate_impl("adversarial", "review this", model="gpt-6.1-sol", cwd="/tmp")
     assert seen["prompt"] == policy.with_preamble("review this")
 
 
@@ -231,8 +245,8 @@ async def test_walk_passes_three_failed_backends():
         calls.note("grok", prompt)
         raise BackendError("cut", backend="grok", failure_kind="no_final_message", elapsed_ms=5000)
 
-    async def deepseek(prompt, model, api_key, effort=None):
-        calls.note("deepseek", prompt)
+    def agy(prompt, model, effort=None):
+        calls.note("antigravity", prompt)
         return {"content": "   ", "usage": {}}  # empty answer: walk on
 
     def claude(prompt, model, cwd=None):
@@ -240,11 +254,11 @@ async def test_walk_passes_three_failed_backends():
         return {"content": "built", "usage": None}
 
     with (patch.object(backends, "call_grok", side_effect=grok),
-          patch.object(backends, "call_deepseek", side_effect=deepseek),
+          patch.object(backends, "call_antigravity", side_effect=agy),
           patch.object(backends, "call_anthropic_agentic", side_effect=claude)):
         out = await _walk(_cfg(), "worker")
-    # kimi refuses (no tools-off mode), grok has no final message, deepseek is empty.
-    assert out["tried"] == ["kimi", "grok", "deepseek", "anthropic-cli"]
+    # grok has no final message, antigravity is empty, Claude answers.
+    assert out["tried"] == ["grok", "antigravity", "anthropic-cli"]
     assert (out["backend"], out["model"], out["answer"]) == ("anthropic-cli", "claude-sonnet-5", "built")
     assert out["retried"] == []  # a cut Grok turn is not retried on Grok
     deadlines = {d for _, d in calls.seen.values()}
@@ -256,7 +270,8 @@ async def test_walk_passes_three_failed_backends():
 async def test_missing_key_or_binary_is_a_free_skip():
     with patch.object(backends, "call_anthropic_agentic",
                       return_value={"content": "ok", "usage": None}):
-        out = await _walk(_cfg(deepseek_key=None, grok_enabled=False, kimi_enabled=False), "worker")
+        with patch.object(backends, "_AGY_BIN", "agy-not-installed"):
+            out = await _walk(_cfg(grok_enabled=False), "worker")
     assert out["backend"] == "anthropic-cli"
     assert all(f.endswith("configuration_error") for f in out["failures"])
 
@@ -278,13 +293,13 @@ async def test_walk_stops_at_the_deadline():
         raise BackendError("slow", backend="grok", failure_kind="process_error",
                            elapsed_ms=200_000)  # not a fast flake: no same-provider retry
 
-    deepseek = AsyncMock(return_value={"content": "late", "usage": {}})
+    agy = MagicMock(return_value={"content": "late", "usage": {}})
     with (patch.object(server, "deadline_seconds", lambda role: 1.5),
           patch.object(backends, "call_grok", side_effect=slow_grok),
-          patch.object(backends, "call_deepseek", deepseek)):
+          patch.object(backends, "call_antigravity", agy)):
         out = await _walk(_cfg(), "worker")
     assert out["failure_kind"] == "deadline_exceeded"
-    deepseek.assert_not_awaited()
+    agy.assert_not_called()
 
 
 # ── gpt-oss: cold skip, one generation at a time ────────────────────────────
@@ -317,13 +332,23 @@ async def test_gpt_oss_cold_skips_without_waiting():
     assert time.monotonic() - started < 1
 
 
-async def test_cold_gpt_oss_means_haiku():
+async def test_cold_gpt_oss_means_gemini_then_haiku():
+    """D16: gemini-3.8-flash-low sits between gpt-oss and Haiku."""
     fm_down = BackendError("mini down", backend="apple-fm", failure_kind="unreachable", elapsed_ms=5)
     with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),
+          patch.object(backends, "call_antigravity",
+                       return_value={"content": "label_b", "usage": None})):
+        gem = await _walk(_cfg(), "simple")
+    assert gem["tried"] == ["apple-fm", "ollama", "antigravity"]
+    assert gem["model"] == "gemini-3.8-flash-low"
+    agy_down = BackendError("down", backend="antigravity", failure_kind="process_error",
+                            elapsed_ms=200_000)
+    with (_ollama(_ps([])), patch.object(backends, "call_fm", side_effect=fm_down),
+          patch.object(backends, "call_antigravity", side_effect=agy_down),
           patch.object(backends, "call_anthropic_agentic",
                        return_value={"content": "label_b", "usage": None})):
         out = await _walk(_cfg(), "simple")
-    assert out["tried"] == ["apple-fm", "ollama", "anthropic-cli"]
+    assert out["tried"] == ["apple-fm", "ollama", "antigravity", "anthropic-cli"]
     assert out["model"] == "claude-haiku-5-5"
 
 

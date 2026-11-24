@@ -24,7 +24,11 @@ codex_enabled = false
 # authenticates via `grok login` (grok.com), so there is no grok_key field.
 grok_enabled = false
 
-# Kimi CLI availability (volume lead on worker/simple; mid cascade on thinker/adversary)
+# Antigravity (`agy`) needs no flag here: it runs when the binary is found
+# (/opt/homebrew/bin or ~/.local/bin) and you are logged in. Roles are fixed in
+# config.DEFAULT_ROLES (D16, 2026-11-24); Codex, Kimi and DeepSeek are in none of them.
+
+# Kimi CLI availability (no role uses it since D16; explicit model name only)
 # Set to true only if 'kimi' binary is installed and on PATH. OAuth via kimi login.
 kimi_enabled = false
 

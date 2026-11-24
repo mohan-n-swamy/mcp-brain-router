@@ -112,7 +112,7 @@ def _retryable(failure_kind: str | None, elapsed_ms: int | None) -> bool:
 # attacker-controlled process could set the env var to anything — so it is
 # normalized to "unknown", which the downstream provider-match guard treats as
 # "no orchestrator trust" (standard role resolution, no privileged path).
-_KNOWN_CALLERS = frozenset({"claude", "codex", "grok"})
+_KNOWN_CALLERS = frozenset({"claude", "codex", "grok", "antigravity"})
 
 
 def _read_caller() -> str:
@@ -299,11 +299,12 @@ async def _delegate_impl(
             )
 
         call_class = resolve_class(data_class, getattr(config, "default_class", None))
-        # cheap and code walk the simple and worker roles (GLM left, D5); class
-        # orange walks the adversary role too, so it reaches Claude only. A role
-        # walk needs the caller as orchestrator, so an unregistered caller
-        # cannot take it.
-        if complexity_enum is not Complexity.ADVERSARIAL or call_class == ORANGE:
+        # Every tier walks a role (cheap=simple, code=worker, adversarial=adversary;
+        # D16 took Codex out of every role). Only an adversarial call that names
+        # a model skips the walk and goes to that model's own backend, unless
+        # the class is orange, which reaches Claude only. A role walk needs the
+        # caller as orchestrator, so an unregistered caller cannot take it.
+        if complexity_enum is not Complexity.ADVERSARIAL or not model or call_class == ORANGE:
             if caller not in _KNOWN_CALLERS:
                 raise ValueError(
                     f"complexity={complexity_enum.value} walks a role and needs a "
@@ -468,7 +469,7 @@ async def _delegate_role_impl(
         if not orchestrator:
             raise ValueError("orchestrator is required when role is provided")
 
-        if caller in {"claude", "codex", "grok"}:
+        if caller in _KNOWN_CALLERS:
             caller_provider = orchestrator_provider(caller)
             declared_provider = orchestrator_provider(orchestrator)
             if caller_provider is not declared_provider:
@@ -855,16 +856,16 @@ def create_server():
             """
             Delegate by orchestration role (or a legacy complexity tier).
 
-            Role orders (D5, free first); each call walks its role's whole order
-            within one deadline (simple 120 s, worker 15 min). A backend with no
-            binary or key is skipped; an error, timeout or empty answer falls
-            through to the next:
-            - simple: Apple fm → gpt-oss:20b (warm only) → Claude Haiku
-            - worker: Kimi → Grok → DeepSeek V4 Pro → Claude Sonnet → Codex sol
-            - adversary: Codex sol → Claude Opus → Kimi (never your own provider)
-            - thinker: Grok → Claude Fable → Codex sol
+            Role orders (D16, 2026-11-24: Antigravity, Grok, Claude); each call
+            walks its role's whole order within one deadline (simple 120 s,
+            worker 15 min). A backend with no binary or key is skipped; an
+            error, timeout or empty answer falls through to the next:
+            - simple: Apple fm → gpt-oss:20b (warm only) → Gemini 3.8 Flash Low → Claude Haiku
+            - worker: Grok → Gemini 4 Neon Medium → Claude Sonnet
+            - adversary: Gemini 4 Neon High → Grok → Claude Opus (never your own provider)
+            - thinker: Grok → Gemini 4 Neon XHigh → Claude Fable
             Legacy tiers: 'cheap' walks simple, 'code' walks worker,
-            'adversarial' is Codex sol alone.
+            'adversarial' walks adversary (Codex only when you pass an explicit model).
 
             Non-Claude workers run tools-off: put everything they need in the
             prompt. Claude workers run `cc-brain claude` in `cwd` with tools.

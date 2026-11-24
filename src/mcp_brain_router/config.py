@@ -64,16 +64,18 @@ DEFAULT_ROLE_MODES: Dict[str, str] = {
 }
 
 DEFAULT_ROLES: Dict[str, List[str]] = {
-    # D5 (Mohan, 2026-11-06), free first. The orders live here, in the repo,
-    # where the retired-ID scan (lean-rig I18) sees them; a host config.toml
-    # [roles] table is ignored (Config.load). A missing binary or key is a free
-    # skip, so Kimi (not installed) and DeepSeek (unkeyed) cost nothing.
-    # gpt-oss runs only when warm and only for `simple` (backends.call_ollama).
-    "simple": ["apple-fm", "gpt-oss:20b", "claude-haiku-5-5"],
-    "worker": ["kimi", "grok-4.5", "deepseek-v4-pro", "claude-sonnet-5", "gpt-6.1-sol"],
-    "adversary": ["gpt-6.1-sol", "claude-opus-5-5", "kimi"],
-    # Not in D5; only its Codex entry moves to the one model the ChatGPT login takes.
-    "thinker": ["grok-4.5", "claude-fable-5", "gpt-6.1-sol"],
+    # D16 (Mohan, 2026-11-24) supersedes D5: "so from now on we have antigravity,
+    # grok and claude on the rig". Codex (gpt-6.1-sol), Kimi and DeepSeek are out
+    # of every role; their call_* functions stay, reachable only by explicit
+    # model name. The orders live here, in the repo, where the retired-ID scan
+    # (lean-rig I18) sees them; a host config.toml [roles] table is ignored
+    # (Config.load). A missing binary is a free skip. gpt-oss runs only when
+    # warm and only for `simple` (backends.call_ollama). The adversary never
+    # resolves to the caller's own provider (router.resolve_role).
+    "simple": ["apple-fm", "gpt-oss:20b", "gemini-3.8-flash-low", "claude-haiku-5-5"],
+    "worker": ["grok-4.5", "gemini-4-neon-medium", "claude-sonnet-5"],
+    "adversary": ["gemini-4-neon-high", "grok-4.5", "claude-opus-5-5"],
+    "thinker": ["grok-4.5", "gemini-4-neon-xhigh", "claude-fable-5"],
 }
 
 # The Codex models a host [model_overrides] adversarial entry may name: the

@@ -7,6 +7,7 @@ credentials, and returns unified result dicts. Framework-free, unit-testable.
 import asyncio
 from dataclasses import dataclass
 import logging
+import os
 from enum import Enum
 from typing import Dict, Iterable, Optional
 
@@ -56,6 +57,7 @@ class Provider(str, Enum):
     DEEPSEEK = "deepseek"     # deepseek-v4-pro / deepseek-flash (Anthropic-shape HTTP)
     APPLE = "apple"           # apple-fm: on-device Apple Foundation Model on the mini (fm CLI over ssh)
     OLLAMA = "ollama"         # gpt-oss:20b on the host's Ollama, simple role only
+    ANTIGRAVITY = "antigravity"  # gemini-* ids (Antigravity CLI `agy`, Google login)
 
 
 # Prefix → Provider. First matching prefix wins; order matters where one prefix
@@ -63,6 +65,7 @@ class Provider(str, Enum):
 # Ollama, not Codex). Extend here when a new model family appears — this is the
 # single source of truth for id→provider.
 _MODEL_PROVIDER_PREFIXES = (
+    ("gemini", Provider.ANTIGRAVITY),   # first: no later substring rule may claim a gemini-* id
     ("gpt-oss", Provider.OLLAMA),
     ("ollama", Provider.OLLAMA),
     ("opus", Provider.ANTHROPIC),
@@ -118,6 +121,7 @@ _PROVIDER_TARGETS = {
     Provider.CODEX: ("codex", Complexity.ADVERSARIAL),
     Provider.APPLE: ("apple-fm", Complexity.CHEAP),
     Provider.OLLAMA: ("ollama", Complexity.CHEAP),
+    Provider.ANTIGRAVITY: ("antigravity", Complexity.CODE),
 }
 
 
@@ -377,6 +381,8 @@ async def route_assignment(
     try:
         if provider is Provider.XAI:
             result = await _route_grok(prompt, assignment.model, config, effort=effort)
+        elif provider is Provider.ANTIGRAVITY:
+            result = await _route_antigravity(prompt, assignment.model)
         elif provider is Provider.KIMI:
             result = await asyncio.to_thread(backends.call_kimi, prompt, assignment.model)
         elif provider is Provider.DEEPSEEK:
@@ -635,6 +641,8 @@ def _get_backend_default_model(backend_name: str, config: Config) -> str:
         # xAI Grok agentic CLI worker (grok.com OAuth, no API key). It is a
         # coding provider selected by role routing, not a public complexity tier.
         "grok": "grok-4.5",
+        # D16: the adversary's first entry; the id's suffix is the effort.
+        "antigravity": "gemini-4-neon-high",
         # Kimi Code CLI agentic worker (OAuth login, no API key). It is a
         # coding provider selected by role routing, not a public complexity
         # tier. No -m flag is passed — the CLI runs its configured default
@@ -661,6 +669,11 @@ def _validate_credentials(backend_name: str, config: Config) -> None:
         # is a boolean enable flag like Codex, not a stored credential.
         if not config.grok_enabled:
             raise BackendUnavailableError("grok", "Grok not enabled or not available on PATH")
+    elif backend_name == "antigravity":
+        # No enable flag: availability is the binary itself, so a host with no
+        # agy (arunachala) skips for free and a host with one needs no config.
+        if "/" not in backends._AGY_BIN or not os.access(backends._AGY_BIN, os.X_OK):
+            raise BackendUnavailableError("antigravity", "agy not found on PATH")
     elif backend_name == "kimi":
         # Kimi is a CLI worker (Kimi Code CLI OAuth login, no API key).
         # Availability is a boolean enable flag like Grok/Codex, not a stored
@@ -734,6 +747,23 @@ async def _route_grok(
         content=result["content"],
         model=model,
         backend="grok",
+        complexity=Complexity.CODE,
+        headroom_used=False,
+        usage=result.get("usage"),
+    )
+
+
+async def _route_antigravity(prompt: str, model: str) -> RouteResult:
+    """Route to Antigravity (subprocess, tools-off, final message only).
+
+    BLOCKING subprocess.run, so offloaded to a worker thread (as _route_grok).
+    No effort is passed: the model id's suffix decides it."""
+    result = await asyncio.to_thread(backends.call_antigravity, prompt, model)
+
+    return RouteResult(
+        content=result["content"],
+        model=model,
+        backend="antigravity",
         complexity=Complexity.CODE,
         headroom_used=False,
         usage=result.get("usage"),
