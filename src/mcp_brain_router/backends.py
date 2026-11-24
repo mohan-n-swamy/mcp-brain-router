@@ -1129,9 +1129,10 @@ _AGY_DENY_HOOK = json.dumps({
 })
 
 
-# Lean one-shots (measured 2026-11-24, one-word prompt, a Gemini 3.8 Flash model since retired):
-# with the rig plugin installed, a plain folder costs 25,630 input tokens; with
-# this manifest (agy skips excluded plugins in every location) 9,830. Needs a
+# Lean one-shots (measured 2026-11-24, one-word prompt, on a Flash model that
+# retires 2026-11-30): with the rig plugin installed, a plain folder costs about
+# 25,600 input tokens; with this manifest (agy skips excluded plugins in every
+# location) about 10,000 (runs ranged 9,830 to 10,120). Needs a
 # workdir outside any git repo. Nothing shared is toggled.
 _AGY_LEAN_PLUGINS = json.dumps({"exclude": ["rig", "ponytail"]})
 
