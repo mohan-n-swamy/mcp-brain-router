@@ -79,13 +79,20 @@ class RoleDef:
     job: str
     pick_when: str
     slots: tuple
-    needs_tools: bool
+    tools: str  # default tools mode: none, read or write (delegate's `tools` overrides it)
     deadline_s: int
 
+    @property
+    def needs_tools(self) -> bool:
+        return self.tools != "none"
 
-def _role(name, job, pick_when, slots, deadline_s=15 * 60, needs_tools=False) -> RoleDef:
+
+TOOLS_MODES = ("none", "read", "write")
+
+
+def _role(name, job, pick_when, slots, deadline_s=15 * 60, tools="none") -> RoleDef:
     return RoleDef(name, job, pick_when, tuple(Slot(*s) if isinstance(s, tuple) else Slot(s) for s in slots),
-                   needs_tools, deadline_s)
+                   tools, deadline_s)
 
 
 _TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5-5", "max"),
@@ -109,7 +116,7 @@ ROLES: Dict[str, RoleDef] = {r.name: r for r in (
           "you need a second opinion on work another model wrote", _TOP, 30 * 60),
     _role("coder", "Scoped multi-file code changes", "the task changes code in a bounded set of files",
           (("claude-sonnet-5-5", "xhigh"), ("gemini-4-neon", "high"), ("claude-opus-5-5", "xhigh")),
-          needs_tools=True),
+          tools="write"),
     _role("processor", "Transform and synthesise documents at volume", "many or long documents go in, one result comes out",
           (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("claude-sonnet-5-5", "xhigh"),
            ("grok-4.7", "high"))),
@@ -117,11 +124,12 @@ ROLES: Dict[str, RoleDef] = {r.name: r for r in (
           (("claude-fable-5-2", "xhigh"), ("claude-opus-5-5", "xhigh"), ("gemini-4-carbon", "high")), 30 * 60),
     _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
           "you need to find where something is before you change it",
-          (("claude-haiku-5-5", "medium"), ("claude-sonnet-5-5", "high")), needs_tools=True),
+          (("gemini-4-hydrogen", "high"), ("claude-haiku-5-5", "medium"), ("grok-4.7", "high")),
+          tools="read"),
     _role("qa", "Run the checks and the app against the spec; report pass or fail with evidence; change nothing",
           "work is built and needs an independent check",
           (("gemini-4-carbon", "high"), ("claude-opus-5-5", "xhigh"), ("gemini-4-neon", "high")), 30 * 60,
-          needs_tools=True),
+          tools="write"),
     _role("simple", "Cheap reads, extraction, classification", "the task is short, self-contained and needs no judgment",
           ("apple-fm", "gpt-oss:20b", ("gemini-4-hydrogen", "medium"), ("claude-haiku-5-5", "medium")), 120),
 )}
