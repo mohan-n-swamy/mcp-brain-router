@@ -38,7 +38,7 @@ def with_preamble(prompt: str) -> str:
 
 
 # One deadline per delegate call, across the whole role walk (seconds).
-# Defined per role in config.ROLES; `worker` is the coder's alias.
+# Defined per role in config.ROLES; `worker` is the processor's alias.
 DEFAULT_DEADLINE_SECONDS = 15 * 60
 
 

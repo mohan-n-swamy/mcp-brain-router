@@ -40,7 +40,7 @@ class Role(str, Enum):
     ORCHESTRATOR = "orchestrator"
     THINKER = "thinker"
     ADVERSARY = "adversary"
-    WORKER = "worker"  # alias of CODER
+    WORKER = "worker"  # alias of PROCESSOR (config.ROLE_ALIASES)
     CODER = "coder"
     PROCESSOR = "processor"
     WRITER = "writer"

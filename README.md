@@ -109,7 +109,7 @@ Roles (generated from `config.ROLES`; edit the table, then re-render this block)
 - explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > claude-sonnet-5-5@high.
 - qa: Run the checks and the app against the spec; report pass or fail with evidence; change nothing. Pick when work is built and needs an independent check. Order: gemini-4-carbon@high > claude-opus-5-5@xhigh > gemini-4-neon@high.
 - simple: Cheap reads, extraction, classification. Pick when the task is short, self-contained and needs no judgment. Order: apple-fm > gpt-oss:20b > gemini-4-hydrogen@medium > claude-haiku-5-5@medium.
-- worker: alias of coder.
+- worker: alias of processor.
 <!-- roles:end -->
 
 `orchestrator` is never
@@ -127,7 +127,7 @@ walks `adversary`).
 | Tier | Backend | Model | Use Case | Cost | Speed |
 |------|---------|-------|----------|------|-------|
 | `cheap` | the `simple` walk | fm, gpt-oss:20b, Haiku | Short self-contained text | Lowest | Fastest |
-| `code` | the `worker` walk | the `coder` order | Self-contained code task | Varies | Varies |
+| `code` | the `worker` walk | the `processor` order | Self-contained code task | Varies | Varies |
 | `adversarial` | Codex, tools-off | `gpt-6.1-sol`, low effort | Security reviews, refutation, second opinion | Higher | Slowest |
 
 ### Delegation policy (lean-rig PLAN §6; `scripts/policy-check.sh` proves it, I22)

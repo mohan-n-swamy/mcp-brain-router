@@ -230,7 +230,7 @@ def test_adversary_start_per_caller(monkeypatch):
 
 
 def test_coder_first_entry_is_sonnet_then_neon():
-    a = resolve_role(Role.WORKER, "claude", _cfg(), mode="agentic")
+    a = resolve_role(Role.CODER, "claude", _cfg(), mode="agentic")
     assert (a.model, a.backend) == ("claude-sonnet-5-5", "anthropic-cli")
     b = resolve_role(Role.CODER, "claude", _cfg(), skip_models=["claude-sonnet-5-5"], mode="agentic")
     assert (b.model, b.backend) == ("gemini-4-neon-high", "antigravity")

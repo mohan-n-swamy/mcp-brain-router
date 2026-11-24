@@ -125,7 +125,10 @@ ROLES: Dict[str, RoleDef] = {r.name: r for r in (
     _role("simple", "Cheap reads, extraction, classification", "the task is short, self-contained and needs no judgment",
           ("apple-fm", "gpt-oss:20b", ("gemini-4-hydrogen", "medium"), ("claude-haiku-5-5", "medium")), 120),
 )}
-ROLE_ALIASES = {"worker": "coder"}
+# `worker` is what skills and workflows call for volume jobs (research, classify,
+# summarise, bulk transform), so it keeps a cheap non-Claude-first order: processor.
+# Code changes ask for `coder` by name.
+ROLE_ALIASES = {"worker": "processor"}
 
 # Derived views for code that reads orders as id lists. Never edit these.
 DEFAULT_ROLES: Dict[str, List[str]] = {name: [s.id for s in r.slots] for name, r in ROLES.items()}
@@ -148,7 +151,7 @@ def render_roles() -> str:
     for r in ROLES.values():
         order = " > ".join(f"{s.model}@{s.level}" if s.level else s.model for s in r.slots)
         lines.append(f"- {r.name}: {r.job}. Pick when {r.pick_when}. Order: {order}.")
-    lines.append("- worker: alias of coder.")
+    lines.extend(f"- {alias}: alias of {target}." for alias, target in ROLE_ALIASES.items())
     return "\n".join(lines)
 
 

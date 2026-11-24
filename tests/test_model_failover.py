@@ -184,3 +184,29 @@ def test_slow_role_call_cap_outlasts_the_cli_cap():
             backends.DEADLINE.reset(d)
     finally:
         backends.CALL_CAP.reset(tok)
+
+
+async def test_fast_failure_retries_the_model_without_pinging_itself():
+    """A fast process error retries the same model once, with no ping in between."""
+    n = {"c": 0}
+
+    def flaky(prompt):
+        n["c"] += 1
+        if n["c"] == 1:
+            return BackendError("blip", backend="antigravity", failure_kind="process_error", elapsed_ms=200)
+        return "answer"
+
+    f = Fakes({"gemini-4-hydrogen-high": flaky})
+    out = await _run(f, "processor")
+    assert out["model"] == "gemini-4-hydrogen-high"
+    assert f.calls == [("gemini-4-hydrogen-high", "real"), ("gemini-4-hydrogen-high", "real")]
+
+
+async def test_a_non_outage_failure_does_not_mark_the_model_down():
+    """A bad argument or a prompt-specific error says nothing about the model being up."""
+    f = Fakes({"gemini-4-hydrogen-high": BackendError("bad", backend="antigravity",
+                                                      failure_kind="validation_error", elapsed_ms=90_000)})
+    out = await _run(f, "processor")
+    assert out["model"] == "gemini-4-neon-medium"
+    assert ping.fresh("gemini-4-hydrogen-high") is None
+    assert ("gemini-4-neon-medium", "ping") not in f.calls  # the provider was never suspect

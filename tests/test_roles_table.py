@@ -32,13 +32,14 @@ async def test_description_names_every_role_and_job():
         assert r.name in text and r.job in text, r.name
 
 
-def test_worker_alias_is_the_coder():
+def test_worker_alias_is_the_processor():
+    """`worker` is what volume callers pass; it keeps a cheap non-Claude-first order."""
     cfg = _cfg()
-    assert DEFAULT_ROLES["worker"] == DEFAULT_ROLES["coder"]
-    assert deadline_seconds("worker") == deadline_seconds("coder")
+    assert DEFAULT_ROLES["worker"] == DEFAULT_ROLES["processor"]
+    assert deadline_seconds("worker") == deadline_seconds("processor")
     for caller in ("claude", "grok", "antigravity"):
         w = resolve_role(Role.WORKER, caller, cfg, mode="agentic")
-        c = resolve_role(Role.CODER, caller, cfg, mode="agentic")
+        c = resolve_role(Role.PROCESSOR, caller, cfg, mode="agentic")
         assert w.model == c.model
 
 

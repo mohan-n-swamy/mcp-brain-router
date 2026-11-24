@@ -6,6 +6,7 @@ for a short lifetime, so a dead model is not re-tried on every call.
 """
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -53,8 +54,10 @@ def record(model: str, ok: bool) -> None:
         data = _read()
         data[model] = {"state": "ok" if ok else "down", "ts": now()}
         CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CACHE.with_suffix(f".tmp.{os.getpid()}")
-        tmp.write_text(json.dumps(data))
+        # A unique temp file: two threads or two servers must not share one.
+        fd, tmp = tempfile.mkstemp(dir=CACHE.parent, prefix=CACHE.name + ".")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data))
         os.replace(tmp, CACHE)
     except Exception:  # noqa: BLE001
         pass

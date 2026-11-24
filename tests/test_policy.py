@@ -91,7 +91,7 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
 
 @pytest.mark.parametrize("role,order", [
     ("simple", ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-medium", "claude-haiku-5-5"]),
-    ("worker", ["claude-sonnet-5-5", "gemini-4-neon-high", "claude-opus-5-5"]),
+    ("worker", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"]),
     ("coder", ["claude-sonnet-5-5", "gemini-4-neon-high", "claude-opus-5-5"]),
     ("adversary", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
     ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
@@ -192,8 +192,7 @@ async def test_orange_refuses_rather_than_falls_through():
         for p in patches:
             p.stop()
     assert out["failure_kind"] == "class_refused"
-    # coder now ends with Opus, so both Claude entries are tried before the refusal.
-    assert out["backend"] == "none" and out["tried"] == ["anthropic-cli", "anthropic-cli"]
+    assert out["backend"] == "none" and out["tried"] == ["anthropic-cli"]
 
 
 async def test_orange_adversary_from_claude_refuses():
