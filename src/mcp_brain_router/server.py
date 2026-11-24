@@ -301,7 +301,7 @@ async def _delegate_impl(
         call_class = resolve_class(data_class, getattr(config, "default_class", None))
         # Every tier walks a role (cheap=simple, code=worker, adversarial=adversary;
         # D16 took Codex out of every role). Only an adversarial call that names
-        # a model skips the walk and goes to that model's backend (Codex), unless
+        # a model skips the walk and goes to that model's own backend, unless
         # the class is orange, which reaches Claude only. A role walk needs the
         # caller as orchestrator, so an unregistered caller cannot take it.
         if complexity_enum is not Complexity.ADVERSARIAL or not model or call_class == ORANGE:

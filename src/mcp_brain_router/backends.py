@@ -1222,7 +1222,9 @@ def call_antigravity(
                                failure_kind="invalid_output", elapsed_ms=elapsed_ms)
         if payload.get("status") != "SUCCESS":
             # exit 0 with an ERROR status is possible; treat it like a failed exit.
-            quota = _cli_quota_error("Antigravity", str(payload.get("error") or ""), None)
+            if "print_timeout" in f"{payload.get('finished_reason')} {payload.get('error')}":
+                raise subprocess.TimeoutExpired(_AGY_BIN, limit)
+            quota =_cli_quota_error("Antigravity", str(payload.get("error") or ""), None)
             if quota:
                 raise quota
             raise BackendError(

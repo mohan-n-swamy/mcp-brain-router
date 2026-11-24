@@ -112,6 +112,13 @@ def test_print_timeout_named_only_in_stdout_is_transient():
             call_antigravity("hi", "gemini-3.8-flash-low")
 
 
+def test_print_timeout_with_exit_zero_is_transient():
+    out = json.dumps({"status": "ERROR", "response": "", "finished_reason": "print_timeout"})
+    with patch("mcp_brain_router.backends.subprocess.run", return_value=_proc(out, 0, "")):
+        with pytest.raises(BackendTransientError):
+            call_antigravity("hi", "gemini-3.8-flash-low")
+
+
 def test_subprocess_timeout_is_transient():
     with patch("mcp_brain_router.backends.subprocess.run",
                side_effect=subprocess.TimeoutExpired("agy", 1)):
