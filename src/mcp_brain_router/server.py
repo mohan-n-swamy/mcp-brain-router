@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+import dataclasses
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -26,7 +27,7 @@ except ImportError:
 
     _USE_FASTMCP = False
 
-from . import backends, jev, ping
+from . import backends, jev, ping, quota
 from .backends import BackendError  # base of the whole error family (router's subclass it)
 from .config import ROLE_ALIASES, ROLES, Config, ConfigError, render_roles, slot_level
 from .policy import ORANGE, deadline_seconds, resolve_class, with_preamble
@@ -434,6 +435,24 @@ async def _delegate_impl(
         return complete(response)
 
 
+def _quota_ordered(config: Config, role: str) -> tuple[str | None, Config]:
+    """(note, config) with `role`'s candidates in quota order; unchanged when quota says nothing."""
+    name = ROLE_ALIASES.get(role, role)
+    try:
+        ids = list((config.roles or {}).get(role) or [])
+        slots = list(ROLES[name].slots)
+        if sorted(ids) != sorted(s.id for s in slots):
+            return None, config  # a table that is not the repo's: leave it alone
+        new, note = quota.reorder(slots, quota.read(), role, time.time())
+        if not note:
+            return None, config
+        roles = dict(config.roles) | {role: [s.id for s in new]}
+        return note, dataclasses.replace(config, roles=roles)
+    except Exception:  # noqa: BLE001 — quota ordering must never break a call
+        logger.exception("quota ordering failed; walking the table as is")
+        return None, config
+
+
 async def _delegate_role_impl(
     role: str,
     prompt: str,
@@ -456,7 +475,11 @@ async def _delegate_role_impl(
     started = time.perf_counter()
     caller = _read_caller()
 
+    quota_note: str | None = None  # set once, below, when quota changed the order
+
     def complete(response: dict[str, Any]) -> dict[str, Any]:
+        if quota_note:
+            response.setdefault("quota_note", quota_note)
         response.setdefault("caller", caller)
         response.setdefault("elapsed_ms", round((time.perf_counter() - started) * 1000))
         _log_delegation(response, len(prompt))
@@ -485,6 +508,11 @@ async def _delegate_role_impl(
             raise ConfigError("mcp-brain-router not configured")
         call_class = resolve_class(data_class, getattr(config, "default_class", None))
         claude_only = call_class == ORANGE
+
+        # Quota order (legacy walk only; the deck path keeps its own gate). Read once per call;
+        # the walk below, has_next and every resolve_role see the reordered table.
+        if getattr(config, "routing_mode", "legacy") != "deck":
+            quota_note, config = _quota_ordered(config, role_enum.value)
 
         # Public role delegation is agentic-only. Chat/text mode caused workers
         # to return prose while the orchestrator redid every file/tool action.
