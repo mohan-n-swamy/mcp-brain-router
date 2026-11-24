@@ -507,8 +507,11 @@ async def _delegate_role_impl(
             )
 
         exhausted: set[Provider] = set()  # quota / transient (router-signalled)
-        failed: set[Provider] = set()  # any other backend failure class
-        attempts: dict[Provider, int] = {}
+        # Any other failure class skips that MODEL only (D17: Fable then Opus both
+        # sit in thinker and adversary, so a failed Fable must still reach Opus).
+        # Quota exhaustion above stays per provider: the account is out for all its models.
+        failed: set[str] = set()
+        attempts: dict[str, int] = {}
         tried: list[str] = []
         retried: list[str] = []
         kinds: list[str] = []
@@ -540,8 +543,9 @@ async def _delegate_role_impl(
                     role_enum,
                     orchestrator,
                     config,
-                    exhausted | failed,
+                    exhausted,
                     mode=resolved_mode,
+                    skip_models=failed,
                     claude_only=claude_only,
                 )
             except ValueError:
@@ -618,7 +622,7 @@ async def _delegate_role_impl(
                 # agy runs tools-off: a reader prompt naming a path or URL walks on
                 # to Haiku, which can open it (the same test fm and gpt-oss apply).
                 tried.append(name)
-                failed.add(assignment.provider)
+                failed.add(assignment.model)
                 kinds.append("needs_tools")
                 failures.append(f"{name}:needs_tools")
                 last_failure_kind = "needs_tools"
@@ -637,15 +641,15 @@ async def _delegate_role_impl(
                 failures.append(f"{name}:{kind}")
                 last_failure_kind = kind
                 last_failure_reason = str(e)
-                n = attempts.get(assignment.provider, 0) + 1
-                attempts[assignment.provider] = n
+                n = attempts.get(assignment.model, 0) + 1
+                attempts[assignment.model] = n
                 if n == 1 and _retryable(kind, elapsed):
                     retried.append(name)
                     logger.warning(
                         f"delegate() {name} failed fast ({kind}, {elapsed} ms); one retry"
                     )
                     continue
-                failed.add(assignment.provider)
+                failed.add(assignment.model)
                 logger.warning(
                     f"delegate() {name} failed ({kind}); advancing to the next candidate"
                 )
@@ -655,7 +659,7 @@ async def _delegate_role_impl(
             tried.append(name)
             if not result.exhausted and not (result.content or "").strip():
                 # An empty answer is a failure: walk on (lean-rig §6).
-                failed.add(assignment.provider)
+                failed.add(assignment.model)
                 kinds.append("empty_output")
                 failures.append(f"{name}:empty_output")
                 last_failure_kind = "empty_output"
@@ -867,14 +871,14 @@ def create_server():
             """
             Delegate by orchestration role (or a legacy complexity tier).
 
-            Role orders (D16, 2026-11-24: Antigravity, Grok, Claude); each call
+            Role orders (D17, 2026-11-24: thinker and adversary highest to lowest); each call
             walks its role's whole order within one deadline (simple 120 s,
             worker 15 min). A backend with no binary or key is skipped; an
             error, timeout or empty answer falls through to the next:
-            - simple: Apple fm → gpt-oss:20b (warm only) → Gemini 3.8 Flash Low → Claude Haiku
-            - worker: Grok → Gemini 4 Neon Medium → Claude Sonnet
-            - adversary: Gemini 4 Neon High → Grok → Claude Opus (never your own provider)
-            - thinker: Grok → Gemini 4 Neon XHigh → Claude Fable
+            - simple: Apple fm → gpt-oss:20b (warm only) → Gemini 4 Hydrogen Low → Claude Haiku
+            - worker: Gemini 4 Neon Medium → Claude Sonnet → Grok (backup)
+            - adversary: Claude Fable → Gemini 4 Neon XHigh → Claude Opus → Grok (never your own provider)
+            - thinker: Claude Fable → Gemini 4 Neon XHigh → Claude Opus → Grok
             Legacy tiers: 'cheap' walks simple, 'code' walks worker,
             'adversarial' walks adversary (Codex only when you pass an explicit model).
 

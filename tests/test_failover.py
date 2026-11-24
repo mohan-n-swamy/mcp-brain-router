@@ -205,7 +205,7 @@ def test_every_cli_spawn_closes_stdin():
     cases = (
         (backends.call_codex, ("p", "gpt-6.1-sol")),
         (backends.call_grok, ("p", "grok-4.5")),
-        (backends.call_antigravity, ("p", "gemini-3.8-flash-low")),
+        (backends.call_antigravity, ("p", "gemini-4-hydrogen-low")),
         (backends.call_anthropic_agentic, ("p", "claude-sonnet-5", "/tmp")),
         (backends.call_fm, ("p", "mini")),
     )
