@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -908,6 +909,22 @@ def _resolve_agentic_cwd(cwd: Optional[str], backend: str) -> str:
     return resolved
 
 
+def _tools_cwd(tools: str, cwd: Optional[str], backend: str) -> Optional[str]:
+    """Validate `tools` and return the folder a tools-on worker runs in, else None.
+
+    A tools-on job with no cwd is refused: _resolve_agentic_cwd would fall back to
+    the router's own launch folder, where nobody expects a write."""
+    if tools not in ("none", "read", "write"):
+        raise BackendError(f"tools must be none, read or write, not {tools!r}",
+                           backend=backend, failure_kind="validation_error")
+    if tools == "none":
+        return None
+    if not cwd:
+        raise BackendError(f"tools={tools} needs an absolute cwd", backend=backend,
+                           failure_kind="validation_error")
+    return _resolve_agentic_cwd(cwd, backend)
+
+
 def call_codex(
     prompt: str,
     model: str,
@@ -982,10 +999,26 @@ def call_codex(
 
 
 # lean-rig §6: Grok workers run tools-off, one turn, no subagents, no plan, no web.
-GROK_TOOLS_OFF = ["--max-turns", "1", "--no-subagents", "--no-plan", "--disable-web-search"]
+# `--max-turns 1` alone is not tools-off: the model still sees every tool, tries one in
+# its only turn, and the run ends stopReason=max_turn_requests with no answer (router
+# log 2026-11-24T22:27Z, adversary role, 34 KB review prompt; reproduced 2026-11-25).
+# `--tools` with an unknown name is ignored (all tools stay), but a --tools list that
+# --disallowed-tools then empties leaves zero tools (tested live, grok 1.0.92).
+# search_tool and use_tool come back whenever --tools is given, so they are always denied.
+_GROK_NO_META = "search_tool,use_tool"
+GROK_TOOLS_OFF = ["--max-turns", "1", "--no-subagents", "--no-plan", "--disable-web-search",
+                  "--tools", "read_file", "--disallowed-tools", f"read_file,{_GROK_NO_META}"]
+# Grok's built-in tool names (asked of grok 1.0.92 and seen in its stream, 2026-11-25):
+# read_file, list_dir, grep, search_replace, write, run_terminal_command.
+_GROK_TOOLS_ON = {
+    "read": ["--tools", "read_file,list_dir,grep", "--disallowed-tools", _GROK_NO_META,
+             "--permission-mode", "acceptEdits"],
+    "write": ["--tools", "read_file,list_dir,grep,search_replace,write,run_terminal_command",
+              "--disallowed-tools", _GROK_NO_META, "--permission-mode", "bypassPermissions"],
+}
 
 
-def grok_final_message(stdout: str) -> tuple[str, Dict[str, Any]]:
+def grok_final_message(stdout: str, single_turn: bool = True) -> tuple[str, Dict[str, Any]]:
     """The final message of one tools-off `--output-format json` run, and the payload.
 
     Grok answers carried narration ("I'll count the lines in DECISIONS.md
@@ -1004,7 +1037,7 @@ def grok_final_message(stdout: str) -> tuple[str, Dict[str, Any]]:
                            failure_kind="invalid_output")
     stop = payload.get("stopReason")
     turns = int(payload.get("num_turns") or 0)
-    if _normalize_stop_reason(stop) != "endturn" or turns > 1:
+    if _normalize_stop_reason(stop) != "endturn" or (single_turn and turns > 1):
         raise BackendError(
             f"grok ended without a final message (stopReason={stop!r}, num_turns={turns})",
             backend="grok", failure_kind="no_final_message")
@@ -1019,8 +1052,15 @@ def call_grok(
     prompt: str,
     model: str,
     effort: Optional[str] = None,
+    tools: str = "none",
+    cwd: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Call Grok tools-off and return only its final message.
+    """Call Grok and return only its final message. `tools` defaults to none.
+
+    tools=read / write run in `cwd` (required) with Grok's read-only or full
+    tool set and no turn cap (`_GROK_TOOLS_ON`); write uses bypassPermissions,
+    the same terms as the Claude worker. No containment is claimed.
+    The rest of this docstring describes tools=none.
 
     `grok --prompt-file <f> -m <model> --max-turns 1 --no-subagents --no-plan
     --disable-web-search --output-format json`, in an empty temp dir, with the
@@ -1037,6 +1077,9 @@ def call_grok(
         timeout, or no clean final message.
     """
     _validate_model_name(model)
+    tools_cwd = _tools_cwd(tools, cwd, "grok")
+    flags = ["--no-subagents", "--no-plan", "--disable-web-search", *_GROK_TOOLS_ON[tools]] \
+        if tools_cwd else GROK_TOOLS_OFF
 
     started = time.perf_counter()
     limit = _timeout(CODEX_TIMEOUT_SECONDS)
@@ -1044,7 +1087,7 @@ def call_grok(
         with tempfile.TemporaryDirectory(prefix="brain-router-grok-") as workdir, \
                 _grok_prompt_file(f"{CAVEMAN_SYSTEM}\n\n{prompt}") as pf:
             result = subprocess.run(
-                [_GROK_BIN, "--prompt-file", pf, "-m", model, *GROK_TOOLS_OFF,
+                [_GROK_BIN, "--prompt-file", pf, "-m", model, *flags,
                  "--output-format", "json"]
                 + (["--reasoning-effort", effort] if effort else []),
                 # inherited stdin is the MCP stdio pipe; the CLIs wait on it
@@ -1053,7 +1096,7 @@ def call_grok(
                 text=True,
                 timeout=limit,
                 check=False,
-                cwd=workdir,
+                cwd=tools_cwd or workdir,
                 env=_grok_lean_env(),
             )
 
@@ -1081,7 +1124,7 @@ def call_grok(
             started=started,
         )
         try:
-            content, payload = grok_final_message(result.stdout)
+            content, payload = grok_final_message(result.stdout, single_turn=not tools_cwd)
         except BackendError as exc:
             exc.elapsed_ms = round((time.perf_counter() - started) * 1000)
             raise
@@ -1147,12 +1190,37 @@ _AGY_DENY_HOOK = json.dumps({
 _AGY_LEAN_PLUGINS = json.dumps({"exclude": ["rig", "ponytail"]})
 
 
-def _write_agy_hook(workdir: str) -> None:
-    """Write the deny-all tool hook into `workdir` (the only barrier between a
-    delegated prompt and the real disk, so one function owns it)."""
+# Read mode (tools=read): agy's own tool names (hook stdin, tested 2026-11-25):
+# read_file, write_file, edit_file, run_command, search_web, call_mcp_tool and more.
+# It has no grep or list tool: its listing and searching go through run_command. So
+# read mode allows read_file and denies everything else. The hook fails closed: any
+# error in the check prints the deny verdict.
+_AGY_READ_ALLOWED = ("read_file",)
+_AGY_READ_CHECK = (
+    "import sys,json\n"
+    "try:\n"
+    f"    ok = json.load(sys.stdin).get('toolCall', {{}}).get('name') in {_AGY_READ_ALLOWED!r}\n"
+    "except Exception:\n"
+    "    ok = False\n"
+    "sys.exit(0 if ok else 1)\n"
+)
+_AGY_DENY_VERDICT = '{"decision":"deny","reason":"this worker may only read files"}'
+
+
+def _agy_read_hook() -> str:
+    cmd = (f"{shlex.quote(sys.executable)} -c {shlex.quote(_AGY_READ_CHECK)} 2>/dev/null "
+           f"|| printf '%s' {shlex.quote(_AGY_DENY_VERDICT)}")
+    return json.dumps({"brain-router-read-only": {"PreToolUse": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": cmd, "timeout": 5}]}]}})
+
+
+def _write_agy_hook(workdir: str, tools: str = "none") -> None:
+    """Write the tool hook into `workdir`, a temp folder and never the caller's
+    (the only barrier between a delegated prompt and the real disk, so one
+    function owns it): deny-all for tools=none, deny-all-but-read_file for read."""
     os.makedirs(os.path.join(workdir, ".agents"))
     with open(os.path.join(workdir, ".agents", "hooks.json"), "w", encoding="utf-8") as fh:
-        fh.write(_AGY_DENY_HOOK)
+        fh.write(_agy_read_hook() if tools == "read" else _AGY_DENY_HOOK)
     with open(os.path.join(workdir, ".agents", "plugins.json"), "w", encoding="utf-8") as fh:
         fh.write(_AGY_LEAN_PLUGINS)
 
@@ -1173,8 +1241,18 @@ def call_antigravity(
     prompt: str,
     model: str,
     effort: Optional[str] = None,
+    tools: str = "none",
+    cwd: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Call Antigravity tools-off and return only its final message.
+    """Call Antigravity and return only its final message. `tools` defaults to none.
+
+    tools=write runs agy in `cwd` (required) with `--mode accept-edits` and no
+    hook, so it edits files and runs commands unprompted, like the Claude worker.
+    tools=read runs it in a temp folder holding a hook that allows read_file only,
+    with `--add-dir <cwd>`; nothing is written into `cwd`. The lean plugins file
+    cannot ride along in write mode (it would have to live in `cwd`), so write
+    calls load the host's plugins. No containment is claimed.
+    The rest of this docstring describes tools=none.
 
     `agy -p <prompt> --model <gemini-id> --output-format json --print-timeout
     <n>s`, stdin from /dev/null, in an empty temp dir holding a deny-all tool
@@ -1194,13 +1272,22 @@ def call_antigravity(
             failure_kind="validation_error",
         )
 
+    tools_cwd = _tools_cwd(tools, cwd, "antigravity")
     started = time.perf_counter()
     limit = _timeout(CODEX_TIMEOUT_SECONDS)
     try:
         with tempfile.TemporaryDirectory(prefix="brain-router-agy-") as workdir:
-            _write_agy_hook(workdir)
+            text, flags, run_in = f"{CAVEMAN_SYSTEM}\n\n{prompt}", [], workdir
+            if tools == "write":
+                flags, run_in = ["--mode", "accept-edits"], tools_cwd
+            else:
+                _write_agy_hook(workdir, tools)
+                if tools == "read":
+                    flags = ["--add-dir", tools_cwd]
+                    text = (f"{CAVEMAN_SYSTEM}\n\nThe working folder is {tools_cwd}. Relative "
+                            f"paths are relative to it.\n\n{prompt}")
             result = subprocess.run(
-                [_AGY_BIN, "-p", f"{CAVEMAN_SYSTEM}\n\n{prompt}", "--model", model,
+                [_AGY_BIN, "-p", text, "--model", model, *flags,
                  "--output-format", "json", "--print-timeout", f"{int(limit)}s"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -1208,7 +1295,7 @@ def call_antigravity(
                 # agy's own --print-timeout fires first and says so; this is the backstop.
                 timeout=limit + 15,
                 check=False,
-                cwd=workdir,
+                cwd=run_in,
                 env=_agy_env(),
             )
 
@@ -1349,15 +1436,21 @@ def _cc_family_output(stdout: str) -> tuple[str, Optional[Dict[str, int]]]:
 
 
 def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
-                           effort: Optional[str] = None) -> Dict[str, Any]:
+                           effort: Optional[str] = None, tools: str = "none") -> Dict[str, Any]:
     """Agentic Anthropic (Opus/Sonnet/Haiku) worker: `cc-brain claude -p` in
     the REAL cwd. This is the agentic-CLI fallback for: the codex-orchestrator
     adversary case (codex can't be its own adversary) AND the GLM+codex-both-
     exhausted final fallback (spec 002 SC-4, SC-8). The resolved candidate's
     model id (e.g. claude-sonnet-5 / claude-opus-4-8) is passed via --model."""
     _validate_model_name(model)
+    if tools not in ("none", "read", "write"):
+        raise BackendError(f"tools must be none, read or write, not {tools!r}",
+                           backend="anthropic-cli", failure_kind="validation_error")
     cwd = _resolve_agentic_cwd(cwd, "anthropic-cli")
     started = time.perf_counter()
+    # Today every Claude call runs with Read, Edit, Write and Bash, whatever the role,
+    # so tools=none and tools=write are the same call. Only read narrows it.
+    read_only = tools == "read"
     argv = [
         _CC_BRAIN_BIN,
         "claude",
@@ -1370,13 +1463,13 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
         "--no-chrome",
         "--no-session-persistence",
         "--tools",
-        "default",
+        "Read,Grep,Glob" if read_only else "default",
         "--output-format",
         "json",
         "--allowedTools",
-        "Read,Edit,Write,Bash",
+        "Read,Grep,Glob" if read_only else "Read,Edit,Write,Bash",
         "--permission-mode",
-        "bypassPermissions",
+        "dontAsk" if read_only else "bypassPermissions",
     ]
     if effort:
         if effort not in ("low", "medium", "high", "xhigh", "max"):
