@@ -351,7 +351,7 @@ async def test_walk_stops_at_the_deadline():
         raise BackendError("slow", backend="antigravity", failure_kind="process_error",
                            elapsed_ms=200_000)  # not a fast flake: no same-provider retry
 
-    def slow_claude(prompt, model, cwd=None):
+    def slow_claude(prompt, model, cwd=None, effort=None):
         time.sleep(0.7)
         raise BackendError("slow", backend="anthropic-cli", failure_kind="process_error",
                            elapsed_ms=200_000)
