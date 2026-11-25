@@ -210,3 +210,31 @@ async def test_a_non_outage_failure_does_not_mark_the_model_down():
     assert out["model"] == "gemini-4-neon-medium"
     assert ping.fresh("gemini-4-hydrogen-high") is None
     assert ("gemini-4-neon-medium", "ping") not in f.calls  # the provider was never suspect
+
+
+async def test_a_call_through_mcp_gets_a_budget_under_the_client_limit():
+    """The client stops waiting at 600 s; a 30-minute role must not outlive it."""
+    seen = {}
+
+    def slow(prompt):
+        seen["left"] = backends.DEADLINE.get() - time.monotonic()
+        return "answer"
+
+    f = Fakes({"claude-fable-5-2": slow})
+    out = await _run(f, "writer")
+    assert out["model"] == "claude-fable-5-2" and 0 < seen["left"] <= 540
+
+
+async def test_the_shell_entry_lifts_the_budget():
+    seen = {}
+
+    def slow(prompt):
+        seen["left"] = backends.DEADLINE.get() - time.monotonic()
+        return "answer"
+
+    tok = server.CALL_BUDGET_S.set(None)
+    try:
+        await _run(Fakes({"claude-fable-5-2": slow}), "writer")
+    finally:
+        server.CALL_BUDGET_S.reset(tok)
+    assert seen["left"] > 600

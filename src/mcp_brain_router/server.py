@@ -5,6 +5,7 @@ Exposes agentic delegate and typed Jev decide tools.
 Loads config from ~/.config/mcp-brain-router/config.toml.
 """
 
+import contextvars
 import json
 import logging
 import os
@@ -94,6 +95,19 @@ _DELEGATION_LOG = Path.home() / ".local" / "state" / "brain-router-delegations.j
 # retry would repeat that side effect. tokens_out is NOT a usable "no output"
 # signal: CLI workers report 0 on every success.
 RETRY_FAST_MS = 15_000
+
+# Seconds a role walk may take when the call came through MCP (see _delegate_role_impl). 0 or
+# empty lifts it. `mcp-brain-router delegate` from the shell has no client waiting and lifts it.
+def _mcp_budget() -> float | None:
+    try:
+        v = float(os.getenv("BRAIN_ROUTER_MCP_DEADLINE_S", "540") or 0)
+    except ValueError:
+        v = 540.0
+    return v if v > 0 else None
+
+
+CALL_BUDGET_S: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "brain_router_call_budget", default=_mcp_budget())
 RETRYABLE_KINDS = frozenset({"process_error", "network_error"})
 
 # GLM left the rig (D5), so `cheap` and `code` walk the `simple` and `worker`
@@ -575,6 +589,12 @@ async def _delegate_role_impl(
         last_failure_kind: str | None = None
         sent_prompt = with_preamble(prompt)
         total_s = deadline_seconds(role_enum.value)
+        # An MCP client stops waiting for a tool call (Claude Code: MCP_TOOL_TIMEOUT, 600 s on this
+        # rig). A walk that outlives it loses its answer and leaves the worker running, so a call
+        # that came through MCP gets a budget under that limit. The shell entry lifts it.
+        budget = CALL_BUDGET_S.get()
+        if budget and budget < total_s:
+            total_s = int(budget)
         deadline = time.monotonic() + total_s
         reserve_s = max(ping.RESERVE_S, total_s // 10)
         # A 30-minute role lets one call run 15 minutes; the others keep the CLI cap.
@@ -613,8 +633,7 @@ async def _delegate_role_impl(
             if tried and deadline - time.monotonic() < 1:
                 return complete(
                     {
-                        "error": f"role {role_enum.value} deadline passed "
-                                 f"({deadline_seconds(role_enum.value)} s)",
+                        "error": f"role {role_enum.value} deadline passed ({total_s} s)",
                         "backend": "none",
                         "role": role_enum.value,
                         "class": call_class,
@@ -1001,8 +1020,12 @@ Roles (best first; each call walks the role's whole order within one deadline). 
 with no binary or key is skipped; any failure (error, timeout, quota, empty answer) skips
 that model only and the walk goes on:
 {render_roles()}
-Legacy tiers: 'cheap' walks simple, 'code' walks coder, 'adversarial' walks adversary
+Legacy tiers: 'cheap' walks simple, 'code' walks worker (processor), 'adversarial' walks adversary
 (Codex only when you pass an explicit model). The `roles` tool returns this table as data.
+
+Time: a call through this tool gets about 9 minutes in all, whatever the role's own deadline,
+because the client stops waiting at 10. For longer work run `mcp-brain-router delegate --role
+<role>` from the shell (in the background); there the role's full deadline applies.
 
 With tools none, non-Claude workers run tools-off: put everything they need in the prompt.
 Claude workers run `cc-brain claude` in `cwd` with tools. Every prompt opens with a short rules preamble.
@@ -1293,9 +1316,13 @@ def main():
                 prompt = fh.read()
         else:
             prompt = sys.stdin.read()
-        result = asyncio.run(_delegate_role_impl(
-            args.role, prompt, args.orchestrator, None, args.cwd or os.getcwd(),
-            effort=args.effort, data_class=args.data_class, tools=args.tools))
+        tok = CALL_BUDGET_S.set(None)  # no MCP client is waiting: the role's own deadline applies
+        try:
+            result = asyncio.run(_delegate_role_impl(
+                args.role, prompt, args.orchestrator, None, args.cwd or os.getcwd(),
+                effort=args.effort, data_class=args.data_class, tools=args.tools))
+        finally:
+            CALL_BUDGET_S.reset(tok)
         print(json.dumps(result, indent=2, default=str))
         sys.exit(0 if (result.get("answer") or "").strip() else 1)
 
