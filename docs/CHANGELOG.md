@@ -1,6 +1,28 @@
-> **Snapshot:** local e5524eb (working tree DIRTY: budget shards + universal skip-self) · vps kamakshi checked / brain-router NOT deployed · package 0.1.1 · generated 2026-07-30T04:47:26Z · first-hand verified this run.
+> **Snapshot:** main `3cab472` on kedarnath, annapurna and arunachala, read with `git log` on each host on 2026-11-25. The sections below the 2026-11-25 entry, and the other files in `docs/`, are a snapshot of 2026-07-30 and are stale.
 
 # CHANGELOG — mcp-brain-router
+
+## 2026-11-25: roles, failover, tools, quota (PRs 23 to 27)
+
+The state now. The one definition of a role is `config.ROLES`; the README block and the tool description are generated from it.
+
+| PR | What is true after it |
+|---|---|
+| 23 | Three ids moved to their successors: `grok-4.7`, `claude-fable-5-2`, `claude-sonnet-5-5` |
+| 24 | Eight roles in one table: thinker, adversary, coder, processor, writer, explorer, qa, simple. Each slot is a model and a thinking level. `worker` is an alias of `processor`. A call with no role is refused with the table; a `roles` tool returns it. Any failure marks the model, not its provider; after a quota or timeout failure a sibling is pinged first, result kept 5 minutes (`ping.py`). Local entries are capped at 15 s and each entry leaves a reserve for the ones after it. Thinker, adversary, writer and qa have a 30-minute deadline and a 15-minute call |
+| 25 | The walk reads the status line's quota files (`quota.py`): a provider at 90% or more goes last in every role; in coder, processor, explorer and simple a provider ahead of its weekly pace gives up first place; a missing or stale reading changes nothing. `scores.tsv` holds dated, sourced scores; `python -m mcp_brain_router.propose` ranks each role from them and prints where that differs from the table. It only prints |
+| 26 | `tools` is `none`, `read` or `write`; coder and qa default to write, explorer to read, the rest to none. Grok and Antigravity honour it on the same terms as Claude. Write mode has no containment on any provider. Antigravity read mode reads named files and cannot search or list. The response reports the tools mode that ran |
+| 27 | `mcp-brain-router delegate --role <role>` and `mcp-brain-router roles` from the shell, for scripts and scheduled jobs. Exit 0 on an answer, 1 otherwise |
+
+Suite on the branch of PR 27: 571 passed, 2 failed, 2 skipped on kedarnath (macOS). The failures predate these PRs: `test_deck_and_router_provider_names_agree_on_every_live_card` and `test_sandbox_refusals` (Linux only). `test_real_agy_one_shot_is_lean_with_the_rig_plugin_installed` is a live token-count test that fails on some runs.
+
+Known and open:
+
+- A tools-off Grok call on a 16 KB review prompt timed out twice (360 s, then 570 s). The earlier failure, ending with no final message, has a unit test; no live call has shown Grok answer that prompt.
+- Every Claude worker call runs with edit and shell tools, in every role. A `none` call answered by Claude reports `write`.
+- The weekly model check does not yet call `propose`. No scheduled job calls the router yet.
+- 38 of the 46 score rows are search quotes, marked `quote` in the table.
+- Decision record: dotagents `specs/lean-rig/DECISIONS.md`, D19.
 
 ## Version 0.1.1 (package)
 
