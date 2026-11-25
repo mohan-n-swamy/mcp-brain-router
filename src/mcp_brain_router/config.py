@@ -124,7 +124,7 @@ ROLES: Dict[str, RoleDef] = {r.name: r for r in (
           (("claude-fable-5-2", "xhigh"), ("claude-opus-5-5", "xhigh"), ("gemini-4-carbon", "high")), 30 * 60),
     _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
           "you need to find where something is before you change it",
-          (("gemini-4-hydrogen", "high"), ("claude-haiku-5-5", "medium"), ("grok-4.7", "high")),
+          (("claude-haiku-5-5", "medium"), ("grok-4.7", "high"), ("gemini-4-hydrogen", "high")),
           tools="read"),
     _role("qa", "Run the checks and the app against the spec; report pass or fail with evidence; change nothing",
           "work is built and needs an independent check",

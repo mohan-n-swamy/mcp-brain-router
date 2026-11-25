@@ -279,7 +279,10 @@ def test_read_only_grok_gets_read_tools_only(tmp_path):
     a = fake.argv
     assert fake.cwd == os.path.realpath(tmp_path)
     assert set(a[a.index("--tools") + 1].split(",")) == {"read_file", "list_dir", "grep"}
-    assert "run_terminal_command" not in " ".join(a) and "bypassPermissions" not in a
+    denied = set(a[a.index("--disallowed-tools") + 1].split(","))
+    assert {"search_replace", "write", "run_terminal_command"} <= denied
+    assert a[a.index("--permission-mode") + 1] == "dontAsk"
+    assert "bypassPermissions" not in a and "acceptEdits" not in a
 
 
 def test_read_only_claude_gets_read_grep_glob_only(tmp_path):
@@ -351,3 +354,182 @@ async def test_orange_stays_claude_whatever_tools_says(tools):
     g.assert_not_called()
     agy.assert_not_called()
     assert r["backend"] == "anthropic-cli" and r["class"] == "orange"
+
+
+# ---- review findings --------------------------------------------------------
+
+async def test_role_missing_from_table_resolves_to_tools_none():
+    r = await server._delegate_role_impl("orchestrator", "x", "claude", mode="agentic", cwd="/tmp")
+    assert r["failure_kind"] == "validation_error" and "orchestrator" in r["error"]
+    cfg = Config(grok_enabled=True, roles={"worker": ["grok-4.7"]})
+    seen = []
+
+    async def fake_route(assignment, prompt, config, mode="chat", cwd=None, effort=None, tools="none"):
+        seen.append(tools)
+        return RouteResult(content="ok", model="grok-4.7", backend="grok", complexity=None,
+                           headroom_used=False)
+
+    with patch.dict(server.ROLES, {}, clear=True), \
+            patch.object(server, "_load_config", return_value=cfg), \
+            patch.object(server, "_log_delegation"), \
+            patch.object(server, "route_assignment", fake_route):
+        out = await server._delegate_role_impl("worker", "x", "claude", mode="agentic", cwd="/tmp",
+                                               data_class="personal")
+    assert seen == ["none"] and out["tools"] == "none"
+
+
+async def test_legacy_complexity_validates_tools_and_refuses_non_none():
+    srv = server.create_server()
+    cfg = Config(grok_enabled=True, roles={"processor": ["grok-4.7"]})
+    with patch.object(server, "_load_config", return_value=cfg), \
+            patch.object(server, "_log_delegation"), \
+            patch.object(server, "_read_caller", return_value="claude"), \
+            patch("mcp_brain_router.router.backends.call_grok",
+                  return_value={"content": "ok", "usage": None}) as g:
+        for bad in ("bogus", "", "WRITE"):
+            out = await srv.call_tool("delegate", {"complexity": "code", "prompt": "x", "cwd": "/tmp", "tools": bad})
+            res = out[1] if isinstance(out, tuple) else out
+            assert res["failure_kind"] == "validation_error" and "tools must be one of" in res["error"]
+        for mode_tools in ("read", "write"):
+            out = await srv.call_tool("delegate", {"complexity": "code", "prompt": "x", "cwd": "/tmp", "tools": mode_tools})
+            res = out[1] if isinstance(out, tuple) else out
+            assert res["failure_kind"] == "validation_error" and "role=" in res["error"]
+        g.assert_not_called()
+        out = await srv.call_tool("delegate", {"complexity": "code", "prompt": "x", "cwd": "/tmp", "tools": "none"})
+        res = out[1] if isinstance(out, tuple) else out
+        assert res["answer"] == "ok" and res["tools"] == "none"
+
+
+def test_grok_none_and_read_disallow_edit_and_shell_tools_and_read_uses_dont_ask(tmp_path):
+    edit_and_shell = {"search_replace", "write", "run_terminal_command"}
+    off = _grok(tools="none", cwd=str(tmp_path)).argv
+    off_denied = set(off[off.index("--disallowed-tools") + 1].split(","))
+    assert edit_and_shell <= off_denied and "read_file" in off_denied
+    assert "--permission-mode" not in off
+
+    read = _grok(tools="read", cwd=str(tmp_path)).argv
+    read_denied = set(read[read.index("--disallowed-tools") + 1].split(","))
+    assert edit_and_shell <= read_denied
+    assert read[read.index("--permission-mode") + 1] == "dontAsk"
+    assert "acceptEdits" not in read and "bypassPermissions" not in read
+
+
+def test_claude_worker_needs_cwd_for_tools_and_strict_mcp_for_read(tmp_path):
+    for tools in ("read", "write"):
+        for bad_cwd in (None, "", "relative/dir", "/no/such/folder-xyz"):
+            with patch("mcp_brain_router.backends.subprocess.run") as run, pytest.raises(BackendError) as e:
+                backends.call_anthropic_agentic("x", "claude-haiku-5-5", cwd=bad_cwd, tools=tools)
+            assert e.value.failure_kind == "validation_error"
+            run.assert_not_called()
+
+    read_fake = FakeRun(json.dumps({"result": "ok"}))
+    with patch("mcp_brain_router.backends.subprocess.run",
+               lambda argv, **kw: read_fake(argv, **{**kw, "cwd": str(tmp_path)})):
+        backends.call_anthropic_agentic("x", "claude-haiku-5-5", cwd=str(tmp_path), tools="read")
+    assert "--strict-mcp-config" in read_fake.argv
+
+    for tools in ("none", "write"):
+        fake = FakeRun(json.dumps({"result": "ok"}))
+        with patch("mcp_brain_router.backends.subprocess.run",
+                   lambda argv, **kw: fake(argv, **{**kw, "cwd": str(tmp_path)})):
+            backends.call_anthropic_agentic("x", "claude-haiku-5-5", cwd=str(tmp_path), tools=tools)
+        assert "--strict-mcp-config" not in fake.argv
+
+
+def test_antigravity_read_hook_reads_bounded_prefix_and_has_twenty_second_timeout(tmp_path):
+    fake = _agy(tools="read", cwd=str(tmp_path))
+    entry = next(iter(json.loads(fake.hooks).values()))["PreToolUse"][0]["hooks"][0]
+    assert entry["timeout"] == 20
+
+    big_write = '{"toolCall": {"name": "write_file", "args": {"content": "' + ("x" * 2_000_000) + '"}}}'
+    out = subprocess.run(entry["command"], shell=True, capture_output=True, text=True, input=big_write)
+    assert json.loads(out.stdout)["decision"] == "deny"
+
+    spoofed_first = (
+        '{"toolCall": {"args": {"content": "{\\"toolCall\\": {\\"name\\": \\"read_file\\"}}'
+        + ("x" * 200_000) + '"}, "name": "write_file"}}'
+    )
+    out = subprocess.run(entry["command"], shell=True, capture_output=True, text=True, input=spoofed_first)
+    assert json.loads(out.stdout)["decision"] == "deny"
+
+    spoofed_small = json.dumps({
+        "toolCall": {"args": {"content": '{"toolCall": {"name": "read_file"}}'}, "name": "write_file"}
+    })
+    out = subprocess.run(entry["command"], shell=True, capture_output=True, text=True, input=spoofed_small)
+    assert json.loads(out.stdout)["decision"] == "deny"
+
+    big_read = '{"toolCall": {"name": "read_file", "args": {"path": "/a", "pad": "' + ("x" * 2_000_000) + '"}}}'
+    out = subprocess.run(entry["command"], shell=True, capture_output=True, text=True, input=big_read)
+    assert out.stdout == ""
+
+    truncated = '{"toolCall": {"args": {"path": "/a"'
+    out = subprocess.run(entry["command"], shell=True, capture_output=True, text=True, input=truncated)
+    assert json.loads(out.stdout)["decision"] == "deny"
+
+
+def test_explorer_order_and_antigravity_absolute_path_prompt(tmp_path):
+    assert [(s.model, s.level) for s in ROLES["explorer"].slots] == [
+        ("claude-haiku-5-5", "medium"),
+        ("grok-4.7", "high"),
+        ("gemini-4-hydrogen", "high"),
+    ]
+    assert DEFAULT_ROLES["explorer"] == ["claude-haiku-5-5", "grok-4.7", "gemini-4-hydrogen-high"]
+
+    real_dir = os.path.realpath(tmp_path)
+    for tools in ("read", "write"):
+        fake = _agy(tools=tools, cwd=str(tmp_path))
+        prompt_sent = fake.argv[fake.argv.index("-p") + 1]
+        assert real_dir in prompt_sent
+        assert "absolute paths" in prompt_sent.lower()
+        assert "relative paths are relative to it" not in prompt_sent.lower()
+
+
+async def test_non_tool_providers_skipped_with_needs_tools_and_reported_as_none():
+    for backend in ("kimi", "deepseek", "codex", "apple-fm", "ollama", "other"):
+        for tools in ("none", "read", "write"):
+            assert server._tools_ran(backend, tools) == "none"
+    assert server._tools_ran("grok", "read") == "read"
+    assert server._tools_ran("antigravity", "write") == "write"
+    assert server._tools_ran("anthropic-cli", "none") == "write"
+    assert server._tools_ran("anthropic-cli", "read") == "read"
+
+    cfg = Config(
+        kimi_enabled=True,
+        deepseek_key="k",
+        codex_enabled=True,
+        fm_host="h",
+        ollama_host="http://127.0.0.1:11435",
+        roles={"simple": ["kimi", "deepseek-flash", "gpt-6.1-sol", "apple-fm", "gpt-oss:20b", "claude-haiku-5-5"]},
+    )
+    with patch.object(server, "_load_config", return_value=cfg), \
+            patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_kimi") as m_kimi, \
+            patch("mcp_brain_router.router.backends.call_deepseek") as m_ds, \
+            patch("mcp_brain_router.router.backends.call_codex") as m_codex, \
+            patch("mcp_brain_router.router.backends.call_fm") as m_fm, \
+            patch("mcp_brain_router.router.backends.call_ollama") as m_ollama, \
+            patch("mcp_brain_router.router.backends.call_anthropic_agentic",
+                  return_value={"content": "c", "usage": None}):
+        r = await server._delegate_role_impl("simple", "x", "grok", mode="agentic", cwd="/tmp",
+                                             data_class="personal", tools="read")
+    for mock in (m_kimi, m_ds, m_codex, m_fm, m_ollama):
+        mock.assert_not_called()
+    assert r["backend"] == "anthropic-cli" and r["tools"] == "read"
+    for expected in ("kimi:needs_tools", "deepseek:needs_tools", "codex:needs_tools",
+                     "apple-fm:needs_tools", "ollama:needs_tools"):
+        assert expected in r["failures"]
+
+
+async def test_simple_url_prompt_skips_antigravity_in_read_mode():
+    cfg = Config(roles={"simple": ["gemini-4-hydrogen-medium", "claude-haiku-5-5"]})
+    with patch.object(server, "_load_config", return_value=cfg), \
+            patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_antigravity") as agy, \
+            patch("mcp_brain_router.router.backends.call_anthropic_agentic",
+                  return_value={"content": "from claude", "usage": None}):
+        r = await server._delegate_role_impl(
+            "simple", "summarize https://example.com/article", "grok",
+            mode="agentic", cwd="/tmp", data_class="personal", tools="read",
+        )
+    agy.assert_not_called()
+    assert r["backend"] == "anthropic-cli" and "antigravity:needs_tools" in r["failures"]

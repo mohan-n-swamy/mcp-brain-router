@@ -8,6 +8,7 @@ Loads config from ~/.config/mcp-brain-router/config.toml.
 import json
 import logging
 import os
+import re
 import sys
 import time
 import dataclasses
@@ -188,6 +189,7 @@ async def _delegate_impl(
     mode: str | None = None,
     cwd: str | None = None,
     data_class: str | None = None,
+    tools: str | None = None,
 ) -> dict[str, Any]:
     """
     Implementation of delegate tool.
@@ -208,6 +210,14 @@ async def _delegate_impl(
 
     # Route the request using the router function
     try:
+        if tools is not None:
+            if tools not in TOOLS_MODES:
+                raise ValueError(f"tools must be one of {', '.join(TOOLS_MODES)}, not {tools!r}")
+            if tools != "none":
+                raise ValueError(
+                    f"tools={tools!r} is not supported on the legacy complexity path; "
+                    "pass role= instead"
+                )
         # Convert string complexity to enum
         try:
             complexity_enum = Complexity(complexity)
@@ -534,7 +544,8 @@ async def _delegate_role_impl(
                 "Role delegation is agentic-only; mode='chat' was removed. "
                 "Pass mode='agentic' and an absolute cwd."
             )
-        resolved_tools = tools or ROLES[ROLE_ALIASES.get(role_enum.value, role_enum.value)].tools
+        role_def = ROLES.get(ROLE_ALIASES.get(role_enum.value, role_enum.value))
+        resolved_tools = tools or (role_def.tools if role_def else "none")
 
         # Agentic mode with no cwd would silently run the worker in the MCP
         # server's fixed launch dir, not the caller's repo (§9.6 semantics
@@ -693,9 +704,9 @@ async def _delegate_role_impl(
                 )
 
             name = assignment.backend or assignment.provider.value
-            if (assignment.provider in (Provider.APPLE, Provider.OLLAMA)
+            if (assignment.provider not in _TOOLS_PROVIDERS
                     and resolved_tools != "none"):
-                # apple-fm and Ollama answer text only: a tools job walks on.
+                # Only Claude, Grok and Antigravity run tools: text-only providers walk on.
                 tried.append(name)
                 failed.add(assignment.model)
                 kinds.append("needs_tools")
@@ -703,16 +714,22 @@ async def _delegate_role_impl(
                 last_failure_kind = "needs_tools"
                 last_failure_reason = f"tools={resolved_tools}; {name} answers text only"
                 continue
-            if (role_enum is Role.SIMPLE and assignment.provider is Provider.ANTIGRAVITY
-                    and resolved_tools == "none" and backends._FM_TOOL_SHAPED.search(prompt)):
-                # agy runs tools-off: a reader prompt naming a path or URL walks on
-                # to Haiku, which can open it (the same test fm and gpt-oss apply).
+            if role_enum is Role.SIMPLE and assignment.provider is Provider.ANTIGRAVITY and (
+                (resolved_tools == "none" and backends._FM_TOOL_SHAPED.search(prompt))
+                or (resolved_tools == "read" and re.search(r"https?://", prompt, re.IGNORECASE))
+            ):
+                # agy tools-off cannot open paths or URLs; agy read allows read_file only
+                # (no web access), so a URL prompt still walks on to Haiku.
                 tried.append(name)
                 failed.add(assignment.model)
                 kinds.append("needs_tools")
                 failures.append(f"{name}:needs_tools")
                 last_failure_kind = "needs_tools"
-                last_failure_reason = "prompt names a path or URL; Antigravity runs tools-off"
+                last_failure_reason = (
+                    "prompt names a URL; Antigravity read mode blocks web access"
+                    if resolved_tools == "read"
+                    else "prompt names a path or URL; Antigravity runs tools-off"
+                )
                 continue
             if assignment.provider in suspect and not await sibling_answers(assignment):
                 failed.add(assignment.model)
@@ -946,11 +963,15 @@ async def _decide_impl(state: Any, questions: dict[str, Any], model: str) -> dic
     return response
 
 
+_TOOLS_BACKENDS = frozenset({"anthropic-cli", "grok", "antigravity"})
+_TOOLS_PROVIDERS = frozenset({Provider.ANTHROPIC, Provider.XAI, Provider.ANTIGRAVITY})
+
+
 def _tools_ran(backend: str, tools: str) -> str:
     """The tools mode a backend actually ran with (see the response comment)."""
     if backend == "anthropic-cli" and tools == "none":
         return "write"
-    return "none" if backend in ("apple-fm", "ollama") else tools
+    return tools if backend in _TOOLS_BACKENDS else "none"
 
 
 def _missing_role() -> dict[str, Any]:
@@ -1069,7 +1090,7 @@ def create_server():
             if complexity is None:
                 return _missing_role()
             return await _delegate_impl(complexity, prompt, model, mode, cwd,
-                                        data_class=class_)
+                                        data_class=class_, tools=tools)
     else:
         server = Server("mcp-brain-router")
 
@@ -1083,6 +1104,7 @@ def create_server():
             mode: str | None = None,
             cwd: str | None = None,
             effort: str | None = None,
+            tools: str | None = None,
         ):
             """
             Delegate by orchestration role (or a legacy complexity tier).
@@ -1142,9 +1164,10 @@ def create_server():
                     "exhausted": False,
                 }
             elif role is not None:
-                result = await _delegate_role_impl(role, prompt, orchestrator or "", mode, cwd)
+                result = await _delegate_role_impl(role, prompt, orchestrator or "", mode, cwd,
+                                                   tools=tools)
             elif complexity is not None:
-                result = await _delegate_impl(complexity, prompt, model, mode, cwd)
+                result = await _delegate_impl(complexity, prompt, model, mode, cwd, tools=tools)
             else:
                 result = _missing_role()
             return [TextContent(type="text", text=json.dumps(result, indent=2))]

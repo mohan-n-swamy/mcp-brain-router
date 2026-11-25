@@ -106,7 +106,7 @@ Roles (generated from `config.ROLES`; edit the table, then re-render this block)
 - coder: Scoped multi-file code changes. Pick when the task changes code in a bounded set of files. Order: claude-sonnet-5-5@xhigh > gemini-4-neon@high > claude-opus-5-5@xhigh.
 - processor: Transform and synthesise documents at volume. Pick when many or long documents go in, one result comes out. Order: gemini-4-hydrogen@high > gemini-4-neon@medium > claude-sonnet-5-5@xhigh > grok-4.7@high.
 - writer: Prose that reasons and argues. Pick when the output is an argument or an essay a person will read. Order: claude-fable-5-2@xhigh > claude-opus-5-5@xhigh > gemini-4-carbon@high.
-- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: gemini-4-hydrogen@high > claude-haiku-5-5@medium > grok-4.7@high.
+- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > grok-4.7@high > gemini-4-hydrogen@high.
 - qa: Run the checks and the app against the spec; report pass or fail with evidence; change nothing. Pick when work is built and needs an independent check. Order: gemini-4-carbon@high > claude-opus-5-5@xhigh > gemini-4-neon@high.
 - simple: Cheap reads, extraction, classification. Pick when the task is short, self-contained and needs no judgment. Order: apple-fm > gpt-oss:20b > gemini-4-hydrogen@medium > claude-haiku-5-5@medium.
 - worker: alias of processor.

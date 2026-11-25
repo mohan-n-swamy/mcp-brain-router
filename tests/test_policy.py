@@ -97,7 +97,7 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
     ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
     ("processor", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "claude-sonnet-5-5", "grok-4.7"]),
     ("writer", ["claude-fable-5-2", "claude-opus-5-5", "gemini-4-carbon-high"]),
-    ("explorer", ["gemini-4-hydrogen-high", "claude-haiku-5-5", "grok-4.7"]),
+    ("explorer", ["claude-haiku-5-5", "grok-4.7", "gemini-4-hydrogen-high"]),
     ("qa", ["gemini-4-carbon-high", "claude-opus-5-5", "gemini-4-neon-high"]),
 ])
 def test_d17_role_order(role, order):

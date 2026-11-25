@@ -1006,13 +1006,16 @@ def call_codex(
 # --disallowed-tools then empties leaves zero tools (tested live, grok 1.0.92).
 # search_tool and use_tool come back whenever --tools is given, so they are always denied.
 _GROK_NO_META = "search_tool,use_tool"
+_GROK_NO_WRITE = "search_replace,write,run_terminal_command"
 GROK_TOOLS_OFF = ["--max-turns", "1", "--no-subagents", "--no-plan", "--disable-web-search",
-                  "--tools", "read_file", "--disallowed-tools", f"read_file,{_GROK_NO_META}"]
+                  "--tools", "read_file",
+                  "--disallowed-tools", f"read_file,{_GROK_NO_WRITE},{_GROK_NO_META}"]
 # Grok's built-in tool names (asked of grok 1.0.92 and seen in its stream, 2026-11-25):
 # read_file, list_dir, grep, search_replace, write, run_terminal_command.
 _GROK_TOOLS_ON = {
-    "read": ["--tools", "read_file,list_dir,grep", "--disallowed-tools", _GROK_NO_META,
-             "--permission-mode", "acceptEdits"],
+    "read": ["--tools", "read_file,list_dir,grep",
+             "--disallowed-tools", f"{_GROK_NO_WRITE},{_GROK_NO_META}",
+             "--permission-mode", "dontAsk"],
     "write": ["--tools", "read_file,list_dir,grep,search_replace,write,run_terminal_command",
               "--disallowed-tools", _GROK_NO_META, "--permission-mode", "bypassPermissions"],
 }
@@ -1196,14 +1199,39 @@ _AGY_LEAN_PLUGINS = json.dumps({"exclude": ["rig", "ponytail"]})
 # read mode allows read_file and denies everything else. The hook fails closed: any
 # error in the check prints the deny verdict.
 _AGY_READ_ALLOWED = ("read_file",)
-_AGY_READ_CHECK = (
-    "import sys,json\n"
-    "try:\n"
-    f"    ok = json.load(sys.stdin).get('toolCall', {{}}).get('name') in {_AGY_READ_ALLOWED!r}\n"
-    "except Exception:\n"
-    "    ok = False\n"
-    "sys.exit(0 if ok else 1)\n"
-)
+_AGY_READ_PREFIX_BYTES = 65536
+_AGY_READ_CHECK = f"""import json, sys
+def _find(s, i, target):
+    d, n = json.JSONDecoder(), len(s)
+    while i < n and s[i] in ' \\t\\r\\n': i += 1
+    if i >= n or s[i] != '{{': return None, -1
+    i += 1
+    while True:
+        while i < n and s[i] in ' \\t\\r\\n': i += 1
+        if i >= n or s[i] == '}}': return None, -1
+        k, i = d.raw_decode(s, i)
+        if not isinstance(k, str): return None, -1
+        while i < n and s[i] in ' \\t\\r\\n': i += 1
+        if i >= n or s[i] != ':': return None, -1
+        i += 1
+        while i < n and s[i] in ' \\t\\r\\n': i += 1
+        if k == target: return True, i
+        _, i = d.raw_decode(s, i)
+        while i < n and s[i] in ' \\t\\r\\n': i += 1
+        if i < n and s[i] == ',': i += 1
+        else: return None, -1
+try:
+    s = sys.stdin.read({_AGY_READ_PREFIX_BYTES})
+    ok, i = _find(s, 0, 'toolCall')
+    if ok:
+        ok, i = _find(s, i, 'name')
+    if ok:
+        name, _ = json.JSONDecoder().raw_decode(s, i)
+        ok = name in {_AGY_READ_ALLOWED!r}
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+"""
 _AGY_DENY_VERDICT = '{"decision":"deny","reason":"this worker may only read files"}'
 
 
@@ -1211,7 +1239,7 @@ def _agy_read_hook() -> str:
     cmd = (f"{shlex.quote(sys.executable)} -c {shlex.quote(_AGY_READ_CHECK)} 2>/dev/null "
            f"|| printf '%s' {shlex.quote(_AGY_DENY_VERDICT)}")
     return json.dumps({"brain-router-read-only": {"PreToolUse": [{"matcher": "*", "hooks": [
-        {"type": "command", "command": cmd, "timeout": 5}]}]}})
+        {"type": "command", "command": cmd, "timeout": 20}]}]}})
 
 
 def _write_agy_hook(workdir: str, tools: str = "none") -> None:
@@ -1278,14 +1306,15 @@ def call_antigravity(
     try:
         with tempfile.TemporaryDirectory(prefix="brain-router-agy-") as workdir:
             text, flags, run_in = f"{CAVEMAN_SYSTEM}\n\n{prompt}", [], workdir
+            if tools_cwd:
+                text = (f"{CAVEMAN_SYSTEM}\n\nThe working folder is {tools_cwd}. "
+                        f"Use absolute paths under {tools_cwd}.\n\n{prompt}")
             if tools == "write":
                 flags, run_in = ["--mode", "accept-edits"], tools_cwd
             else:
                 _write_agy_hook(workdir, tools)
                 if tools == "read":
                     flags = ["--add-dir", tools_cwd]
-                    text = (f"{CAVEMAN_SYSTEM}\n\nThe working folder is {tools_cwd}. Relative "
-                            f"paths are relative to it.\n\n{prompt}")
             result = subprocess.run(
                 [_AGY_BIN, "-p", text, "--model", model, *flags,
                  "--output-format", "json", "--print-timeout", f"{int(limit)}s"],
@@ -1443,10 +1472,8 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
     exhausted final fallback (spec 002 SC-4, SC-8). The resolved candidate's
     model id (e.g. claude-sonnet-5 / claude-opus-4-8) is passed via --model."""
     _validate_model_name(model)
-    if tools not in ("none", "read", "write"):
-        raise BackendError(f"tools must be none, read or write, not {tools!r}",
-                           backend="anthropic-cli", failure_kind="validation_error")
-    cwd = _resolve_agentic_cwd(cwd, "anthropic-cli")
+    tools_cwd = _tools_cwd(tools, cwd, "anthropic-cli")
+    cwd = tools_cwd or _resolve_agentic_cwd(cwd, "anthropic-cli")
     started = time.perf_counter()
     # Today every Claude call runs with Read, Edit, Write and Bash, whatever the role,
     # so tools=none and tools=write are the same call. Only read narrows it.
@@ -1471,6 +1498,8 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
         "--permission-mode",
         "dontAsk" if read_only else "bypassPermissions",
     ]
+    if read_only:
+        argv.append("--strict-mcp-config")
     if effort:
         if effort not in ("low", "medium", "high", "xhigh", "max"):
             raise BackendError(f"claude has no effort level {effort!r}", backend="anthropic-cli",
