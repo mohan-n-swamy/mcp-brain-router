@@ -1260,7 +1260,44 @@ def main():
     parser.add_argument(
         "--version", action="version", version=f"mcp-brain-router {__version__}"
     )
-    parser.parse_args()
+    # Scripts and scheduled jobs cannot call an MCP tool, so the same role walk is
+    # reachable from the shell: `mcp-brain-router delegate --role simple --prompt-file f`.
+    sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser("roles", help="print the roles table as JSON")
+    d = sub.add_parser("delegate", help="run one role and print the result as JSON; "
+                                        "exit 0 on an answer, 1 otherwise")
+    d.add_argument("--role", required=True, choices=[*ROLES, *ROLE_ALIASES])
+    src = d.add_mutually_exclusive_group()
+    src.add_argument("--prompt")
+    src.add_argument("--prompt-file", help="read the prompt from this file ('-' or omitted: stdin)")
+    d.add_argument("--tools", choices=list(TOOLS_MODES))
+    d.add_argument("--cwd", help="working folder for the worker (default: the current folder)")
+    d.add_argument("--class", dest="data_class", help="data class: personal or orange")
+    d.add_argument("--effort")
+    # A script is no provider. "apple" is in no adversary order, so it skips nothing.
+    d.add_argument("--orchestrator", default="apple", choices=["claude", "grok", "antigravity", "apple"],
+                   help="the provider that wrote the work; the adversary role never answers on it "
+                        "(default: none of the three)")
+    args = parser.parse_args()
+    if args.cmd == "roles":
+        print(json.dumps(_roles_data(), indent=2))
+        return
+    if args.cmd == "delegate":
+        import asyncio
+        import sys
+
+        if args.prompt is not None:
+            prompt = args.prompt
+        elif args.prompt_file and args.prompt_file != "-":
+            with open(args.prompt_file, encoding="utf-8") as fh:
+                prompt = fh.read()
+        else:
+            prompt = sys.stdin.read()
+        result = asyncio.run(_delegate_role_impl(
+            args.role, prompt, args.orchestrator, None, args.cwd or os.getcwd(),
+            effort=args.effort, data_class=args.data_class, tools=args.tools))
+        print(json.dumps(result, indent=2, default=str))
+        sys.exit(0 if (result.get("answer") or "").strip() else 1)
 
     server = create_server()
     logger.info("Starting mcp-brain-router MCP server (stdio transport)...")
