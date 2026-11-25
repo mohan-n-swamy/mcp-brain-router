@@ -61,8 +61,9 @@ def test_pace():
 
 
 def test_pace_simple_moves_a_remote_when_it_leads():
-    order, _ = models("explorer", {"anthropic": Q(weekly=80, left_days=4), "antigravity": Q(weekly=1, left_days=6)})
-    assert order == ["claude-haiku-5-5", "claude-sonnet-5-5"]  # explorer has no other provider: unchanged
+    order, why = models("explorer", {"anthropic": Q(weekly=80, left_days=4), "antigravity": Q(weekly=1, left_days=6)})
+    # explorer is haiku, grok, hydrogen: grok has no reading, so the on-pace hydrogen leads
+    assert order == ["gemini-4-hydrogen", "claude-haiku-5-5", "grok-4.7"] and "anthropic yields" in why
     order, why = models("processor", {"antigravity": Q(weekly=80, left_days=4), "anthropic": Q(weekly=5, left_days=6)})
     assert order[0] == "claude-sonnet-5-5" and "antigravity yields" in why
 
@@ -143,9 +144,9 @@ class Calls:
         return {"content": "answer", "usage": None}
 
     async def walk(self, role, quota_dict, orchestrator="grok", data_class=None):
-        patches = (patch.object(backends, "call_antigravity", lambda p, m, effort=None: self._go(p, m)),
-                   patch.object(backends, "call_anthropic_agentic", lambda p, m, cwd=None, effort=None: self._go(p, m)),
-                   patch.object(backends, "call_grok", lambda p, m, effort=None: self._go(p, m)),
+        patches = (patch.object(backends, "call_antigravity", lambda p, m, effort=None, **kw: self._go(p, m)),
+                   patch.object(backends, "call_anthropic_agentic", lambda p, m, cwd=None, effort=None, **kw: self._go(p, m)),
+                   patch.object(backends, "call_grok", lambda p, m, effort=None, **kw: self._go(p, m)),
                    patch.object(quota, "read", lambda: quota_dict),
                    patch.object(server, "_load_config", return_value=_cfg()))
         for p in patches:
