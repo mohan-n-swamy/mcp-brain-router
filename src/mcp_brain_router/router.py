@@ -314,6 +314,14 @@ def _assignment_for(role: Role, model: str, provider: Provider, mode: str,
                       backend=backend, execute_natively=False, reason=reason)
 
 
+def _tools_kw(tools: str, cwd: Optional[str] = None) -> dict:
+    """Backend kwargs for a tools job; empty for tools=none, so a tools-off call
+    is exactly the call made before `tools` existed."""
+    if tools == "none":
+        return {}
+    return {"tools": tools} if cwd is None else {"tools": tools, "cwd": cwd}
+
+
 async def route_assignment(
     assignment: Assignment,
     prompt: str,
@@ -321,8 +329,12 @@ async def route_assignment(
     mode: str = "chat",
     cwd: Optional[str] = None,
     effort: Optional[str] = None,
+    tools: str = "none",
 ) -> "RouteResult":
     """Execute a non-native assignment through existing tier machinery.
+
+    tools (none, read, write) is the one resolved tools mode; the default is none,
+    so a path that forgets to pass it runs a non-Claude worker tools-off.
 
     cwd is the orchestrator-supplied working directory for agentic subprocesses
     (see route()); threaded through so the worker writes into the caller's repo.
@@ -335,7 +347,8 @@ async def route_assignment(
     if assignment.backend == "anthropic-cli":
         try:
             return await _route_agentic(
-                "anthropic-cli", prompt, assignment.model, config, cwd, effort=effort
+                "anthropic-cli", prompt, assignment.model, config, cwd, effort=effort,
+                **_tools_kw(tools)
             )
         except BackendQuotaError as e:
             return RouteResult(
@@ -366,9 +379,8 @@ async def route_assignment(
                 failure_kind="transient_error",
                 failure_reason=str(e),
             )
-    # Non-Claude workers run tools-off with the prompt inline (lean-rig §6): one
-    # text answer, no file or shell access, whatever `mode` says. A worker that
-    # needs tools runs in the review sandbox (scripts/sandbox.sh), not here.
+    # Non-Claude workers run tools-off unless `tools` says read or write (Grok and
+    # Antigravity only; apple-fm and Ollama always answer text-only).
     provider = assignment.provider
     if provider is Provider.APPLE:
         # apple-fm answers text only (no tools, no cwd). Its failures raise
@@ -391,9 +403,10 @@ async def route_assignment(
     _validate_credentials(name, config)
     try:
         if provider is Provider.XAI:
-            result = await _route_grok(prompt, assignment.model, config, effort=effort)
+            result = await _route_grok(prompt, assignment.model, config, effort=effort,
+                                       **_tools_kw(tools, cwd))
         elif provider is Provider.ANTIGRAVITY:
-            result = await _route_antigravity(prompt, assignment.model)
+            result = await _route_antigravity(prompt, assignment.model, **_tools_kw(tools, cwd))
         elif provider is Provider.KIMI:
             result = await asyncio.to_thread(backends.call_kimi, prompt, assignment.model)
         elif provider is Provider.DEEPSEEK:
@@ -590,6 +603,7 @@ async def _route_agentic(
     config: Config,
     cwd: Optional[str] = None,
     effort: Optional[str] = None,
+    tools: str = "none",
 ) -> RouteResult:
     """Agentic dispatch — the Claude worker only (`cc-brain claude` in the REAL
     cwd, tools on). Non-Claude workers run tools-off (route_assignment). The
@@ -600,7 +614,8 @@ async def _route_agentic(
     if backend_name != "anthropic-cli":  # pragma: no cover - closed set
         raise ValueError(f"No agentic harness for backend: {backend_name}")
     args = (prompt, model, cwd) + ((effort,) if effort else ())
-    result = await asyncio.to_thread(backends.call_anthropic_agentic, *args)
+    result = await asyncio.to_thread(backends.call_anthropic_agentic, *args,
+                                    **_tools_kw(tools))
     return RouteResult(
         content=result["content"],
         model=model,
@@ -741,8 +756,10 @@ async def _route_grok(
     model: str,
     config: Config,
     effort: Optional[str] = None,
+    tools: str = "none",
+    cwd: Optional[str] = None,
 ) -> RouteResult:
-    """Route to Grok (subprocess, tools-off, final message only).
+    """Route to Grok (subprocess, final message only; tools-off unless `tools` says otherwise).
 
     The Grok CLI is subprocess-based (BLOCKING subprocess.run), so offload to a
     worker thread to keep the async MCP stdio event loop responsive (same
@@ -751,7 +768,7 @@ async def _route_grok(
     result = await asyncio.to_thread(
         backends.call_grok,
         prompt,
-        model, effort=effort)
+        model, effort=effort, **_tools_kw(tools, cwd))
 
     return RouteResult(
         content=result["content"],
@@ -763,12 +780,14 @@ async def _route_grok(
     )
 
 
-async def _route_antigravity(prompt: str, model: str) -> RouteResult:
-    """Route to Antigravity (subprocess, tools-off, final message only).
+async def _route_antigravity(prompt: str, model: str, tools: str = "none",
+                             cwd: Optional[str] = None) -> RouteResult:
+    """Route to Antigravity (subprocess, final message only; tools-off unless `tools` says otherwise).
 
     BLOCKING subprocess.run, so offloaded to a worker thread (as _route_grok).
     No effort is passed: the model id's suffix decides it."""
-    result = await asyncio.to_thread(backends.call_antigravity, prompt, model)
+    result = await asyncio.to_thread(backends.call_antigravity, prompt, model,
+                                    **_tools_kw(tools, cwd))
 
     return RouteResult(
         content=result["content"],

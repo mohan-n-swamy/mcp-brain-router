@@ -106,7 +106,7 @@ Roles (generated from `config.ROLES`; edit the table, then re-render this block)
 - coder: Scoped multi-file code changes. Pick when the task changes code in a bounded set of files. Order: claude-sonnet-5-5@xhigh > gemini-4-neon@high > claude-opus-5-5@xhigh.
 - processor: Transform and synthesise documents at volume. Pick when many or long documents go in, one result comes out. Order: gemini-4-hydrogen@high > gemini-4-neon@medium > claude-sonnet-5-5@xhigh > grok-4.7@high.
 - writer: Prose that reasons and argues. Pick when the output is an argument or an essay a person will read. Order: claude-fable-5-2@xhigh > claude-opus-5-5@xhigh > gemini-4-carbon@high.
-- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > claude-sonnet-5-5@high.
+- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > grok-4.7@high > gemini-4-hydrogen@high.
 - qa: Run the checks and the app against the spec; report pass or fail with evidence; change nothing. Pick when work is built and needs an independent check. Order: gemini-4-carbon@high > claude-opus-5-5@xhigh > gemini-4-neon@high.
 - simple: Cheap reads, extraction, classification. Pick when the task is short, self-contained and needs no judgment. Order: apple-fm > gpt-oss:20b > gemini-4-hydrogen@medium > claude-haiku-5-5@medium.
 - worker: alias of processor.
@@ -143,6 +143,14 @@ walks `adversary`).
   read-only sandbox, the shell tool off and the prompt on stdin (an open stdin
   makes `codex exec` wait for EOF). Kimi has no verified tools-off mode, so it
   is skipped.
+- `tools` (`none`, `read`, `write`) is the per-call tools mode; omitted, the role's
+  default applies (coder and qa write, explorer reads, the rest none). It needs `cwd`.
+  Grok and Antigravity honour it; with `write` they edit files and run commands in
+  `cwd` unprompted, on the same terms as the Claude worker. No sandbox or containment
+  is added. With `read`, Grok gets `read_file, list_dir, grep` and Antigravity gets
+  `read_file` only (it has no grep or list tool of its own); Claude gets
+  `Read, Grep, Glob`. The answer's `tools` field says what the backend ran with
+  (Claude with `none` still runs Read, Edit, Write and Bash, so it reads `write`).
 - gpt-oss:20b answers `simple` only, only when `/api/ps` shows it loaded (cold
   means the next tier, no wait), one generation at a time (5 s lock wait), 60 s.
 - A worker that needs tools, and every review courier, runs under
