@@ -64,6 +64,14 @@ async def _run(fakes: Fakes, role, **kw):
         return await _walk(role, **kw)
 
 
+# agy-Claude sits between Fable and Opus in writer; the sibling tests take it out.
+AGYC = "agy-claude-opus-5-5-high"
+
+
+def _agyc_down():
+    return BackendError("down", backend="antigravity", failure_kind="process_error")
+
+
 def _agy_timeout():
     return BackendTransientError("antigravity", "timed out", failure_kind="timeout", elapsed_ms=90_000)
 
@@ -78,10 +86,12 @@ async def test_transient_keeps_sibling():
 
 
 async def test_quota_sibling_ping_ok_runs_the_sibling():
-    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out", reset_at="2026-11-26T00:00:00Z")})
+    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out", reset_at="2026-11-26T00:00:00Z"),
+               AGYC: _agyc_down()})
     out = await _run(f, "writer")
     assert out["model"] == "claude-opus-5-5"
-    assert f.calls == [("claude-fable-5-2", "real"), ("claude-opus-5-5", "ping"), ("claude-opus-5-5", "real")]
+    assert f.calls == [("claude-fable-5-2", "real"), (AGYC, "real"),
+                       ("claude-opus-5-5", "ping"), ("claude-opus-5-5", "real")]
 
 
 async def test_quota_sibling_ping_fails_skips_the_sibling():
@@ -90,7 +100,8 @@ async def test_quota_sibling_ping_fails_skips_the_sibling():
             return BackendError("no answer", backend="anthropic-cli", failure_kind="process_error")
         return "answer"
 
-    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out"), "claude-opus-5-5": opus})
+    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out"), "claude-opus-5-5": opus,
+               AGYC: _agyc_down()})
     out = await _run(f, "writer")
     assert out["model"] == "gemini-4-carbon-high"
     assert ("claude-opus-5-5", "real") not in f.calls
@@ -100,18 +111,19 @@ async def test_quota_sibling_ping_fails_skips_the_sibling():
 async def test_quota_reset_at_is_still_reported():
     f = Fakes({m: BackendQuotaError("anthropic", 429, "out", reset_at="2026-11-26T00:00:00Z")
                for m in ("claude-fable-5-2", "claude-opus-5-5")})
+    f.behaviour["agy-claude-opus-5-5-high"] = BackendQuotaError("antigravity", 429, "out")
     f.behaviour["gemini-4-carbon-high"] = BackendQuotaError("antigravity", 429, "out")
     out = await _run(f, "writer")
     assert out["failure_kind"] == "quota_exhausted" and out["reset_at"]
 
 
 async def test_ping_cached_fresh_ok_skips_the_ping_and_fresh_down_skips_the_model():
-    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out")})
+    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out"), AGYC: _agyc_down()})
     await _run(f, "writer")  # pings Opus, which answers: cached ok
     assert ("claude-opus-5-5", "ping") in f.calls
     f.calls.clear()
     await _run(f, "writer")  # Opus is fresh ok: no ping
-    assert f.calls == [("claude-fable-5-2", "real"), ("claude-opus-5-5", "real")]
+    assert f.calls == [("claude-fable-5-2", "real"), (AGYC, "real"), ("claude-opus-5-5", "real")]
 
     ping.record("claude-opus-5-5", False)  # a fresh "down": skipped without a call
     f.calls.clear()
@@ -126,7 +138,7 @@ async def test_ping_expires(monkeypatch):
     assert ping.fresh("claude-opus-5-5") == "down"
     monkeypatch.setattr(ping, "now", lambda: t0 + ping.TTL_S + 1)
     assert ping.fresh("claude-opus-5-5") is None
-    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out")})
+    f = Fakes({"claude-fable-5-2": BackendQuotaError("anthropic", 429, "out"), AGYC: _agyc_down()})
     out = await _run(f, "writer")  # the stale "down" is ignored: Opus is pinged and runs
     assert out["model"] == "claude-opus-5-5" and ("claude-opus-5-5", "ping") in f.calls
 

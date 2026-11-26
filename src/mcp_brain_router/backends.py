@@ -1164,10 +1164,13 @@ def call_grok(
 # Antigravity (`agy`, subprocess, tools-off, final message only)
 # ============================================================================
 
-# D16 (Mohan, 2026-11-24): Antigravity is the third rig provider. Only Gemini
-# models run here: `agy models` also lists claude-* and gpt-oss ids, and a
-# Claude caller's adversary must never be Claude served through agy (A28).
-_AGY_MODEL_RE = re.compile(r"^gemini-[A-Za-z0-9._-]+$")
+# D16 (Mohan, 2026-11-24): Antigravity is the third rig provider. Gemini ids run
+# as-is. Claude served through agy is named `agy-claude-*` (Mohan, 2026-11-26:
+# spend the Google AI Ultra quota); the prefix is stripped before agy sees it.
+# A Claude caller's adversary must never be Claude served through agy (A28):
+# router.resolve_role skips those ids for it.
+_AGY_MODEL_RE = re.compile(r"^(gemini-|agy-claude-)[A-Za-z0-9._-]+$")
+AGY_PREFIX = "agy-"  # stripped from agy-claude-* ids before agy sees them
 
 # agy has no tools-off flag: in print mode it runs shell commands and writes
 # files unprompted, also outside the working folder, with --sandbox and
@@ -1295,10 +1298,11 @@ def call_antigravity(
     """
     if not _AGY_MODEL_RE.match(model or ""):
         raise BackendError(
-            "antigravity runs gemini-* model ids only",
+            "antigravity runs gemini-* and agy-claude-* model ids only",
             backend="antigravity",
             failure_kind="validation_error",
         )
+    cli_model = model.removeprefix(AGY_PREFIX)  # `model` keeps the router id
 
     tools_cwd = _tools_cwd(tools, cwd, "antigravity")
     started = time.perf_counter()
@@ -1316,7 +1320,7 @@ def call_antigravity(
                 if tools == "read":
                     flags = ["--add-dir", tools_cwd]
             result = subprocess.run(
-                [_AGY_BIN, "-p", text, "--model", model, *flags,
+                [_AGY_BIN, "-p", text, "--model", cli_model, *flags,
                  "--output-format", "json", "--print-timeout", f"{int(limit)}s"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,

@@ -35,7 +35,8 @@ def models(role, quota_dict, name=None):
 def test_ninety_moves_to_end():
     for q in (Q(weekly=93), Q(five=90, weekly=10)):
         order, why = models("thinker", {"anthropic": q})
-        assert order == ["gemini-4-neon", "gemini-4-carbon", "grok-4.7", "claude-fable-5-2", "claude-opus-5-5"]
+        assert order == ["gemini-4-neon", "agy-claude-opus-5-5", "gemini-4-carbon", "grok-4.7",
+                         "claude-fable-5-2", "claude-opus-5-5"]
         assert why.startswith("anthropic moved last:")
     # 89 is not enough
     assert models("thinker", {"anthropic": Q(weekly=89, five=89)}) == ([s.model for s in ROLES["thinker"].slots], None)
@@ -44,8 +45,12 @@ def test_ninety_moves_to_end():
 def test_pace():
     # anthropic: 80% used with 4 of 7 days left (43% elapsed) -> ahead; antigravity on pace
     q = {"anthropic": Q(weekly=80, left_days=4), "antigravity": Q(weekly=10, left_days=6)}
-    order, why = models("coder", q)
-    assert order == ["gemini-4-neon", "claude-sonnet-5-5", "claude-opus-5-5"]
+    # coder leads with agy-Claude (antigravity, on pace): nothing to yield
+    assert models("coder", q) == ([s.model for s in ROLES["coder"].slots], None)
+    # an anthropic-first volume order still yields first place to the on-pace provider
+    slots = [Slot("claude-sonnet-5-5", "xhigh"), Slot("gemini-4-neon", "high"), Slot("claude-opus-5-5", "xhigh")]
+    new, why = quota.reorder(slots, q, "coder", NOW)
+    assert [s.model for s in new] == ["gemini-4-neon", "claude-sonnet-5-5", "claude-opus-5-5"]
     assert "anthropic yields first place" in why
     assert models("worker", q, name="processor")[0][0] == "gemini-4-hydrogen"  # first already antigravity: no change
     for role in ("thinker", "adversary", "writer", "qa"):
@@ -182,8 +187,9 @@ async def test_reports_reorder():
 async def test_walk_pace_picks_the_other_provider_for_volume():
     c = Calls()
     t = time.time()  # the walk reads the real clock
-    out = await c.walk("coder", {"anthropic": Q(weekly=80, left_days=4, now=t), "antigravity": Q(weekly=10, left_days=6, now=t)})
-    assert c.models[0].startswith("gemini-4-neon") and "anthropic yields first place" in out["quota_note"]
+    # antigravity is ahead of pace, anthropic on pace: agy-Claude yields first place to Sonnet
+    out = await c.walk("coder", {"antigravity": Q(weekly=80, left_days=4, now=t), "anthropic": Q(weekly=10, left_days=6, now=t)})
+    assert c.models[0] == "claude-sonnet-5-5" and "antigravity yields first place" in out["quota_note"]
 
 
 @pytest.mark.asyncio
@@ -279,12 +285,14 @@ async def test_quota_ordered_respects_orange_aliases_and_custom_order():
     assert reordered.roles["bulk"][0] == "claude-sonnet-5-5"
 
     # (b) custom config.roles order is kept as the starting order
-    custom = ["grok-4.7", "gemini-4-carbon-high", "claude-opus-5-5", "gemini-4-neon-xhigh", "claude-fable-5-2"]
+    custom = ["grok-4.7", "gemini-4-carbon-high", "claude-opus-5-5", "agy-claude-opus-5-5-high",
+              "gemini-4-neon-xhigh", "claude-fable-5-2"]
     custom_cfg = _cfg()
     custom_cfg.roles["thinker"] = list(custom)
     with patch.object(quota, "read", lambda: {"anthropic": Q(weekly=95, now=t)}):
         note, reordered = server._quota_ordered(custom_cfg, "thinker")
     assert note and note.startswith("anthropic moved last:")
     assert reordered.roles["thinker"] == [
-        "grok-4.7", "gemini-4-carbon-high", "gemini-4-neon-xhigh", "claude-opus-5-5", "claude-fable-5-2"
+        "grok-4.7", "gemini-4-carbon-high", "agy-claude-opus-5-5-high", "gemini-4-neon-xhigh",
+        "claude-opus-5-5", "claude-fable-5-2"
     ]

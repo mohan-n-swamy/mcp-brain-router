@@ -70,7 +70,8 @@ class Provider(str, Enum):
 # Ollama, not Codex). Extend here when a new model family appears — this is the
 # single source of truth for id→provider.
 _MODEL_PROVIDER_PREFIXES = (
-    ("gemini", Provider.ANTIGRAVITY),   # first: no later substring rule may claim a gemini-* id
+    ("agy-claude-", Provider.ANTIGRAVITY),     # first: Claude served through agy bills Antigravity, not Anthropic
+    ("gemini", Provider.ANTIGRAVITY),   # no later substring rule may claim a gemini-* id
     ("gpt-oss", Provider.OLLAMA),
     ("ollama", Provider.OLLAMA),
     ("opus", Provider.ANTHROPIC),
@@ -237,7 +238,8 @@ def resolve_role(
                     logger.warning("deck %s: card %r has no router provider; skipped",
                                    band, card.router_model)
                     continue
-                if provider in exhausted or card.router_model in skipped or (skip_self and provider is orchestrator_owner):
+                if provider in exhausted or card.router_model in skipped or (
+                        skip_self and _same_brain(card.router_model, provider, orchestrator_owner)):
                     continue
                 if not _eligible(role, provider, claude_only):
                     continue
@@ -256,7 +258,7 @@ def resolve_role(
         # Skip-self applies to ADVERSARY only (Mohan, 2026-09-07): a reviewer
         # must come from a different brain than the orchestrator. Every other
         # role walks its configured list in order, own provider included.
-        if skip_self and provider is orchestrator_owner:
+        if skip_self and _same_brain(model, provider, orchestrator_owner):
             continue
         if not _eligible(role, provider, claude_only):
             continue
@@ -270,6 +272,14 @@ def resolve_role(
     raise ValueError(
         f"no eligible candidate for role: {role.value} (all providers exhausted)"
     )
+
+
+def _same_brain(model: str, provider: Provider, owner: Provider) -> bool:
+    """Skip-self compares model families, not billing: Claude served through agy
+    (`agy-claude-*`) is still Claude, so it never reviews a Claude caller (A28)."""
+    if provider is owner:
+        return True
+    return owner is Provider.ANTHROPIC and model.lower().startswith("agy-claude-")
 
 
 def _eligible(role: Role, provider: Provider, claude_only: bool) -> bool:
