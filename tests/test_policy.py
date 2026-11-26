@@ -91,12 +91,12 @@ async def _walk(cfg, role, *, orchestrator="claude", data_class=None, cwd="/tmp"
 
 @pytest.mark.parametrize("role,order", [
     ("simple", ["apple-fm", "gpt-oss:20b", "gemini-4-hydrogen-medium", "claude-haiku-5-5"]),
-    ("worker", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "agy-claude-sonnet-5-5-medium", "claude-sonnet-5-5", "grok-4.7"]),
-    ("coder", ["agy-claude-sonnet-5-5-high", "claude-sonnet-5-5", "gemini-4-neon-high", "claude-opus-5-5"]),
+    ("worker", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "agy-claude-sonnet-5-5-high", "claude-sonnet-5-5", "grok-4.7"]),
+    ("coder", ["agy-claude-sonnet-5-5-high", "claude-sonnet-5-5", "gemini-4-neon-high", "agy-claude-opus-5-5-high", "claude-opus-5-5"]),
     ("adversary", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
-    ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "agy-claude-opus-5-5-high", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
-    ("processor", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "agy-claude-sonnet-5-5-medium", "claude-sonnet-5-5", "grok-4.7"]),
-    ("writer", ["claude-fable-5-2", "agy-claude-opus-5-5-high", "claude-opus-5-5", "gemini-4-carbon-high"]),
+    ("thinker", ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "gemini-4-carbon-high", "grok-4.7"]),
+    ("processor", ["gemini-4-hydrogen-high", "gemini-4-neon-medium", "agy-claude-sonnet-5-5-high", "claude-sonnet-5-5", "grok-4.7"]),
+    ("writer", ["claude-fable-5-2", "claude-opus-5-5", "gemini-4-carbon-high"]),
     ("explorer", ["claude-haiku-5-5", "grok-4.7", "gemini-4-hydrogen-high"]),
     ("qa", ["gemini-4-carbon-high", "agy-claude-opus-5-5-high", "claude-opus-5-5", "gemini-4-neon-high"]),
 ])
@@ -302,9 +302,9 @@ async def test_failed_fable_falls_to_neon_then_opus():
     with (patch.object(backends, "call_anthropic_agentic", side_effect=claude),
           patch.object(backends, "call_antigravity", side_effect=agy)):
         out = await _walk(_cfg(), "thinker", orchestrator="grok")
-    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "agy-claude-opus-5-5-high", "claude-opus-5-5"]
+    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5"]
     assert out["model"] == "claude-opus-5-5"
-    assert out["tried"] == ["anthropic-cli", "antigravity", "antigravity", "anthropic-cli"]
+    assert out["tried"] == ["anthropic-cli", "antigravity", "anthropic-cli"]
 
 
 async def test_claude_quota_marks_fable_only_and_opus_is_pinged():
@@ -320,8 +320,7 @@ async def test_claude_quota_marks_fable_only_and_opus_is_pinged():
           patch.object(backends, "call_grok", side_effect=grok)):
         out = await _walk(_cfg(), "thinker", orchestrator="grok")
     # A quota stop marks Fable only: Opus is pinged (it answers), then runs.
-    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "agy-claude-opus-5-5-high",
-                    "claude-opus-5-5", "claude-opus-5-5"]
+    assert seen == ["claude-fable-5-2", "gemini-4-neon-xhigh", "claude-opus-5-5", "claude-opus-5-5"]
     assert out["model"] == "claude-opus-5-5"
 
 
