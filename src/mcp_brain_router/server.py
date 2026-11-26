@@ -260,6 +260,7 @@ async def _delegate_impl(
                 mode="agentic",
                 cwd=cwd,
                 data_class=data_class,
+                tools="none",  # the legacy complexity path is tools-off (refuses read/write above)
             )
 
         # Load provider configuration only after the caller boundary. Nested
@@ -341,6 +342,7 @@ async def _delegate_impl(
                 mode="agentic",
                 cwd=cwd,
                 data_class=call_class,
+                tools="none",  # the legacy complexity path is tools-off (refuses read/write above)
             )
 
         result = await route(
@@ -734,9 +736,20 @@ async def _delegate_role_impl(
                 last_failure_reason = f"tools={resolved_tools}; {name} answers text only"
                 continue
             call_tools = resolved_tools
+            has_url = re.search(r"https?://", prompt, re.IGNORECASE)
+            # simple stays tools-off so apple-fm and Ollama keep their turn. A prompt that
+            # names a file (the regex, or a local model's own NEEDS_TOOLS verdict) gives the
+            # next tools-capable worker read, never write (Mohan, 2026-11-26: delegated
+            # workers get tools; #31 review findings 3, 4).
+            wants_file = (role_enum is Role.SIMPLE and resolved_tools == "none" and tools is None
+                          and not has_url
+                          and ("needs_tools" in kinds or backends._FM_TOOL_SHAPED.search(prompt)))
+            if wants_file and assignment.provider in (Provider.ANTIGRAVITY, Provider.ANTHROPIC):
+                call_tools = "read"
             if role_enum is Role.SIMPLE and assignment.provider is Provider.ANTIGRAVITY:
-                has_url = re.search(r"https?://", prompt, re.IGNORECASE)
-                if has_url and resolved_tools != "write":
+                # An explicit tools="none" runs agy tools-off even with a URL in the text (#31
+                # review finding 2): only a defaulted call walks on to a web-capable worker.
+                if has_url and tools != "none" and resolved_tools != "write":
                     # agy read allows read_file only (no web access): a URL walks on to Haiku.
                     tried.append(name)
                     failed.add(assignment.model)
@@ -745,11 +758,6 @@ async def _delegate_role_impl(
                     last_failure_kind = "needs_tools"
                     last_failure_reason = "prompt names a URL; Antigravity read mode blocks web access"
                     continue
-                if resolved_tools == "none" and tools is None and backends._FM_TOOL_SHAPED.search(prompt):
-                    # simple stays tools-off so apple-fm and Ollama keep their turn; a prompt
-                    # that names a path gives agy read instead of handing it to Haiku
-                    # (Mohan, 2026-11-26: delegated workers get tools).
-                    call_tools = "read"
             if assignment.provider in suspect and not await sibling_answers(assignment):
                 failed.add(assignment.model)
                 failures.append(f"{name}:ping_failed")
