@@ -229,11 +229,14 @@ def test_adversary_start_per_caller(monkeypatch):
     assert g.model == "claude-opus-5-5"
 
 
-def test_coder_first_entry_is_sonnet_then_neon():
+def test_coder_first_entry_is_agy_sonnet_then_sonnet_then_neon():
     a = resolve_role(Role.CODER, "claude", _cfg(), mode="agentic")
-    assert (a.model, a.backend) == ("claude-sonnet-5-5", "anthropic-cli")
-    b = resolve_role(Role.CODER, "claude", _cfg(), skip_models=["claude-sonnet-5-5"], mode="agentic")
-    assert (b.model, b.backend) == ("gemini-4-neon-high", "antigravity")
+    assert (a.model, a.backend) == ("agy-claude-sonnet-5-5-high", "antigravity")
+    skip = ["agy-claude-sonnet-5-5-high"]
+    b = resolve_role(Role.CODER, "claude", _cfg(), skip_models=skip, mode="agentic")
+    assert (b.model, b.backend) == ("claude-sonnet-5-5", "anthropic-cli")
+    c = resolve_role(Role.CODER, "claude", _cfg(), skip_models=skip + ["claude-sonnet-5-5"], mode="agentic")
+    assert (c.model, c.backend) == ("gemini-4-neon-high", "antigravity")
 
 
 def test_antigravity_is_a_known_caller():

@@ -59,7 +59,7 @@ class Slot:
     @property
     def provider(self) -> str:
         m = self.model.lower()
-        for prefix, name in (("gemini", "antigravity"), ("claude", "anthropic"), ("grok", "grok"),
+        for prefix, name in (("agy-", "antigravity"), ("gemini", "antigravity"), ("claude", "anthropic"), ("grok", "grok"),
                              ("apple", "apple"), ("gpt-oss", "ollama")):
             if m.startswith(prefix):
                 return name
@@ -110,25 +110,35 @@ _TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5
 # Gemini 3.8 Flash retires 2026-11-30, so it is in no order. `worker` is an alias
 # of `coder`. Deadlines: simple 120 s, the rest 15 min, except the slow top-level
 # roles at 30 min.
+# `agy-claude-*` (Mohan, 2026-11-26): Claude served through Antigravity bills the
+# Google AI Ultra quota, not the Claude week. agy tops out at level high (no
+# xhigh/max, no Fable, no Haiku), so it leads where high is enough and sits just
+# before direct Claude elsewhere. Never in adversary: router._same_brain also
+# skips it for a Claude caller (A28).
+_THINKER = _TOP[:2] + (("agy-claude-opus-5-5", "high"),) + _TOP[2:]
+
 ROLES: Dict[str, RoleDef] = {r.name: r for r in (
-    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _TOP, 30 * 60),
+    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _THINKER, 30 * 60),
     _role("adversary", "Review from a different provider than the author",
           "you need a second opinion on work another model wrote", _TOP, 30 * 60),
     _role("coder", "Scoped multi-file code changes", "the task changes code in a bounded set of files",
-          (("claude-sonnet-5-5", "xhigh"), ("gemini-4-neon", "high"), ("claude-opus-5-5", "xhigh")),
+          (("agy-claude-sonnet-5-5", "high"), ("claude-sonnet-5-5", "xhigh"), ("gemini-4-neon", "high"),
+           ("claude-opus-5-5", "xhigh")),
           tools="write"),
     _role("processor", "Transform and synthesise documents at volume", "many or long documents go in, one result comes out",
-          (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("claude-sonnet-5-5", "xhigh"),
-           ("grok-4.7", "high"))),
+          (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("agy-claude-sonnet-5-5", "medium"),
+           ("claude-sonnet-5-5", "xhigh"), ("grok-4.7", "high"))),
     _role("writer", "Prose that reasons and argues", "the output is an argument or an essay a person will read",
-          (("claude-fable-5-2", "xhigh"), ("claude-opus-5-5", "xhigh"), ("gemini-4-carbon", "high")), 30 * 60),
+          (("claude-fable-5-2", "xhigh"), ("agy-claude-opus-5-5", "high"), ("claude-opus-5-5", "xhigh"),
+           ("gemini-4-carbon", "high")), 30 * 60),
     _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
           "you need to find where something is before you change it",
           (("claude-haiku-5-5", "medium"), ("grok-4.7", "high"), ("gemini-4-hydrogen", "high")),
           tools="read"),
     _role("qa", "Run the checks and the app against the spec; report pass or fail with evidence; change nothing",
           "work is built and needs an independent check",
-          (("gemini-4-carbon", "high"), ("claude-opus-5-5", "xhigh"), ("gemini-4-neon", "high")), 30 * 60,
+          (("gemini-4-carbon", "high"), ("agy-claude-opus-5-5", "high"), ("claude-opus-5-5", "xhigh"),
+           ("gemini-4-neon", "high")), 30 * 60,
           tools="write"),
     _role("simple", "Cheap reads, extraction, classification", "the task is short, self-contained and needs no judgment",
           ("apple-fm", "gpt-oss:20b", ("gemini-4-hydrogen", "medium"), ("claude-haiku-5-5", "medium")), 120),
