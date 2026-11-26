@@ -65,7 +65,8 @@ async def _run(fakes: Fakes, role, **kw):
         return await _walk(role, **kw)
 
 
-# agy-Claude sits between Fable and Opus in writer; the sibling tests take it out.
+# writer has no agy-Claude route since 004 (its Opus floor is xhigh); AGYC behaviour
+# stays in these fakes so a future agy route in writer cannot slip past the sibling tests.
 AGYC = "agy-claude-opus-5-5-high"
 
 
@@ -91,8 +92,7 @@ async def test_quota_sibling_ping_ok_runs_the_sibling():
                AGYC: _agyc_down()})
     out = await _run(f, "writer")
     assert out["model"] == "claude-opus-5-5"
-    assert f.calls == [("claude-fable-5-2", "real"), (AGYC, "real"),
-                       ("claude-opus-5-5", "ping"), ("claude-opus-5-5", "real")]
+    assert f.calls == [("claude-fable-5-2", "real"), ("claude-opus-5-5", "ping"), ("claude-opus-5-5", "real")]
 
 
 async def test_quota_sibling_ping_fails_skips_the_sibling():
@@ -124,7 +124,7 @@ async def test_ping_cached_fresh_ok_skips_the_ping_and_fresh_down_skips_the_mode
     assert ("claude-opus-5-5", "ping") in f.calls
     f.calls.clear()
     await _run(f, "writer")  # Opus is fresh ok: no ping
-    assert f.calls == [("claude-fable-5-2", "real"), (AGYC, "real"), ("claude-opus-5-5", "real")]
+    assert f.calls == [("claude-fable-5-2", "real"), ("claude-opus-5-5", "real")]
 
     ping.record("claude-opus-5-5", False)  # a fresh "down": skipped without a call
     f.calls.clear()

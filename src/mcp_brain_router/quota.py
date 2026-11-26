@@ -117,6 +117,38 @@ def _ahead(q, now) -> bool:
     return el is not None and wk is not None and wk > el + PACE_SLACK
 
 
+def _pace_band(q, now) -> int:
+    """-1 under pace by more than PACE_SLACK (room to spend), 1 ahead of pace by more than
+    PACE_SLACK, 0 on pace or no reading (a missing reading never steers routing)."""
+    el = _elapsed(q, now)
+    wk = _num(q.get("weekly")) if isinstance(q, dict) else None
+    if el is None or wk is None:
+        return 0
+    room = el - wk
+    return -1 if room > PACE_SLACK else 1 if room < -PACE_SLACK else 0
+
+
+def order_families(slots, quota: dict, now: float, cost_rank: dict):
+    """004: inside each run of routes of one model family, put the route with the most
+    live headroom first; cost_rank (Antigravity, Grok, Claude) breaks ties. Slots never
+    cross a family boundary, so the role's model order (its quality) is untouched."""
+    out, notes, i = list(slots), [], 0
+    while i < len(out):
+        fam = getattr(out[i], "family", None)
+        j = i + 1
+        while fam and j < len(out) and getattr(out[j], "family", None) == fam:
+            j += 1
+        if j - i > 1:
+            run = out[i:j]
+            best = sorted(run, key=lambda s: (_pace_band(quota.get(s.provider), now),
+                                              cost_rank.get(s.provider, 99)))
+            if best != run:
+                notes.append(f"{fam}: {best[0].provider} before {run[0].provider} (live headroom)")
+                out[i:j] = best
+        i = j
+    return out, notes
+
+
 def reorder(slots, quota: dict, role: str, now: float):
     """Pure. slots: items with a .provider. Returns (new_slots, reason | None). Never removes a slot."""
     saved = []
@@ -124,9 +156,11 @@ def reorder(slots, quota: dict, role: str, now: float):
         saved = list(slots)
         if not saved or not isinstance(quota, dict) or not quota:
             return saved, None
+        from .config import COST_RANK
+        base, fam_notes = order_families(saved, quota, now, COST_RANK)
         hot = {p: r for p, q in quota.items() if p in _FILES and (r := _hot(q))}
-        pinned = {i: s for i, s in enumerate(saved) if s.provider not in _FILES}
-        remote = [s for s in saved if s.provider in _FILES]
+        pinned = {i: s for i, s in enumerate(base) if s.provider not in _FILES}
+        remote = [s for s in base if s.provider in _FILES]
         out_remote = [s for s in remote if s.provider not in hot] + [s for s in remote if s.provider in hot]
         notes = []
         for p, why in hot.items():
@@ -150,7 +184,7 @@ def reorder(slots, quota: dict, role: str, now: float):
                     out_remote.insert(0, out_remote.pop(i))
                     break
         it = iter(out_remote)
-        out = [pinned[i] if i in pinned else next(it) for i in range(len(saved))]
-        return out, "; ".join(notes) or None
+        out = [pinned[i] if i in pinned else next(it) for i in range(len(base))]
+        return out, "; ".join(fam_notes + notes) or None
     except Exception:  # noqa: BLE001 — reorder must never raise
         return saved, None

@@ -52,9 +52,11 @@ def compute_settings() -> Dict[str, str]:
 
 @dataclass(frozen=True)
 class Slot:
-    """One entry of a role's order: a model and the thinking level it runs at."""
+    """One entry of a role's order: a model and the thinking level it runs at.
+    `family` names the model when it can be reached by more than one route (004)."""
     model: str
     level: Optional[str] = None
+    family: Optional[str] = None
 
     @property
     def provider(self) -> str:
@@ -90,9 +92,34 @@ class RoleDef:
 TOOLS_MODES = ("none", "read", "write")
 
 
+# 004 (Mohan, 2026-11-26): one model, many routes. A family is one model at one
+# quality; its routes are listed in cost order (which week he would rather spend:
+# Antigravity, then Grok, then the Claude week) with the highest level each route
+# serves (None = any). A role names a family at a level, and that level is the floor:
+# a route that cannot reach it is not eligible ("never lower the floor"). Per call,
+# quota.reorder puts same-family routes in order of live headroom, cost breaking ties.
+LEVELS = ("low", "medium", "high", "xhigh", "max")
+COST_RANK = {"antigravity": 0, "grok": 1, "anthropic": 2}
+FAMILIES: Dict[str, tuple] = {
+    "claude-sonnet-5-5": (("agy-claude-sonnet-5-5", "high"), ("claude-sonnet-5-5", None)),
+    "claude-opus-5-5": (("agy-claude-opus-5-5", "high"), ("claude-opus-5-5", None)),
+}
+
+
+def _reaches(level: Optional[str], cap: Optional[str]) -> bool:
+    return cap is None or level is None or LEVELS.index(level) <= LEVELS.index(cap)
+
+
+def _expand(entry) -> list:
+    slot = Slot(*entry) if isinstance(entry, tuple) else Slot(entry)
+    routes = FAMILIES.get(slot.model)
+    if not routes:
+        return [slot]
+    return [Slot(model, slot.level, slot.model) for model, cap in routes if _reaches(slot.level, cap)]
+
+
 def _role(name, job, pick_when, slots, deadline_s=15 * 60, tools="none") -> RoleDef:
-    return RoleDef(name, job, pick_when, tuple(Slot(*s) if isinstance(s, tuple) else Slot(s) for s in slots),
-                   tools, deadline_s)
+    return RoleDef(name, job, pick_when, tuple(r for s in slots for r in _expand(s)), tools, deadline_s)
 
 
 _TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5-5", "max"),
@@ -112,36 +139,32 @@ _TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5
 # roles at 30 min. Tools (Mohan, 2026-11-26: delegated workers get tools): every
 # role reads by default, coder and qa write, simple stays tools-off so apple-fm and
 # Ollama keep their turn.
-# `agy-claude-*` (Mohan, 2026-11-26): Claude served through Antigravity bills the
-# Google AI Ultra quota, not the Claude week. agy tops out at level high (no
-# xhigh/max, no Fable, no Haiku), so it leads where high is enough and sits just
-# before direct Claude elsewhere. Never in adversary: router._same_brain also
-# skips it for a Claude caller (A28).
-_THINKER = _TOP[:2] + (("agy-claude-opus-5-5", "high"),) + _TOP[2:]
+# Claude floors (Mohan, 2026-11-26): coder, processor/worker and qa run Claude at
+# high, so the Ultra route (agy, capped at high) is eligible and goes first; writer,
+# thinker and adversary keep xhigh/max, so they reach direct Claude only. A Claude
+# caller's adversary never gets an agy-claude route anyway (router._same_brain, A28).
 
 ROLES: Dict[str, RoleDef] = {r.name: r for r in (
-    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _THINKER, 30 * 60,
+    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _TOP, 30 * 60,
           tools="read"),
     _role("adversary", "Review from a different provider than the author",
           "you need a second opinion on work another model wrote", _TOP, 30 * 60, tools="read"),
     _role("coder", "Scoped multi-file code changes", "the task changes code in a bounded set of files",
-          (("agy-claude-sonnet-5-5", "high"), ("claude-sonnet-5-5", "xhigh"), ("gemini-4-neon", "high"),
-           ("claude-opus-5-5", "xhigh")),
+          (("claude-sonnet-5-5", "high"), ("gemini-4-neon", "high"), ("claude-opus-5-5", "high")),
           tools="write"),
     _role("processor", "Transform and synthesise documents at volume", "many or long documents go in, one result comes out",
-          (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("agy-claude-sonnet-5-5", "medium"),
-           ("claude-sonnet-5-5", "xhigh"), ("grok-4.7", "high")), tools="read"),
+          (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("claude-sonnet-5-5", "high"),
+           ("grok-4.7", "high")), tools="read"),
     _role("writer", "Prose that reasons and argues", "the output is an argument or an essay a person will read",
-          (("claude-fable-5-2", "xhigh"), ("agy-claude-opus-5-5", "high"), ("claude-opus-5-5", "xhigh"),
-           ("gemini-4-carbon", "high")), 30 * 60, tools="read"),
+          (("claude-fable-5-2", "xhigh"), ("claude-opus-5-5", "xhigh"), ("gemini-4-carbon", "high")),
+          30 * 60, tools="read"),
     _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
           "you need to find where something is before you change it",
           (("claude-haiku-5-5", "medium"), ("grok-4.7", "high"), ("gemini-4-hydrogen", "high")),
           tools="read"),
     _role("qa", "Run the checks and the app against the spec; report pass or fail with evidence; change nothing",
           "work is built and needs an independent check",
-          (("gemini-4-carbon", "high"), ("agy-claude-opus-5-5", "high"), ("claude-opus-5-5", "xhigh"),
-           ("gemini-4-neon", "high")), 30 * 60,
+          (("gemini-4-carbon", "high"), ("claude-opus-5-5", "high"), ("gemini-4-neon", "high")), 30 * 60,
           tools="write"),
     _role("simple", "Cheap reads, extraction, classification", "the task is short, self-contained and needs no judgment",
           ("apple-fm", "gpt-oss:20b", ("gemini-4-hydrogen", "medium"), ("claude-haiku-5-5", "medium")), 120),
