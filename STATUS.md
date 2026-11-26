@@ -1,25 +1,24 @@
 # mcp-brain-router — STATUS
 
-**Updated:** 2026-10-23
-**Branch/HEAD:** main @ 9fdb496
-**Tree:** Dirty. README.md, tests/test_effort_plumbing.py and `.session/brain-router-effort-fix/` carry earlier sessions' uncommitted edits, left untouched.
+**Updated:** 2026-11-26
+**Branch/HEAD:** main @ ab97a2d (PRs 30, 31, 32 merged)
+**Hosts:** arunachala at ab97a2d by rig-pull; annapurna `~/work/mcp-brain-router` at ab97a2d (pulled by hand: rig-pull covers the router on consumer Macs only); kedarnath checkout on main. A running MCP server keeps the old code until `/mcp` reconnect.
 
 ## Current goal
 
-Apple's on-device fm model (Mac mini, over ssh) is the first tier of the `simple` role. Watch real traffic before changing anything.
+Spend Google AI Ultra where it meets the job's floor (doctrine A30): one model by several routes, the route with the most live quota room first, Antigravity then Grok then Claude when all are on pace.
 
 ## Latest verified evidence
 
-- Live config: `fm_host = "mini"`, `simple` = apple-fm, the Haiku 4.5 dated ID, grok-4.5 (2026-11: D5 orders now live in `config.DEFAULT_ROLES`); backup `config.toml.bak-20261023-fm` (2026-10-23).
-- Live smoke (`specs/003-apple-fm-simple-tier/smoke.py`): a short extract is answered by fm in ~2.6 s; oversized, unreachable-mini and tool-shaped prompts fall through to haiku with the reason in the audit line's `failures`.
-- Suite: 400 passed, 1 skipped. Rigor: `specs/003-apple-fm-simple-tier/.rigor.md` 36 of 36 green. Cross-provider review by Grok 4.5: one fix (overflow on stdout), the rest recorded in `specs/003-apple-fm-simple-tier/evidence/rigor-standing-review.md`.
-- Commits: `0cfdd49` (tier), `4b2dbc9` (no retry on unreachable, overflow on either stream, `docs/RUNBOOK.md`), `9fdb496` (review evidence). Pushed.
-- Jev `decide` unchanged since 2026-09-18 (`docs/jev-provider.md`); office-email key answers first.
+- `config.FAMILIES`: Sonnet 5.5 and Opus 5.5 by `agy-claude-*` (Antigravity, up to high) and direct. Floors: coder, processor/worker, qa run Claude at high (agy route first); writer, thinker, adversary keep xhigh/max (direct only). Spec and review: `specs/004-model-families/`.
+- Workers read files by default (thinker, adversary, processor, writer); coder and qa write; simple stays tools-off with a read upgrade for file-naming prompts.
+- Suite: 613 passed, 3 failing as on main (live agy lean test, deck provider names, sandbox refusals). Cross-provider reviews by gemini-4-carbon-high on PRs 31 and 32, findings fixed.
+- Live: coder resolved to `agy-claude-sonnet-5-5-high` and finished a two-file job in 41 s; `--effort xhigh` gave `antigravity:below_floor` and direct Sonnet answered; processor read a file through Gemini with `tools: read`.
 
 ## Blocker
 
-None for the fm tier. Known residual: with no tools, fm can invent an answer to a tool-needing prompt that names no path, file or URL (1 of 6 in the probe), and that is logged as an fm success.
+None in the router. Codex refuses every model for the ChatGPT account (plan or login), which keeps the I7 fitness row red.
 
 ## Next action
 
-After a day of real `simple` traffic, read the status-line row `fm(mini): 24h a/b answered` and the audit `failures`, and spot-check fm answers. Jev balance in the status line waits on `brew install --formula steipete/tap/codexbar` (two download failures on 2026-10-23) and a CodexBar sign-in to the TypeSafe console.
+After `/mcp` reconnect, watch a day of `quota_note` in `~/.local/state/brain-router-delegations.jsonl` for family reorders. Follow-ups: A28 by model maker (a Claude session inside agy registers as `antigravity`); a longer per-entry cap for agy on long agentic jobs; a route-id check for `agy-claude-*` against `agy models` in the test suite.
