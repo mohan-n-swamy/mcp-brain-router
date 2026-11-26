@@ -117,13 +117,15 @@ def _ahead(q, now) -> bool:
     return el is not None and wk is not None and wk > el + PACE_SLACK
 
 
-def _pace_band(q, now) -> int:
-    """-1 under pace by more than PACE_SLACK (room to spend), 1 ahead of pace by more than
-    PACE_SLACK, 0 on pace or no reading (a missing reading never steers routing)."""
+def _pace_band(q, now):
+    """-1 under pace by more than PACE_SLACK (room to spend), 0 on pace, 1 ahead of pace,
+    2 hot (>= HOT_PCT weekly or 5h). None when there is no usable reading."""
+    if _hot(q):
+        return 2
     el = _elapsed(q, now)
     wk = _num(q.get("weekly")) if isinstance(q, dict) else None
     if el is None or wk is None:
-        return 0
+        return None
     room = el - wk
     return -1 if room > PACE_SLACK else 1 if room < -PACE_SLACK else 0
 
@@ -133,17 +135,22 @@ def order_families(slots, quota: dict, now: float, cost_rank: dict):
     live headroom first; cost_rank (Antigravity, Grok, Claude) breaks ties. Slots never
     cross a family boundary, so the role's model order (its quality) is untouched."""
     out, notes, i = list(slots), [], 0
+    key_of = lambda s: (getattr(s, "family", None), s.level)
     while i < len(out):
         fam = getattr(out[i], "family", None)
         j = i + 1
-        while fam and j < len(out) and getattr(out[j], "family", None) == fam:
+        while fam and j < len(out) and key_of(out[j]) == key_of(out[i]):
             j += 1
-        if j - i > 1:
-            run = out[i:j]
-            best = sorted(run, key=lambda s: (_pace_band(quota.get(s.provider), now),
-                                              cost_rank.get(s.provider, 99)))
+        run = out[i:j]
+        bands = [_pace_band(quota.get(s.provider), now) for s in run]
+        # A route with no usable reading never moves past one that has a reading:
+        # the run reorders only when every route in it is measured.
+        if len(run) > 1 and None not in bands:
+            band_of = dict(zip((s.id for s in run), bands))
+            best = sorted(run, key=lambda s: (band_of[s.id], cost_rank.get(s.provider, 99)))
             if best != run:
-                notes.append(f"{fam}: {best[0].provider} before {run[0].provider} (live headroom)")
+                k = next(n for n, (a, b) in enumerate(zip(best, run)) if a != b)
+                notes.append(f"{fam}: {best[k].provider} before {run[k].provider} (live headroom)")
                 out[i:j] = best
         i = j
     return out, notes
@@ -185,6 +192,8 @@ def reorder(slots, quota: dict, role: str, now: float):
                     break
         it = iter(out_remote)
         out = [pinned[i] if i in pinned else next(it) for i in range(len(base))]
+        if out == saved:
+            return saved, None  # nothing moved: no note
         return out, "; ".join(fam_notes + notes) or None
     except Exception:  # noqa: BLE001 — reorder must never raise
         return saved, None

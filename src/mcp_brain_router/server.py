@@ -31,7 +31,7 @@ except ImportError:
 
 from . import backends, jev, ping, quota
 from .backends import BackendError  # base of the whole error family (router's subclass it)
-from .config import ROLE_ALIASES, ROLES, TOOLS_MODES, Config, ConfigError, render_roles, slot_level
+from .config import ROLE_ALIASES, ROLES, TOOLS_MODES, Config, ConfigError, below_floor, render_roles, slot_level
 from .policy import ORANGE, deadline_seconds, resolve_class, with_preamble
 from .router import (
     BackendUnavailableError,
@@ -750,6 +750,16 @@ async def _delegate_role_impl(
                     # that names a path gives agy read instead of handing it to Haiku
                     # (Mohan, 2026-11-26: delegated workers get tools).
                     call_tools = "read"
+            if below_floor(assignment.model, effort):
+                # 004: the caller asked for more than this route serves (agy Claude tops out
+                # at high); the floor never bends, so the walk moves on to an uncapped route.
+                tried.append(name)
+                failed.add(assignment.model)
+                kinds.append("below_floor")
+                failures.append(f"{name}:below_floor")
+                last_failure_kind = "below_floor"
+                last_failure_reason = f"effort={effort} is above what {assignment.model} serves"
+                continue
             if assignment.provider in suspect and not await sibling_answers(assignment):
                 failed.add(assignment.model)
                 failures.append(f"{name}:ping_failed")

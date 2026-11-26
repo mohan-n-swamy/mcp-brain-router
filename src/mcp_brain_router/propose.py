@@ -40,15 +40,19 @@ def propose(rows=None) -> dict:
     tb = {r.model: r.value for r in rows if r.measure == TB}
     top = ROLES["thinker"].slots[0].model if "thinker" in ROLES and ROLES["thinker"].slots else None
 
+    def fam(s):
+        """004: a route scores as its model family (agy-claude-sonnet-5-5 is claude-sonnet-5-5)."""
+        return getattr(s, "family", None) or s.model
+
     def score(measure, s):
         """The sort key of a slot, or None when it has no score for the role's measure."""
         if measure is None:
             return None
-        a = aa.get((s.model, s.level or ""))
+        a = aa.get((fam(s), s.level or ""))
         if measure == AA:
             return None if a is None else (a,)
         if measure == TB:
-            return None if s.model not in tb else (tb[s.model], a if a is not None else float("-inf"))
+            return None if fam(s) not in tb else (tb[fam(s)], a if a is not None else float("-inf"))
         return None
 
     out_roles = []
@@ -78,7 +82,7 @@ def propose(rows=None) -> dict:
         last = min(scored_keys) if scored_keys else None
         not_in = []
         if last is not None:
-            in_role = {s.model for s in rd.slots} if measure == TB else {(s.model, s.level or "") for s in rd.slots}
+            in_role = {fam(s) for s in rd.slots} if measure == TB else {(fam(s), s.level or "") for s in rd.slots}
             if measure == TB:
                 cand = {(m, ""): (v, float("-inf")) for m, v in tb.items() if m not in in_role}
             else:
@@ -88,7 +92,7 @@ def propose(rows=None) -> dict:
         out_roles.append({"role": role, "measure": measure, "table": table, "ranked": new,
                           "differs": bool(diffs), "differences": diffs, "notes": notes, "not_in_this_role": not_in})
     have = {r.model for r in rows}
-    missing = sorted({s.model for rd in ROLES.values() for s in rd.slots} - have)
+    missing = sorted({getattr(s, "family", None) or s.model for rd in ROLES.values() for s in rd.slots} - have)
     return {"roles": out_roles, "models_without_any_row": missing,
             "scores_read_dates": sorted({r.read_date for r in rows})}
 

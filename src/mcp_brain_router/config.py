@@ -106,8 +106,23 @@ FAMILIES: Dict[str, tuple] = {
 }
 
 
+ROUTE_CAPS: Dict[str, str] = {m: cap for routes in FAMILIES.values() for m, cap in routes if cap}
+
+
 def _reaches(level: Optional[str], cap: Optional[str]) -> bool:
-    return cap is None or level is None or LEVELS.index(level) <= LEVELS.index(cap)
+    """A capped route needs a known level at or under its cap (agy ids carry the level)."""
+    if cap is None:
+        return True
+    return level in LEVELS and LEVELS.index(level) <= LEVELS.index(cap)
+
+
+def below_floor(model_id: str, effort: Optional[str]) -> bool:
+    """True when a caller's effort asks for more than this route can serve (004: the
+    floor never bends, so a capped route is skipped, not run at its cap)."""
+    if effort not in LEVELS:
+        return False
+    cap = next((c for m, c in ROUTE_CAPS.items() if model_id == m or model_id.startswith(m + "-")), None)
+    return cap is not None and not _reaches(effort, cap)
 
 
 def _expand(entry) -> list:

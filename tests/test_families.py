@@ -59,10 +59,10 @@ def test_more_headroom_wins_over_cost():
     assert out[0].provider == "anthropic" and notes and "anthropic before antigravity" in notes[0]
 
 
-def test_missing_reading_keeps_cost_order():
+def test_missing_reading_keeps_cost_order_review_finding_1():
     out, notes = quota.order_families(run(), {"anthropic": Q(5, 1)}, NOW, COST_RANK)
-    # anthropic has room (band -1), antigravity has no reading (band 0): room wins
-    assert out[0].provider == "anthropic"
+    # antigravity has no reading: nothing reorders, cost order holds (review finding 1)
+    assert out[0].provider == "antigravity" and notes == []
     out, notes = quota.order_families(run(), {}, NOW, COST_RANK)
     assert out[0].provider == "antigravity" and notes == []
 
@@ -78,3 +78,44 @@ def test_reorder_reports_the_family_note():
     q = {"antigravity": Q(80, 6), "anthropic": Q(10, 1)}
     new, why = quota.reorder(ROLES["coder"].slots, q, "coder", NOW)
     assert new[0].id == "claude-sonnet-5-5" and why and "claude-sonnet-5-5:" in why
+
+
+# ---- cross-provider review of #32 (gemini-4-carbon-high), findings 1, 2, 4, 6, 7 ----
+
+def test_unmeasured_route_never_overtakes_a_measured_one():
+    # antigravity ahead of pace, anthropic has no reading: order stays as cost order
+    q = {"antigravity": Q(25, 6.9)}
+    out, notes = quota.order_families(run(), q, NOW, COST_RANK)
+    assert out[0].provider == "antigravity" and notes == []
+
+
+def test_hot_route_is_never_promoted_inside_a_family():
+    q = {"anthropic": {**Q(20, 1), "five_hour": 95}, "antigravity": Q(80, 1)}
+    out, _ = quota.order_families(run(), q, NOW, COST_RANK)
+    assert out[0].provider == "antigravity"
+
+
+def test_reorder_that_moves_nothing_reports_nothing():
+    q = {"anthropic": {**Q(20, 1), "five_hour": 95}, "antigravity": Q(50, 3.5)}
+    new, why = quota.reorder(run(), q, "coder", NOW)
+    assert [s.id for s in new] == [s.id for s in run()] and why is None
+
+
+def test_runs_group_by_family_and_level():
+    slots = [*_expand(("claude-sonnet-5-5", "xhigh")), *_expand(("claude-sonnet-5-5", "medium"))]
+    q = {"antigravity": Q(10, 1), "anthropic": Q(90 - 1, 6)}
+    out, _ = quota.order_families(slots, q, NOW, COST_RANK)
+    assert out[0].id == "claude-sonnet-5-5" and out[0].level == "xhigh"
+
+
+def test_capped_route_needs_a_level():
+    assert [s.id for s in _expand("claude-sonnet-5-5")] == ["claude-sonnet-5-5"]
+
+
+def test_caller_effort_above_the_cap_skips_the_capped_route():
+    from mcp_brain_router.config import below_floor
+    assert below_floor("agy-claude-sonnet-5-5-high", "xhigh")
+    assert below_floor("agy-claude-opus-5-5-high", "max")
+    assert not below_floor("agy-claude-sonnet-5-5-high", "high")
+    assert not below_floor("agy-claude-sonnet-5-5-high", None)
+    assert not below_floor("claude-sonnet-5-5", "max")
