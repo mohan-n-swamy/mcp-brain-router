@@ -139,7 +139,7 @@ async def test_effort_reaches_grok_through_the_role_path(monkeypatch):
     from mcp_brain_router import router as r
     from mcp_brain_router.config import Config
     seen = {}
-    def fake_grok(prompt, model, effort=None):
+    def fake_grok(prompt, model, effort=None, **kw):
         seen["effort"] = effort
         return {"content": "ok", "usage": None}
     monkeypatch.setattr(backends, "call_grok", fake_grok)

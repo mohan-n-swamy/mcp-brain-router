@@ -380,8 +380,8 @@ class TestSC8ExhaustionCascade:
 
 class TestRoleModeResolution:
     @pytest.mark.asyncio
-    async def test_worker_role_runs_grok_tools_off(self):
-        """role=worker: Kimi is refused (tools_unsupported), Grok answers tools-off."""
+    async def test_worker_role_runs_grok_with_read_tools_by_default(self):
+        """role=worker defaults to tools=read: Kimi is skipped (needs_tools), Grok answers with read."""
         config = _agentic_config()
         with (
             patch.object(server, "_load_config", return_value=config),
@@ -392,9 +392,30 @@ class TestRoleModeResolution:
             response = await server._delegate_role_impl("worker", "count", "opus", cwd="/tmp")
         assert response["backend"] == "grok"
         assert response["mode"] == "agentic"
+        assert response["tools"] == "read"
+        assert response["failures"] == ["kimi:needs_tools"]
+        mgrok.assert_called_once()
+        assert mgrok.call_args.kwargs["tools"] == "read" and mgrok.call_args.kwargs["cwd"] == "/tmp"
+
+    @pytest.mark.asyncio
+    async def test_worker_role_with_explicit_tools_none_runs_grok_tools_off(self):
+        """role=worker, tools="none": Kimi is refused (tools_unsupported), Grok answers tools-off."""
+        config = _agentic_config()
+        with (
+            patch.object(server, "_load_config", return_value=config),
+            patch("mcp_brain_router.router.backends.call_grok") as mgrok,
+            patch.object(server, "_log_delegation"),
+        ):
+            mgrok.return_value = {"content": "15", "usage": None}
+            response = await server._delegate_role_impl("worker", "count", "opus", cwd="/tmp",
+                                                        tools="none")
+        assert response["backend"] == "grok"
+        assert response["mode"] == "agentic"
+        assert response["tools"] == "none"
         assert response["failures"] == ["kimi:configuration_error"] or \
             response["failures"] == ["kimi:tools_unsupported"]
         mgrok.assert_called_once()
+        assert mgrok.call_args.kwargs.get("tools", "none") == "none"
 
     @pytest.mark.asyncio
     async def test_agentic_role_without_cwd_fails_loud(self):
@@ -411,7 +432,24 @@ class TestRoleModeResolution:
         mgrok.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_adversary_role_runs_codex_tools_off(self, tmp_path):
+    async def test_adversary_role_defaults_to_read_so_codex_is_skipped(self, tmp_path):
+        config = Config(codex_enabled=True, roles={"adversary": ["gpt-6.1-sol", "claude-opus-5-5"]})
+        with (
+            patch.object(server, "_load_config", return_value=config),
+            patch("mcp_brain_router.router.backends.call_codex") as mcodex,
+            patch("mcp_brain_router.router.backends.call_anthropic_agentic",
+                  return_value={"content": "refuted", "usage": None}),
+            patch.object(server, "_log_delegation"),
+        ):
+            response = await server._delegate_role_impl(
+                "adversary", "refute", "grok", cwd=str(tmp_path)
+            )
+        assert response["backend"] == "anthropic-cli" and response["tools"] == "read"
+        assert "codex:needs_tools" in response["failures"]
+        mcodex.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_adversary_role_with_explicit_tools_none_runs_codex_tools_off(self, tmp_path):
         config = Config(codex_enabled=True, roles={"adversary": ["gpt-6.1-sol", "claude-opus-5-5"]})
         with (
             patch.object(server, "_load_config", return_value=config),
@@ -420,7 +458,7 @@ class TestRoleModeResolution:
         ):
             mcodex.return_value = {"content": "refuted", "usage": None}
             response = await server._delegate_role_impl(
-                "adversary", "refute", "opus", cwd=str(tmp_path)
+                "adversary", "refute", "opus", cwd=str(tmp_path), tools="none"
             )
         assert response["backend"] == "codex"
         assert response["mode"] == "agentic"

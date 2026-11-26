@@ -201,7 +201,7 @@ async def test_delegate_role_walks_quota_through_full_worker_cascade(role_config
         ) as route_call,
     ):
         response = await server._delegate_role_impl(
-            "worker", "build", "kimi", cwd="/tmp"
+            "worker", "build", "kimi", cwd="/tmp", tools="none"
         )
 
     assert response["answer"] == "built"
@@ -242,7 +242,7 @@ async def test_delegate_role_advances_on_non_quota_error(role_config):
         ) as route_call,
     ):
         response = await server._delegate_role_impl(
-            "worker", "build", "opus", cwd="/tmp"
+            "worker", "build", "opus", cwd="/tmp", tools="none"
         )
 
     assert response["answer"] == "built"
@@ -330,7 +330,8 @@ async def test_worker_transient_on_first_provider_fails_over_to_next(role_config
             side_effect=[first_transient, grok_ok],
         ),
     ):
-        response = await server._delegate_role_impl("worker", "build", "opus", cwd="/tmp")
+        response = await server._delegate_role_impl("worker", "build", "opus", cwd="/tmp",
+                                                    tools="none")
     assert response["exhausted"] is False  # a later provider succeeded
     assert response["backend"] == "grok"
     assert response["answer"] == "PONG"
@@ -358,7 +359,7 @@ async def test_all_role_candidates_exhausted_keeps_quota_contract(role_config):
         ),
     ):
         response = await server._delegate_role_impl(
-            "worker", "build", "kimi", cwd="/tmp"
+            "worker", "build", "kimi", cwd="/tmp", tools="none"
         )
     assert response["exhausted"] is True
     assert response["failure_kind"] == "quota_exhausted"

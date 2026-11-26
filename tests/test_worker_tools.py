@@ -80,14 +80,15 @@ def test_tools_argument_rejected_at_each_backend_too(bad, tmp_path):
 
 def test_tools_argument_defaults_come_from_the_role_table():
     assert {n: r.tools for n, r in ROLES.items()} == {
-        "thinker": "none", "adversary": "none", "coder": "write", "processor": "none",
-        "writer": "none", "explorer": "read", "qa": "write", "simple": "none"}
+        "thinker": "read", "adversary": "read", "coder": "write", "processor": "read",
+        "writer": "read", "explorer": "read", "qa": "write", "simple": "none"}
     assert "worker" not in ROLES and DEFAULT_ROLES["worker"] == DEFAULT_ROLES["processor"]
 
 
 @pytest.mark.parametrize(("role", "passed", "expected"), [
     ("coder", None, "write"), ("qa", None, "write"), ("explorer", None, "read"),
-    ("worker", None, "none"), ("thinker", None, "none"),
+    ("worker", None, "read"), ("thinker", None, "read"), ("adversary", None, "read"),
+    ("writer", None, "read"), ("simple", None, "none"), ("worker", "none", "none"),
     ("worker", "write", "write"), ("coder", "none", "none"), ("explorer", "write", "write"),
 ])
 async def test_tools_argument_resolved_once_and_passed_down(role, passed, expected):
@@ -146,24 +147,60 @@ def test_tools_off_unchanged_a_call_that_does_not_pass_tools_is_tools_off():
     assert inspect.signature(route_assignment).parameters["tools"].default == "none"
 
 
-async def test_tools_off_unchanged_walk_with_no_tools_argument_calls_backends_bare():
+async def test_tools_off_unchanged_walk_with_explicit_tools_none_calls_backends_bare():
+    cfg = Config(grok_enabled=True, roles={"processor": ["grok-4.7"]})
+    with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_grok", return_value={"content": "ok"}) as g:
+        r = await server._delegate_role_impl("worker", "x", "claude", mode="agentic", cwd="/tmp",
+                                             data_class="personal", tools="none")
+    assert g.call_args.kwargs.get("tools", "none") == "none" and "cwd" not in g.call_args.kwargs
+    assert r["tools"] == "none"
+
+
+async def test_tools_off_unchanged_explicit_tools_none_runs_antigravity_tools_off():
+    cfg = Config(roles={"processor": ["gemini-4-hydrogen-medium"]})
+    with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_antigravity",
+                  return_value={"content": "ok", "usage": None}) as agy:
+        r = await server._delegate_role_impl("worker", "x", "claude", mode="agentic", cwd="/tmp",
+                                             data_class="personal", tools="none")
+    assert agy.call_args.kwargs.get("tools", "none") == "none" and "cwd" not in agy.call_args.kwargs
+    assert r["backend"] == "antigravity" and r["tools"] == "none"
+
+
+async def test_worker_with_no_tools_argument_passes_read_and_cwd_to_backends():
     cfg = Config(grok_enabled=True, roles={"processor": ["grok-4.7"]})
     with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
             patch("mcp_brain_router.router.backends.call_grok", return_value={"content": "ok"}) as g:
         r = await server._delegate_role_impl("worker", "x", "claude", mode="agentic", cwd="/tmp",
                                              data_class="personal")
-    assert g.call_args.kwargs.get("tools", "none") == "none" and "cwd" not in g.call_args.kwargs
-    assert r["tools"] == "none"
+    assert g.call_args.kwargs["tools"] == "read" and g.call_args.kwargs["cwd"] == "/tmp"
+    assert r["tools"] == "read"
 
 
-async def test_tools_off_unchanged_simple_prompt_naming_a_path_still_skips_antigravity():
+async def test_simple_prompt_naming_a_path_runs_antigravity_with_read_not_haiku():
     cfg = Config(roles={"simple": ["gemini-4-hydrogen-medium", "claude-haiku-5-5"]})
     agentic = MagicMock(return_value={"content": "from claude", "usage": None})
     with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
-            patch("mcp_brain_router.router.backends.call_antigravity") as agy, \
+            patch("mcp_brain_router.router.backends.call_antigravity",
+                  return_value={"content": "from agy", "usage": None}) as agy, \
             patch("mcp_brain_router.router.backends.call_anthropic_agentic", agentic):
-        r = await server._delegate_role_impl("simple", "summarise /tmp/notes.md", "grok", mode="agentic",
+        r = await server._delegate_role_impl("simple", "summarise ./notes.md", "grok", mode="agentic",
                                              cwd="/tmp", data_class="personal")
+    agentic.assert_not_called()
+    assert agy.call_args.kwargs == {"tools": "read", "cwd": "/tmp"}
+    assert r["backend"] == "antigravity" and r["tools"] == "read"
+    assert "antigravity:needs_tools" not in r["failures"]
+
+
+async def test_simple_prompt_naming_a_url_still_skips_antigravity_with_needs_tools():
+    cfg = Config(roles={"simple": ["gemini-4-hydrogen-medium", "claude-haiku-5-5"]})
+    with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_antigravity") as agy, \
+            patch("mcp_brain_router.router.backends.call_anthropic_agentic",
+                  return_value={"content": "from claude", "usage": None}):
+        r = await server._delegate_role_impl("simple", "summarise https://example.com/a", "grok",
+                                             mode="agentic", cwd="/tmp", data_class="personal")
     agy.assert_not_called()
     assert r["backend"] == "anthropic-cli" and "antigravity:needs_tools" in r["failures"]
 
@@ -533,3 +570,41 @@ async def test_simple_url_prompt_skips_antigravity_in_read_mode():
         )
     agy.assert_not_called()
     assert r["backend"] == "anthropic-cli" and "antigravity:needs_tools" in r["failures"]
+
+
+# ---- #31 cross-provider review (gemini-4-carbon-high), findings 2, 3, 4 ----
+
+async def test_explicit_tools_none_with_a_url_runs_antigravity_tools_off():
+    cfg = Config(roles={"simple": ["gemini-4-hydrogen-medium", "claude-haiku-5-5"]})
+    agentic = MagicMock(return_value={"content": "from claude", "usage": None})
+    with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_antigravity",
+                  return_value={"content": "error", "usage": None}) as agy, \
+            patch("mcp_brain_router.router.backends.call_anthropic_agentic", agentic):
+        r = await server._delegate_role_impl("simple", "Classify log: GET https://example.com 500", "grok",
+                                             mode="agentic", cwd="/tmp", data_class="personal", tools="none")
+    agentic.assert_not_called()
+    assert agy.called and agy.call_args.kwargs == {} and r["tools"] == "none"
+
+
+async def test_simple_path_prompt_that_falls_to_haiku_gets_read_not_write():
+    cfg = Config(roles={"simple": ["claude-haiku-5-5"]})
+    agentic = MagicMock(return_value={"content": "from claude", "usage": None})
+    with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_anthropic_agentic", agentic):
+        r = await server._delegate_role_impl("simple", "summarise ./untrusted.md", "grok", mode="agentic",
+                                             cwd="/tmp", data_class="personal")
+    assert agentic.call_args.kwargs.get("tools") == "read" and r["tools"] == "read"
+
+
+async def test_a_local_needs_tools_verdict_gives_antigravity_read_even_when_the_regex_misses():
+    cfg = Config(roles={"simple": ["apple-fm", "gemini-4-hydrogen-medium"]}, fm_host="fm-host")
+    with patch.object(server, "_load_config", return_value=cfg), patch.object(server, "_log_delegation"), \
+            patch("mcp_brain_router.router.backends.call_fm",
+                  side_effect=backends.BackendError("NEEDS_TOOLS", backend="apple-fm",
+                                                    failure_kind="needs_tools")), \
+            patch("mcp_brain_router.router.backends.call_antigravity",
+                  return_value={"content": "12 rows", "usage": None}) as agy:
+        r = await server._delegate_role_impl("simple", "Count rows in scores.tsv", "grok", mode="agentic",
+                                             cwd="/tmp", data_class="personal")
+    assert agy.call_args.kwargs == {"tools": "read", "cwd": "/tmp"} and r["tools"] == "read"

@@ -109,7 +109,9 @@ _TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5
 # adversary never resolves to the caller's own provider (router.resolve_role).
 # Gemini 3.8 Flash retires 2026-11-30, so it is in no order. `worker` is an alias
 # of `coder`. Deadlines: simple 120 s, the rest 15 min, except the slow top-level
-# roles at 30 min.
+# roles at 30 min. Tools (Mohan, 2026-11-26: delegated workers get tools): every
+# role reads by default, coder and qa write, simple stays tools-off so apple-fm and
+# Ollama keep their turn.
 # `agy-claude-*` (Mohan, 2026-11-26): Claude served through Antigravity bills the
 # Google AI Ultra quota, not the Claude week. agy tops out at level high (no
 # xhigh/max, no Fable, no Haiku), so it leads where high is enough and sits just
@@ -118,19 +120,20 @@ _TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5
 _THINKER = _TOP[:2] + (("agy-claude-opus-5-5", "high"),) + _TOP[2:]
 
 ROLES: Dict[str, RoleDef] = {r.name: r for r in (
-    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _THINKER, 30 * 60),
+    _role("thinker", "Plan, decide, design", "the answer is a decision, a plan or a design", _THINKER, 30 * 60,
+          tools="read"),
     _role("adversary", "Review from a different provider than the author",
-          "you need a second opinion on work another model wrote", _TOP, 30 * 60),
+          "you need a second opinion on work another model wrote", _TOP, 30 * 60, tools="read"),
     _role("coder", "Scoped multi-file code changes", "the task changes code in a bounded set of files",
           (("agy-claude-sonnet-5-5", "high"), ("claude-sonnet-5-5", "xhigh"), ("gemini-4-neon", "high"),
            ("claude-opus-5-5", "xhigh")),
           tools="write"),
     _role("processor", "Transform and synthesise documents at volume", "many or long documents go in, one result comes out",
           (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("agy-claude-sonnet-5-5", "medium"),
-           ("claude-sonnet-5-5", "xhigh"), ("grok-4.7", "high"))),
+           ("claude-sonnet-5-5", "xhigh"), ("grok-4.7", "high")), tools="read"),
     _role("writer", "Prose that reasons and argues", "the output is an argument or an essay a person will read",
           (("claude-fable-5-2", "xhigh"), ("agy-claude-opus-5-5", "high"), ("claude-opus-5-5", "xhigh"),
-           ("gemini-4-carbon", "high")), 30 * 60),
+           ("gemini-4-carbon", "high")), 30 * 60, tools="read"),
     _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
           "you need to find where something is before you change it",
           (("claude-haiku-5-5", "medium"), ("grok-4.7", "high"), ("gemini-4-hydrogen", "high")),

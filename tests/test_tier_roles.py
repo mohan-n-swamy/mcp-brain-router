@@ -23,7 +23,7 @@ async def test_tier_walks_role_list(tier, role):
         response = await server._delegate_impl(tier, "p", cwd="/tmp")
     route_call.assert_not_awaited()
     role_call.assert_awaited_once_with(role, "p", "claude", mode="agentic", cwd="/tmp",
-                                       data_class="personal")
+                                       data_class="personal", tools="none")
     assert response["answer"] == "ok"
 
 
@@ -54,7 +54,7 @@ async def test_orange_adversarial_tier_walks_the_adversary_role():
         await server._delegate_impl("adversarial", "p", cwd="/tmp", data_class="orange")
     route_call.assert_not_awaited()
     role_call.assert_awaited_once_with("adversary", "p", "claude", mode="agentic", cwd="/tmp",
-                                       data_class="orange")
+                                       data_class="orange", tools="none")
 
 
 @pytest.mark.asyncio

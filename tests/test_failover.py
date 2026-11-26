@@ -60,7 +60,8 @@ async def _run(role_config, side_effect, role="worker", orchestrator="opus"):
             side_effect=side_effect,
         ) as route_call,
     ):
-        response = await server._delegate_role_impl(role, "build", orchestrator, cwd="/tmp")
+        response = await server._delegate_role_impl(role, "build", orchestrator, cwd="/tmp",
+                                                     tools="none")
     return response, route_call
 
 

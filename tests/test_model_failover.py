@@ -29,7 +29,8 @@ def _cfg() -> Config:
 
 async def _walk(role, orchestrator="grok"):
     with patch.object(server, "_load_config", return_value=_cfg()):
-        return await server._delegate_role_impl(role, "the task", orchestrator, cwd="/tmp")
+        return await server._delegate_role_impl(role, "the task", orchestrator, cwd="/tmp",
+                                                     tools="none")
 
 
 def _is_ping(prompt: str) -> bool:
@@ -53,9 +54,9 @@ class Fakes:
         return {"content": b if isinstance(b, str) and b != "answer" else "answer", "usage": None}
 
     def install(self):
-        return (patch.object(backends, "call_antigravity", lambda p, m, effort=None: self._go(p, m)),
-                patch.object(backends, "call_anthropic_agentic", lambda p, m, cwd=None, effort=None: self._go(p, m)),
-                patch.object(backends, "call_grok", lambda p, m, effort=None: self._go(p, m)))
+        return (patch.object(backends, "call_antigravity", lambda p, m, effort=None, **kw: self._go(p, m)),
+                patch.object(backends, "call_anthropic_agentic", lambda p, m, cwd=None, effort=None, **kw: self._go(p, m)),
+                patch.object(backends, "call_grok", lambda p, m, effort=None, **kw: self._go(p, m)))
 
 
 async def _run(fakes: Fakes, role, **kw):
@@ -166,11 +167,11 @@ async def test_last_entry_reserved(monkeypatch):
         spend("ollama", burn=False)
         raise BackendError("unreachable", backend="ollama", failure_kind="unreachable")
 
-    def agy(prompt, model, effort=None):
+    def agy(prompt, model, effort=None, **kw):
         spend("agy")
         raise BackendTransientError("antigravity", "timed out", failure_kind="timeout")
 
-    def claude(prompt, model, cwd=None, effort=None):
+    def claude(prompt, model, cwd=None, effort=None, **kw):
         spend("haiku", burn=False)
         return {"content": "answer", "usage": None}
 

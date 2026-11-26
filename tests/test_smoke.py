@@ -620,7 +620,7 @@ class TestTerminalMetadata:
 
         assert response["backend"] == "anthropic-cli"
         role_call.assert_awaited_once_with(
-            "adversary", "p", "codex", mode="agentic", cwd="/tmp", data_class=None
+            "adversary", "p", "codex", mode="agentic", cwd="/tmp", data_class=None, tools="none"
         )
 
     @pytest.mark.asyncio
