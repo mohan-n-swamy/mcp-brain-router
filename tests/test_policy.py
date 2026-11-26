@@ -254,16 +254,16 @@ async def test_adversarial_tier_sends_the_preamble():
 async def test_walk_passes_failed_backends():
     calls = Calls()
 
-    def agy(prompt, model, effort=None):
+    def agy(prompt, model, effort=None, **kw):
         calls.note("antigravity", prompt)
         return {"content": "   ", "usage": {}}  # empty answer: walk on
 
-    def claude(prompt, model, cwd=None, effort=None):
+    def claude(prompt, model, cwd=None, effort=None, **kw):
         calls.note("claude", prompt)
         raise BackendError("died", backend="anthropic-cli", failure_kind="process_error",
                            elapsed_ms=200_000)
 
-    def grok(prompt, model, effort=None):
+    def grok(prompt, model, effort=None, **kw):
         calls.note("grok", prompt)
         return {"content": "built", "usage": None}
 
@@ -282,13 +282,13 @@ async def test_walk_passes_failed_backends():
 def _two_claude_walk(first_error):
     seen = []
 
-    def claude(prompt, model, cwd=None, effort=None):
+    def claude(prompt, model, cwd=None, effort=None, **kw):
         seen.append(model)
         if model == "claude-fable-5-2":
             raise first_error
         return {"content": "from " + model, "usage": None}
 
-    def agy(prompt, model, effort=None):
+    def agy(prompt, model, effort=None, **kw):
         seen.append(model)
         raise BackendError("down", backend="antigravity", failure_kind="process_error",
                            elapsed_ms=200_000)
@@ -311,7 +311,7 @@ async def test_claude_quota_marks_fable_only_and_opus_is_pinged():
     from mcp_brain_router.backends import BackendQuotaError
     seen, claude, agy = _two_claude_walk(BackendQuotaError("anthropic", 429, "out"))
 
-    def grok(prompt, model, effort=None):
+    def grok(prompt, model, effort=None, **kw):
         seen.append(model)
         return {"content": "grok", "usage": None}
 
@@ -346,12 +346,12 @@ def test_deadlines():
 
 
 async def test_walk_stops_at_the_deadline():
-    def slow_agy(prompt, model, effort=None):
+    def slow_agy(prompt, model, effort=None, **kw):
         time.sleep(0.7)
         raise BackendError("slow", backend="antigravity", failure_kind="process_error",
                            elapsed_ms=200_000)  # not a fast flake: no same-provider retry
 
-    def slow_claude(prompt, model, cwd=None, effort=None):
+    def slow_claude(prompt, model, cwd=None, effort=None, **kw):
         time.sleep(0.7)
         raise BackendError("slow", backend="anthropic-cli", failure_kind="process_error",
                            elapsed_ms=200_000)
@@ -416,20 +416,25 @@ async def test_cold_gpt_oss_means_gemini_then_haiku():
     assert out["model"] == "claude-haiku-5-5"
 
 
-async def test_simple_prompt_naming_a_path_skips_gemini_for_haiku():
-    """agy runs tools-off: a reader prompt that names a file must reach Haiku, which can open it."""
+async def test_simple_prompt_naming_a_path_gives_gemini_read_tools_not_haiku():
+    """agy gets tools=read when a simple prompt names a file and no tools argument was passed."""
     called = []
+
+    def agy(*a, **k):
+        called.append(k)
+        return {"content": "read it via agy", "usage": None}
+
     with (_ollama(_ps([])),
-          patch.object(backends, "call_antigravity",
-                       side_effect=lambda *a, **k: called.append(a) or {"content": "guess", "usage": None}),
+          patch.object(backends, "call_antigravity", side_effect=agy),
           patch.object(backends, "call_anthropic_agentic",
-                       return_value={"content": "read it", "usage": None}),
+                       return_value={"content": "from haiku", "usage": None}) as haiku,
           patch.object(server, "_load_config", return_value=_cfg())):
         out = await server._delegate_role_impl(
             "simple", "Summarize ./notes/report.md in two lines", "claude", cwd="/tmp")
-    assert not called, "Gemini was asked to read a file it cannot open"
-    assert out["model"] == "claude-haiku-5-5" and out["answer"] == "read it"
-    assert "antigravity:needs_tools" in out["failures"]
+    assert len(called) == 1 and called[0]["tools"] == "read" and called[0]["cwd"] == "/tmp"
+    haiku.assert_not_called()
+    assert out["answer"] == "read it via agy" and out["tools"] == "read"
+    assert "antigravity:needs_tools" not in out["failures"]
 
 
 async def test_gpt_oss_warm_answers():
