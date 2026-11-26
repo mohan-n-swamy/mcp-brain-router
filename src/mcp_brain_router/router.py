@@ -70,7 +70,7 @@ class Provider(str, Enum):
 # Ollama, not Codex). Extend here when a new model family appears — this is the
 # single source of truth for id→provider.
 _MODEL_PROVIDER_PREFIXES = (
-    ("agy-", Provider.ANTIGRAVITY),     # first: Claude served through agy bills Antigravity, not Anthropic
+    ("agy-claude-", Provider.ANTIGRAVITY),     # first: Claude served through agy bills Antigravity, not Anthropic
     ("gemini", Provider.ANTIGRAVITY),   # no later substring rule may claim a gemini-* id
     ("gpt-oss", Provider.OLLAMA),
     ("ollama", Provider.OLLAMA),
@@ -279,7 +279,7 @@ def _same_brain(model: str, provider: Provider, owner: Provider) -> bool:
     (`agy-claude-*`) is still Claude, so it never reviews a Claude caller (A28)."""
     if provider is owner:
         return True
-    return owner is Provider.ANTHROPIC and model.lower().startswith("agy-claude")
+    return owner is Provider.ANTHROPIC and model.lower().startswith("agy-claude-")
 
 
 def _eligible(role: Role, provider: Provider, claude_only: bool) -> bool:

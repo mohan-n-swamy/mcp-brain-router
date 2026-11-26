@@ -59,7 +59,7 @@ class Slot:
     @property
     def provider(self) -> str:
         m = self.model.lower()
-        for prefix, name in (("agy-", "antigravity"), ("gemini", "antigravity"), ("claude", "anthropic"), ("grok", "grok"),
+        for prefix, name in (("agy-claude-", "antigravity"), ("gemini", "antigravity"), ("claude", "anthropic"), ("grok", "grok"),
                              ("apple", "apple"), ("gpt-oss", "ollama")):
             if m.startswith(prefix):
                 return name

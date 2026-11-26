@@ -66,3 +66,9 @@ def test_class_orange_never_reaches_agy_claude():
 def test_coder_leads_with_agy_claude():
     a = resolve_role(Role("coder"), "claude", Config(roles=dict(DEFAULT_ROLES)), mode="agentic")
     assert a.model == "agy-claude-sonnet-5-5-high" and a.backend == "antigravity"
+
+
+
+def test_only_agy_claude_takes_the_agy_rule():
+    """Finding 4 (cross-provider review): a stray agy-* id is not claimed by the agy-claude rule."""
+    assert provider_for_model("agy-gpt-oss-120b") is not Provider.ANTIGRAVITY
