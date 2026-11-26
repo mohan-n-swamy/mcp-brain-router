@@ -72,6 +72,19 @@ Route order inside a family is decided per call, from the live quota reading
   (agy) is eligible and goes first. writer and thinker keep `xhigh`/`max` and use direct
   Claude only. This replaces PR #30's hand-placed agy slots, which lowered floors silently.
 
+## Shipped in #32 / deferred
+
+Shipped: FAMILIES, the level floor (also against a caller's `effort`), in-family ordering
+by live headroom then cost, Mohan's floors, propose.py scoring by family.
+Deferred (follow-ups, not in #32):
+- Design point 4, A28 by family maker: the caller is known only by provider
+  (`BRAIN_ROUTER_CALLER`), so a Claude session inside agy registers as `antigravity`
+  (review findings #30-1 and #32-3).
+- Check "every family route id is one its CLI lists": `test_every_gemini_role_id_is_one_agy_lists`
+  still covers gemini-* only; model-watch (dotagents #87) covers agy-claude-* weekly.
+- A longer per-entry cap for agy on long agentic jobs (one large job timed out at 360 s;
+  a typical two-file job took 41 s).
+
 ## Checks
 
 - Every role slot resolves to a family; every family route id is one its CLI lists
