@@ -172,8 +172,21 @@ def order_families(slots, quota: dict, now: float, cost_rank: dict):
         # A route with no usable reading never moves past one that has a reading:
         # the run reorders only when every route in it is measured.
         if len(run) > 1 and None not in bands:
+            def _room(s):
+                q = quota.get(s.provider)
+                if _hot(q):
+                    return float("-inf")
+                el = _elapsed(q, now)
+                wk = _num(q.get("weekly")) if isinstance(q, dict) else None
+                return float("-inf") if el is None or wk is None else el - wk
+            rooms = {s.id: _room(s) for s in run}
+            finite = [r for r in rooms.values() if math.isfinite(r)]
+            wide_gap = len(finite) > 1 and (max(finite) - min(finite)) >= PACE_SLACK
             band_of = dict(zip((s.id for s in run), bands))
-            best = sorted(run, key=lambda s: (band_of[s.id], cost_rank.get(s.provider, 99)))
+            if wide_gap:
+                best = sorted(run, key=lambda s: (1 if band_of[s.id] == 2 else 0, -rooms[s.id], cost_rank.get(s.provider, 99)))
+            else:
+                best = sorted(run, key=lambda s: (band_of[s.id], cost_rank.get(s.provider, 99)))
             if best != run:
                 k = next(n for n, (a, b) in enumerate(zip(best, run)) if a != b)
                 notes.append(f"{fam}: {best[k].provider} before {run[k].provider} (live headroom)")

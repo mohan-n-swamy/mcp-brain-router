@@ -308,3 +308,16 @@ def test_anthropic_dual_pool_prefers_healthier_account(tmp_path):
     assert q["anthropic"]["five_hour"] == 0.0
     assert q["anthropic"]["weekly"] == 76.0
     assert quota._hot(q["anthropic"]) is None
+
+
+def test_order_families_uses_continuous_room_gap():
+    # Both in band 0, but anthropic (+8% room, resets in 1d) beats antigravity (-7% room, resets in 5d) by >=10 pts.
+    from mcp_brain_router import config
+    q = {
+        "anthropic":   {"five_hour": 0.0,  "weekly": 76.0, "weekly_reset_at": NOW + 0.16 * quota.WEEK_S},
+        "antigravity": {"five_hour": 27.0, "weekly": 31.0, "weekly_reset_at": NOW + 0.76 * quota.WEEK_S},
+    }
+    slots = config.ROLES["coder"].slots
+    new_slots, why = quota.reorder(slots, q, "coder", NOW)
+    assert new_slots[0].id == "claude-sonnet-5-5", [s.id for s in new_slots]
+    assert "anthropic before antigravity" in (why or "")
