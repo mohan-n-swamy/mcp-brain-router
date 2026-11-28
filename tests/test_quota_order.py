@@ -294,3 +294,17 @@ async def test_quota_ordered_respects_orange_aliases_and_custom_order():
     assert reordered.roles["thinker"] == [
         "grok-4.7", "gemini-4-carbon-high", "gemini-4-neon-xhigh", "claude-opus-5-5", "claude-fable-5-2"
     ]
+
+
+def test_anthropic_dual_pool_prefers_healthier_account(tmp_path):
+    # Personal 5h is 100% (hot), Orange 5h is 0% (free) -> anthropic must pick Orange and NOT be hot.
+    personal = {"buckets": [{"key": "5h", "pct": 100, "resets_at": NOW + 3600},
+                            {"key": "wk", "pct": 46, "resets_at": NOW + 100000}]}
+    orange = {"buckets": [{"key": "5h", "pct": 0, "resets_at": NOW + 3600},
+                          {"key": "wk", "pct": 76, "resets_at": NOW + 100000}]}
+    (tmp_path / ".anthropic-quota.cache").write_text(json.dumps(personal))
+    (tmp_path / ".anthropic-quota.oh.cache").write_text(json.dumps(orange))
+    q = quota.read(tmp_path, now=NOW)
+    assert q["anthropic"]["five_hour"] == 0.0
+    assert q["anthropic"]["weekly"] == 76.0
+    assert quota._hot(q["anthropic"]) is None

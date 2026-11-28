@@ -67,29 +67,55 @@ _FILES = {"anthropic": (".anthropic-quota.cache", _anthropic),
           "grok": (".grok-quota.cache", _grok)}
 
 
+def _read_one(path: Path, parse, now: float, stale_s: float) -> dict | None:
+    try:
+        age = now - path.stat().st_mtime
+        if age > stale_s:
+            return None
+        buckets = {k: v for k, v in parse(json.loads(path.read_text())).items()
+                   if v[0] is not None and (v[1] is None or (v[1] is not _BAD and v[1] > now))}
+    except Exception:  # noqa: BLE001 — a quota reading must never break a call
+        return None
+    wk, h5 = buckets.get("wk", (None, None)), buckets.get("5h", (None, None))
+    if wk[0] is None and h5[0] is None:
+        return None
+    return {"five_hour": h5[0], "weekly": wk[0], "age_s": age,
+            "weekly_reset_at": wk[1],
+            "weekly_reset_s": None if wk[1] is None else wk[1] - now}
+
+
+def _pool_rank(q: dict, now: float) -> tuple:
+    # Prefer non-hot pool first, then lower pace band, then lower 5h/weekly used%.
+    band = _pace_band(q, now)
+    hot = 1 if _hot(q) else 0
+    return (hot, 99 if band is None else band, q.get("five_hour") or 0.0, q.get("weekly") or 0.0)
+
+
 def read(state_dir=None, now: float | None = None, stale_s: float | None = None) -> dict:
     """{provider: {five_hour, weekly, weekly_reset_s, weekly_reset_at, age_s}}; a provider whose
     file is missing, unreadable, malformed or stale has no entry. A bucket whose reset time has
-    passed is dropped (its percent is from before the reset)."""
+    passed is dropped (its percent is from before the reset).
+    For anthropic, considers both Personal (.anthropic-quota.cache) and Orange (.anthropic-quota.oh.cache)
+    when fresh, returning the healthier pool so anthropic is only marked hot when BOTH pools are hot."""
     now = time.time() if now is None else now
     stale_s = STALE_S if stale_s is None else stale_s
+    try:
+        base = Path(state_dir or STATE_DIR)
+    except Exception:
+        return {}
     out = {}
     for provider, (name, parse) in _FILES.items():
-        try:
-            path = Path(state_dir or STATE_DIR) / name
-            age = now - path.stat().st_mtime
-            if age > stale_s:
-                continue
-            buckets = {k: v for k, v in parse(json.loads(path.read_text())).items()
-                       if v[0] is not None and (v[1] is None or (v[1] is not _BAD and v[1] > now))}
-        except Exception:  # noqa: BLE001 — a quota reading must never break a call
+        candidates = []
+        primary = _read_one(base / name, parse, now, stale_s)
+        if primary is not None:
+            candidates.append(primary)
+        if provider == "anthropic":
+            oh = _read_one(base / ".anthropic-quota.oh.cache", parse, now, stale_s)
+            if oh is not None:
+                candidates.append(oh)
+        if not candidates:
             continue
-        wk, h5 = buckets.get("wk", (None, None)), buckets.get("5h", (None, None))
-        if wk[0] is None and h5[0] is None:
-            continue
-        out[provider] = {"five_hour": h5[0], "weekly": wk[0], "age_s": age,
-                         "weekly_reset_at": wk[1],
-                         "weekly_reset_s": None if wk[1] is None else wk[1] - now}
+        out[provider] = min(candidates, key=lambda q: _pool_rank(q, now))
     return out
 
 
