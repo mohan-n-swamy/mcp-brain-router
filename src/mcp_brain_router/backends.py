@@ -1510,27 +1510,58 @@ def call_anthropic_agentic(prompt: str, model: str, cwd: Optional[str] = None,
                                failure_kind="validation_error")
         argv += ["--effort", effort]
     limit = _timeout(AGENTIC_TIMEOUT_SECONDS)
+    # Dual Claude auth profiles: if caller did not pin CLAUDE_CONFIG_DIR and
+    # ~/.claude-oh has credentials/login, try Orange first then Personal on quota.
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        config_dirs: list[Optional[str]] = [os.environ["CLAUDE_CONFIG_DIR"]]
+    elif os.environ.get("BRAIN_ROUTER_CLAUDE_PROFILES"):
+        config_dirs = [
+            os.path.expanduser(x.strip())
+            for x in os.environ["BRAIN_ROUTER_CLAUDE_PROFILES"].split(",")
+            if x.strip()
+        ]
+    else:
+        oh_dir = os.path.expanduser("~/.claude-oh")
+        personal_dir = os.path.expanduser("~/.claude")
+        if os.path.isfile(os.path.join(oh_dir, ".credentials.json")) or os.path.isfile(os.path.join(oh_dir, ".claude.json")):
+            config_dirs = [oh_dir, personal_dir]
+        else:
+            config_dirs = [None]
+
+    last_quota_err: Optional[Exception] = None
     try:
-        result = subprocess.run(
-            argv,
-            # inherited stdin is the MCP stdio pipe; the CLIs wait on it
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=limit,
-            check=False,
-            cwd=cwd,
-            env=_agentic_cli_env(),
-        )
-        _raise_cli_failure(
-            provider="Anthropic",
-            backend="anthropic-cli",
-            default_msg="cc-brain claude agentic subprocess failed",
-            result=result,
-            started=started,
-        )
-        _content, _usage = _cc_family_output(result.stdout)
-        return {"content": _content, "usage": _usage}
+        for idx, cfg_dir in enumerate(config_dirs):
+            env = _agentic_cli_env()
+            if cfg_dir:
+                env["CLAUDE_CONFIG_DIR"] = cfg_dir
+            result = subprocess.run(
+                argv,
+                # inherited stdin is the MCP stdio pipe; the CLIs wait on it
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=limit,
+                check=False,
+                cwd=cwd,
+                env=env,
+            )
+            try:
+                _raise_cli_failure(
+                    provider="Anthropic",
+                    backend="anthropic-cli",
+                    default_msg="cc-brain claude agentic subprocess failed",
+                    result=result,
+                    started=started,
+                )
+            except BackendQuotaError as exc:
+                last_quota_err = exc
+                if idx + 1 < len(config_dirs):
+                    continue
+                raise
+            _content, _usage = _cc_family_output(result.stdout)
+            return {"content": _content, "usage": _usage}
+        assert last_quota_err is not None
+        raise last_quota_err
     except subprocess.TimeoutExpired:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         raise BackendTransientError(
