@@ -35,10 +35,10 @@ def test_rule_can_disagree_and_volume_roles_skip_the_top_thinker_model():
     rows = [_row("gemini-4-hydrogen", "xhigh", 10, "aa_index_v5"), _row("claude-haiku-5-5", "medium", 90)]
     ex = next(r for r in propose.propose(rows)["roles"] if r["role"] == "explorer")
     # grok@high and hydrogen@high are unscored: each keeps its place
-    assert ex["ranked"] == ["claude-haiku-5-5@medium", "grok-4.7@high", "gemini-4-hydrogen@high"]
-    rows = [_row("gemini-4-hydrogen", "high", 1), _row("gemini-4-neon", "medium", 99)]
+    assert ex["ranked"] == ["claude-haiku-5-5@medium", "gemini-4-hydrogen@high", "grok-4.7@high"]
+    rows = [_row("gemini-4-hydrogen", "high", 99), _row("gemini-4-neon", "medium", 1)]
     pr = next(r for r in propose.propose(rows)["roles"] if r["role"] == "processor")
-    assert pr["ranked"][0] == "gemini-4-neon@medium" and pr["differs"]
+    assert pr["ranked"][0] == "gemini-4-hydrogen@high" and pr["differs"]
 
 
 def test_propose_has_no_write_call():

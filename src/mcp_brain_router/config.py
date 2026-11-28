@@ -137,8 +137,8 @@ def _role(name, job, pick_when, slots, deadline_s=15 * 60, tools="none") -> Role
     return RoleDef(name, job, pick_when, tuple(r for s in slots for r in _expand(s)), tools, deadline_s)
 
 
-_TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("claude-opus-5-5", "max"),
-        ("gemini-4-carbon", "high"), ("grok-4.7", "xhigh"))
+_TOP = (("claude-fable-5-2", "max"), ("gemini-4-neon", "xhigh"), ("gemini-4-carbon", "high"),
+        ("claude-opus-5-5", "max"), ("grok-4.7", "xhigh"))
 
 # THE definition of the roles, in one place: every order, job text, deadline and
 # every string a caller reads (tool description, refusal, README block) comes from
@@ -168,14 +168,14 @@ ROLES: Dict[str, RoleDef] = {r.name: r for r in (
           (("claude-sonnet-5-5", "high"), ("gemini-4-neon", "high"), ("claude-opus-5-5", "high")),
           tools="write"),
     _role("processor", "Transform and synthesise documents at volume", "many or long documents go in, one result comes out",
-          (("gemini-4-hydrogen", "high"), ("gemini-4-neon", "medium"), ("claude-sonnet-5-5", "high"),
+          (("gemini-4-neon", "medium"), ("gemini-4-hydrogen", "high"), ("claude-sonnet-5-5", "high"),
            ("grok-4.7", "high")), tools="read"),
     _role("writer", "Prose that reasons and argues", "the output is an argument or an essay a person will read",
-          (("claude-fable-5-2", "xhigh"), ("claude-opus-5-5", "xhigh"), ("gemini-4-carbon", "high")),
+          (("claude-fable-5-2", "xhigh"), ("gemini-4-carbon", "high"), ("claude-opus-5-5", "xhigh")),
           30 * 60, tools="read"),
     _role("explorer", "Fast read-only search across a repo or sources; returns files, lines, a summary",
           "you need to find where something is before you change it",
-          (("claude-haiku-5-5", "medium"), ("grok-4.7", "high"), ("gemini-4-hydrogen", "high")),
+          (("claude-haiku-5-5", "medium"), ("gemini-4-hydrogen", "high"), ("grok-4.7", "high")),
           tools="read"),
     _role("qa", "Run the checks and the app against the spec; report pass or fail with evidence; change nothing",
           "work is built and needs an independent check",

@@ -101,12 +101,12 @@ delegate(role="adversary", orchestrator="codex", mode="agentic", cwd="/abs/repo"
 Roles (generated from `config.ROLES`; edit the table, then re-render this block):
 
 <!-- roles:start -->
-- thinker: Plan, decide, design. Pick when the answer is a decision, a plan or a design. Order: claude-fable-5-2@max > gemini-4-neon@xhigh > claude-opus-5-5@max > gemini-4-carbon@high > grok-4.7@xhigh.
-- adversary: Review from a different provider than the author. Pick when you need a second opinion on work another model wrote. Order: claude-fable-5-2@max > gemini-4-neon@xhigh > claude-opus-5-5@max > gemini-4-carbon@high > grok-4.7@xhigh.
+- thinker: Plan, decide, design. Pick when the answer is a decision, a plan or a design. Order: claude-fable-5-2@max > gemini-4-neon@xhigh > gemini-4-carbon@high > claude-opus-5-5@max > grok-4.7@xhigh.
+- adversary: Review from a different provider than the author. Pick when you need a second opinion on work another model wrote. Order: claude-fable-5-2@max > gemini-4-neon@xhigh > gemini-4-carbon@high > claude-opus-5-5@max > grok-4.7@xhigh.
 - coder: Scoped multi-file code changes. Pick when the task changes code in a bounded set of files. Order: agy-claude-sonnet-5-5@high > claude-sonnet-5-5@high > gemini-4-neon@high > agy-claude-opus-5-5@high > claude-opus-5-5@high.
-- processor: Transform and synthesise documents at volume. Pick when many or long documents go in, one result comes out. Order: gemini-4-hydrogen@high > gemini-4-neon@medium > agy-claude-sonnet-5-5@high > claude-sonnet-5-5@high > grok-4.7@high.
-- writer: Prose that reasons and argues. Pick when the output is an argument or an essay a person will read. Order: claude-fable-5-2@xhigh > claude-opus-5-5@xhigh > gemini-4-carbon@high.
-- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > grok-4.7@high > gemini-4-hydrogen@high.
+- processor: Transform and synthesise documents at volume. Pick when many or long documents go in, one result comes out. Order: gemini-4-neon@medium > gemini-4-hydrogen@high > agy-claude-sonnet-5-5@high > claude-sonnet-5-5@high > grok-4.7@high.
+- writer: Prose that reasons and argues. Pick when the output is an argument or an essay a person will read. Order: claude-fable-5-2@xhigh > gemini-4-carbon@high > claude-opus-5-5@xhigh.
+- explorer: Fast read-only search across a repo or sources; returns files, lines, a summary. Pick when you need to find where something is before you change it. Order: claude-haiku-5-5@medium > gemini-4-hydrogen@high > grok-4.7@high.
 - qa: Run the checks and the app against the spec; report pass or fail with evidence; change nothing. Pick when work is built and needs an independent check. Order: gemini-4-carbon@high > agy-claude-opus-5-5@high > claude-opus-5-5@high > gemini-4-neon@high.
 - simple: Cheap reads, extraction, classification. Pick when the task is short, self-contained and needs no judgment. Order: apple-fm > gpt-oss:20b > gemini-4-hydrogen@medium > claude-haiku-5-5@medium.
 - worker: alias of processor.

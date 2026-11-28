@@ -51,7 +51,7 @@ def test_pace():
     new, why = quota.reorder(slots, q, "coder", NOW)
     assert [s.model for s in new] == ["gemini-4-neon", "claude-sonnet-5-5", "claude-opus-5-5"]
     assert "anthropic yields first place" in why
-    assert models("worker", q, name="processor")[0][0] == "gemini-4-hydrogen"  # first already antigravity: no change
+    assert models("worker", q, name="processor")[0][0] == "gemini-4-neon"  # first already antigravity: no change
     for role in ("thinker", "adversary", "writer", "qa"):
         assert models(role, q)[1] is None  # below 90: capability order stands
     # within 10 points of pace: no move; unknown reset: rule does not apply

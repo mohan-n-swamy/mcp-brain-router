@@ -507,10 +507,10 @@ def test_antigravity_read_hook_reads_bounded_prefix_and_has_twenty_second_timeou
 def test_explorer_order_and_antigravity_absolute_path_prompt(tmp_path):
     assert [(s.model, s.level) for s in ROLES["explorer"].slots] == [
         ("claude-haiku-5-5", "medium"),
-        ("grok-4.7", "high"),
         ("gemini-4-hydrogen", "high"),
+        ("grok-4.7", "high"),
     ]
-    assert DEFAULT_ROLES["explorer"] == ["claude-haiku-5-5", "grok-4.7", "gemini-4-hydrogen-high"]
+    assert DEFAULT_ROLES["explorer"] == ["claude-haiku-5-5", "gemini-4-hydrogen-high", "grok-4.7"]
 
     real_dir = os.path.realpath(tmp_path)
     for tools in ("read", "write"):
